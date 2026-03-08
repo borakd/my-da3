@@ -1,0 +1,92 @@
+Key: img, Value: tensor([[[[ 0.9529,  0.9529,  0.9529,  ...,  0.9137,  0.9137,  0.9059],
+          [ 0.9529,  0.9529,  0.9529,  ...,  0.9137,  0.9137,  0.9059],
+          [ 0.9529,  0.9529,  0.9529,  ...,  0.9137,  0.9137,  0.9059],
+          ...,
+          [-0.5294, -0.5294, -0.5294,  ..., -0.5373, -0.5373, -0.5373],
+          [-0.5294, -0.5294, -0.5294,  ..., -0.5294, -0.5294, -0.5294],
+          [-0.5294, -0.5294, -0.5294,  ..., -0.5294, -0.5294, -0.5294]],
+
+         [[ 0.9608,  0.9608,  0.9608,  ...,  0.9216,  0.9216,  0.9137],
+          [ 0.9608,  0.9608,  0.9608,  ...,  0.9216,  0.9216,  0.9137],
+          [ 0.9608,  0.9608,  0.9608,  ...,  0.9216,  0.9216,  0.9137],
+          ...,
+          [-0.5137, -0.5137, -0.5137,  ..., -0.5216, -0.5216, -0.5216],
+          [-0.5137, -0.5137, -0.5137,  ..., -0.5137, -0.5137, -0.5137],
+          [-0.5137, -0.5137, -0.5137,  ..., -0.5137, -0.5137, -0.5137]],
+
+         [[ 0.9137,  0.9137,  0.9137,  ...,  0.8588,  0.8588,  0.8510],
+          [ 0.9137,  0.9137,  0.9137,  ...,  0.8588,  0.8588,  0.8510],
+          [ 0.9137,  0.9137,  0.9137,  ...,  0.8588,  0.8588,  0.8510],
+          ...,
+          [-0.5373, -0.5373, -0.5373,  ..., -0.5451, -0.5451, -0.5451],
+          [-0.5373, -0.5373, -0.5373,  ..., -0.5373, -0.5373, -0.5373],
+          [-0.5373, -0.5373, -0.5373,  ..., -0.5373, -0.5373, -0.5373]]]])
+Key: ray_map, Value: tensor([[[[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]],
+
+         [[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]],
+
+         [[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]],
+
+         [[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]],
+
+         [[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]],
+
+         [[nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          ...,
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan],
+          [nan, nan, nan,  ..., nan, nan, nan]]]])
+Key: true_shape, Value: tensor([[512, 512]], dtype=torch.int32)
+Key: idx, Value: 117
+Key: instance, Value: 117
+Key: camera_pose, Value: tensor([[[1., 0., 0., 0.],
+         [0., 1., 0., 0.],
+         [0., 0., 1., 0.],
+         [0., 0., 0., 1.]]])
+Key: img_mask, Value: tensor([True])
+Key: ray_mask, Value: tensor([False])
+Key: update, Value: tensor([True])
+Key: reset, Value: tensor([False])
+
+Key: img, Value.shape: torch.Size([1, 3, 512, 512])
+Key: ray_map, Value.shape: torch.Size([1, 6, 512, 512])
+Key: true_shape, Value.shape: torch.Size([1, 2])
+Key: camera_pose, Value.shape: torch.Size([1, 4, 4])
+Key: img_mask, Value.shape: torch.Size([1])
+Key: ray_mask, Value.shape: torch.Size([1])
+Key: update, Value.shape: torch.Size([1])
+Key: reset, Value.shape: torch.Size([1])
+--------------------------------------------------------------------------------
+
