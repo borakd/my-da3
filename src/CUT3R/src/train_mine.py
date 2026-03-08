@@ -16,6 +16,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Sized
 
+### DA3 IMPORTS ##########################################################################
+import types
+from depth_anything_3.api import DepthAnything3
+from with_cut3r_v1 import get_cut3r_encoder_outputs_from_da3
+##########################################################################################
+
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
@@ -223,6 +229,44 @@ def train(args):
     optimizer, model, data_loader_train = accelerator.prepare(
         optimizer, model, data_loader_train
     )
+
+    # Load DA3 model once per training cycle, keep it fully frozen
+    da3_model = DepthAnything3.from_pretrained(args.da3_model_name_or_path)
+    da3_model.to(device)
+    da3_model.eval()
+    print(f"Loaded DA3 model from {da3_model}")
+    for p in da3_model.parameters():
+        p.requires_grad = False
+
+    base_model = accelerator.unwrap_model(model)
+
+    # Optional: keep original encoder for fallback/debug
+    # base_model._encode_views_original = base_model._encode_views
+
+    def _encode_views_da3(self, views, img_mask=None, ray_mask=None):
+        shape_per_view, feat_per_view, pos_per_view = get_cut3r_encoder_outputs_from_da3(
+            batch=views,
+            da3_model=da3_model,          # preloaded once
+            feat_layers=(39,),
+            da3_size=args.da3_size,
+            device=views[0]["img"].device,
+        )
+
+        # CONTRACT:
+        # shape: tuple/list len V, each [B,2]
+        shape_out = tuple(shape_per_view)
+
+        # feat_ls: list of stages; each stage is tuple/list len V, each [B,N,C]
+        # You currently have one stage only:
+        feat_ls_out = [tuple(feat_per_view)]
+
+        # pos: tuple/list len V, each [B,N,2]
+        pos_out = tuple(pos_per_view)
+
+        return shape_out, feat_ls_out, pos_out
+
+    base_model._encode_views = types.MethodType(_encode_views_da3, base_model)
+
 
     def write_log_stats(epoch, train_stats, test_stats):
         if accelerator.is_main_process:

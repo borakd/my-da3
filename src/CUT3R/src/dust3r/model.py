@@ -771,7 +771,10 @@ class ARCroco3DStereo(CroCoNet):
                 pose_feat_i = self.pose_token.expand(feat_i.shape[0], -1, -1)
             else:
                 pose_feat_i = self.pose_retriever.inquire(global_img_feat_i, mem)
-            pose_pos_i = -torch.ones(
+            # pose_pos_i = -torch.ones(
+            #     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
+            # )
+            pose_pos_i = torch.zeros(
                 feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
             )
         else:
@@ -819,49 +822,13 @@ class ARCroco3DStereo(CroCoNet):
         return res, (state_feat, mem)
 
     def _forward_impl(self, views, ret_state=False):
-        print(f"*"*80 + "\nViews before encoding")
-        for view in views:
-            for key, value in view.items():
-                if isinstance(value, torch.Tensor):
-                    print(f"Key: {key}, type(Value): {type(value)}, Value.shape: {value.shape}")
-                else:
-                    print(f"Key: {key}, type(Value): {type(value)}, Value: {value}")
-            break
-        print(f"*"*80 + "\n")
-        shape, feat_ls, pos = self._encode_views(views)
-        print(f"*"*80 + "\nViews after encoding")
-        for view in views:
-            for key, value in view.items():
-                if isinstance(value, torch.Tensor):
-                    print(f"Key: {key}, type(Value): {type(value)}, Value.shape: {value.shape}")
-                else:
-                    print(f"Key: {key}, type(Value): {type(value)}, Value: {value}")
-            break
-        print(f"*"*80 + "\n")
-
-
-        # Save to text file for debugging
-        with open("encoder_outputs.txt", "w") as f:
-            f.write(f"shape: {shape}\n")
-            f.write(f"feat_ls: {feat_ls}\n")
-            f.write(f"pos: {pos}\n")
-            # And iterate over each to print shapes
-            f.write(f"Length of shape = {len(shape)}\n")
-            f.write(f"Length of feat_ls = {len(feat_ls)}\n")
-            for item in feat_ls:
-                for i in range(len(item)):
-                    f.write(f"feat_ls item[{i}] shape: {item[i].shape}\n")
-            f.write(f"Length of pos = {len(pos)}\n")
-            for i in range(len(pos)):
-                f.write(f"pos item[{i}] shape: {pos[i].shape}\n")
-            f.write("-" * 80 + 2 * "\n")
+        shape, feat_ls, pos = self._encode_views(views) # monkey patched to use DA3 tokens
 
         # feat_ls is a single tuple of length 118. Each tensor has shape (1, 1024, 1024)
         feat = feat_ls[-1]
         # feat[0] are the encoded features of the first input view, this is what needs to be
         # substitude with DA3 transformer tokens.
-        print(f"DEBUG feat[0].shape: {feat[0].shape}")
-        print(f"DEBUG pos[0].shape: {pos[0].shape}")
+
         # State and memory are initialized
         state_feat, state_pos = self._init_state(feat[0], pos[0])
         mem = self.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
@@ -869,12 +836,6 @@ class ARCroco3DStereo(CroCoNet):
         init_mem = mem.clone()
         all_state_args = [(state_feat, state_pos, init_state_feat, mem, init_mem)]
 
-        # Debug prints for state arguments
-        print(f"DEBUG state_feat.shape: {state_feat.shape}")
-        print(f"DEBUG state_pos.shape: {state_pos.shape}")
-        print(f"DEBUG init_state_feat.shape: {init_state_feat.shape}")
-        print(f"DEBUG mem.shape: {mem.shape}")
-        print(f"DEBUG init_mem.shape: {init_mem.shape}")
 
         ress = []
         for i in range(len(views)):
@@ -886,7 +847,10 @@ class ARCroco3DStereo(CroCoNet):
                     pose_feat_i = self.pose_token.expand(feat_i.shape[0], -1, -1)
                 else:
                     pose_feat_i = self.pose_retriever.inquire(global_img_feat_i, mem)
-                pose_pos_i = -torch.ones(
+                # pose_pos_i = -torch.ones(
+                #     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
+                # )
+                pose_pos_i = torch.zeros(
                     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
                 )
             else:
@@ -994,7 +958,7 @@ class ARCroco3DStereo(CroCoNet):
                 # pose_pos_i = -torch.ones(
                 #     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
                 # )
-                pose_pos_i = -torch.zeros(
+                pose_pos_i = torch.zeros(
                     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
                 )
             else:
@@ -1106,7 +1070,10 @@ class ARCroco3DStereo(CroCoNet):
         if self.pose_head_flag:
             global_img_feat_i = self._get_img_level_feat(feat_i)
             pose_feat_i = self.pose_retriever.inquire(global_img_feat_i, mem)
-            pose_pos_i = -torch.ones(
+            # pose_pos_i = -torch.ones(
+            #     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
+            # )
+            pose_pos_i = torch.zeros(
                 feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
             )
         else:
@@ -1218,7 +1185,10 @@ class ARCroco3DStereo(CroCoNet):
                     pose_feat_i = self.pose_token.expand(feat_i.shape[0], -1, -1)
                 else:
                     pose_feat_i = self.pose_retriever.inquire(global_img_feat_i, mem)
-                pose_pos_i = -torch.ones(
+                # pose_pos_i = -torch.ones(
+                #     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
+                # )
+                pose_pos_i = torch.zeros(
                     feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
                 )
             else:

@@ -206,25 +206,19 @@ def get_cut3r_encoder_outputs_from_da3(
     batch: list[dict], CUT3R views from dataloader
     returns: shape, feat_ls, pos   (CUT3R encoder-output contract)
     """
-
-    # Load DA3 model
-    da3_model = DepthAnything3.from_pretrained(da3_model)
-    da3_model.to(device)
-    da3_model.eval()
-    print(f"Loaded DA3 model from {da3_model}")
-
-    # 1) collect CUT3R imgs -> DA3 input format
+    # 1) convert batched npy images back to RGB images for DA3
     # batch[i]["img"]: [B,3,H,W] in [-1,1], usually B=1
     imgs_for_da3 = []
     for view in batch:
         x = view["img"]                      # [B,3,H,W]
+        assert view["img"].shape[0] == 1, "Current DA3 bridge assumes batch_size=1"
         x = x[0].detach().float()            # [3,H,W]
         x = (x + 1.0) / 2.0                  # [0,1]
         x = x.clamp(0, 1)
         x = (x.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")  # HWC uint8
         imgs_for_da3.append(x)
 
-    # 2) run DA3 once on list of views
+    # 2) run DA3 once on list of views (batch)
     pred = da3_model.inference(
         imgs_for_da3,
         ref_view_strategy="first",
@@ -232,31 +226,29 @@ def get_cut3r_encoder_outputs_from_da3(
         process_res=da3_size,
     )
 
-    # 3) pull tokens (example key)
+    # 3) pull tokens from final transformer layer
     tokens = torch.from_numpy(pred.aux[f"feat_layer_{feat_layers[0]}"]).to(device)
     # expected: [V, Ht, Wt, C]
 
     # 4) build CUT3R-style outputs
     V, Ht, Wt, C = tokens.shape
     feat_ls = [tokens[i : i + 1].reshape(1, Ht * Wt, C) for i in range(V)]
-    print(f"len(feat_ls): {len(feat_ls)}")
-    for feat in feat_ls:
-        print(f"feat.shape: {feat.shape}")
 
     ys = torch.arange(Ht, device=tokens.device)
     xs = torch.arange(Wt, device=tokens.device)
     Y, X = torch.meshgrid(ys, xs, indexing="ij")
     p = torch.stack([Y, X], dim=-1).reshape(1, Ht * Wt, 2)
     pos = [p.clone() for _ in range(V)]
-    print(f"len(pos): {len(pos)}")
-    for p in pos:
-        print(f"p.shape: {p.shape}")
 
     # choose shape consistent with token grid / downstream head expectations
-    shape = [torch.tensor([[da3_size, da3_size]], dtype=torch.int32, device=tokens.device) for _ in range(V)]
-    print(f"len(shape): {len(shape)}")
-    for s in shape:
-        print(f"s.shape: {s.shape}")
+    patch = 14
+    H_img, W_img = Ht * patch, Wt * patch
+    assert H_img % patch == 0 and W_img % patch == 0
+
+    shape = [
+        torch.tensor([[H_img, W_img]], dtype=torch.int32, device=tokens.device)
+        for _ in range(V)
+    ]
 
     return shape, feat_ls, pos
 
