@@ -466,7 +466,6 @@ def train_one_epoch(
             if data_iter_step % accum_iter == 0:
                 misc.adjust_learning_rate(optimizer, epoch_f, args)
             if not args.long_context:
-                print(f"DEBUG NOT using long context, batch:{batch}")
                 result = loss_of_one_batch(
                     batch,
                     model,
@@ -476,7 +475,6 @@ def train_one_epoch(
                     use_amp=bool(args.amp),
                 )
             else:
-                print(f"[DEBUG] Using long context, batch: {batch}")
                 result = loss_of_one_batch_tbptt(
                     batch,
                     model,
@@ -630,7 +628,6 @@ def test_one_epoch(
     for _, batch in enumerate(
         metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
     ):
-        print(f"[DEBUG] Testing, batch: {batch}")
         result = loss_of_one_batch(
             batch,
             model,
