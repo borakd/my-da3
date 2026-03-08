@@ -34,3 +34,6 @@ src/debug_main.py
 temp*.png
 /outputs
 .venv/
+
+# Ignore streaming version, takes unnecessary space
+da3_streaming/
