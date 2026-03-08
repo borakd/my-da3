@@ -23,8 +23,8 @@ import torch
 import torch.nn.functional as F
 
 # TODO: fix import paths
-from depth_anything_3.api import DepthAnything3
-from CUT3R.src.dust3r.model import ARCroco3DStereo
+from src.depth_anything_3.api import DepthAnything3
+from src.CUT3R.src.dust3r.model import ARCroco3DStereo
 
 
 def parse_args():
@@ -120,8 +120,9 @@ def save_geometry_outputs(outputs, out_dir):
 
 
 # TODO: should true_size and shape use 504 (DA3 resolution) or 512 (CUT3R) resolution?
-def get_cut3r_shape(size: int = 504):
-    return torch.tensor([[size, size]], dtype=torch.int32)
+def get_cut3r_shape(num_views, size: int = 504):
+    shape = (torch.tensor([[size, size]], dtype=torch.int32),) * num_views
+    return shape
 
 
 def get_cut3r_feat_ls(tokens):
@@ -191,6 +192,74 @@ def get_cut3r_encoder_outputs(da3_tokens, size: int = 504):
     feat_ls = get_cut3r_feat_ls(da3_tokens)
     pos = get_cut3r_pos(da3_tokens)
     return shape, feat_ls, pos
+
+
+# Use this in train_mine.py to replace the entire input preprocessing + encoder phase of CUT3R.
+def get_cut3r_encoder_outputs_from_da3(
+    batch,
+    da3_model="depth-anything/DA3-GIANT-1.1",
+    feat_layers=[39],
+    da3_size=504,
+    device="cuda",
+):
+    """
+    batch: list[dict], CUT3R views from dataloader
+    returns: shape, feat_ls, pos   (CUT3R encoder-output contract)
+    """
+
+    # Load DA3 model
+    da3_model = DepthAnything3.from_pretrained(da3_model)
+    da3_model.to(device)
+    da3_model.eval()
+    print(f"Loaded DA3 model from {da3_model}")
+
+    # 1) collect CUT3R imgs -> DA3 input format
+    # batch[i]["img"]: [B,3,H,W] in [-1,1], usually B=1
+    imgs_for_da3 = []
+    for view in batch:
+        x = view["img"]                      # [B,3,H,W]
+        x = x[0].detach().float()            # [3,H,W]
+        x = (x + 1.0) / 2.0                  # [0,1]
+        x = x.clamp(0, 1)
+        x = (x.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")  # HWC uint8
+        imgs_for_da3.append(x)
+
+    # 2) run DA3 once on list of views
+    pred = da3_model.inference(
+        imgs_for_da3,
+        ref_view_strategy="first",
+        export_feat_layers=feat_layers,
+        process_res=da3_size,
+    )
+
+    # 3) pull tokens (example key)
+    tokens = torch.from_numpy(pred.aux[f"feat_layer_{feat_layers[0]}"]).to(device)
+    # expected: [V, Ht, Wt, C]
+
+    # 4) build CUT3R-style outputs
+    V, Ht, Wt, C = tokens.shape
+    feat_ls = [tokens[i : i + 1].reshape(1, Ht * Wt, C) for i in range(V)]
+    print(f"len(feat_ls): {len(feat_ls)}")
+    for feat in feat_ls:
+        print(f"feat.shape: {feat.shape}")
+
+    ys = torch.arange(Ht, device=tokens.device)
+    xs = torch.arange(Wt, device=tokens.device)
+    Y, X = torch.meshgrid(ys, xs, indexing="ij")
+    p = torch.stack([Y, X], dim=-1).reshape(1, Ht * Wt, 2)
+    pos = [p.clone() for _ in range(V)]
+    print(f"len(pos): {len(pos)}")
+    for p in pos:
+        print(f"p.shape: {p.shape}")
+
+    # choose shape consistent with token grid / downstream head expectations
+    shape = [torch.tensor([[da3_size, da3_size]], dtype=torch.int32, device=tokens.device) for _ in range(V)]
+    print(f"len(shape): {len(shape)}")
+    for s in shape:
+        print(f"s.shape: {s.shape}")
+
+    return shape, feat_ls, pos
+
 
 
 ############################
