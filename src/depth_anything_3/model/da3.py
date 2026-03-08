@@ -149,8 +149,6 @@ class DepthAnything3Net(nn.Module):
         output = self._process_mono_sky_estimation(output)    
 
         # Extract auxiliary features if requested
-        print(f"DEBUG len(aux_feats): {len(aux_feats)}")
-        print(f"DEBUG len(export_feat_layers): {len(export_feat_layers)}")
         output.aux = self._extract_auxiliary_features(aux_feats, export_feat_layers, H, W)
 
         return output
