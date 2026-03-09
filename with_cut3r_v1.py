@@ -119,6 +119,69 @@ def save_geometry_outputs(outputs, out_dir):
     print(f"Saved geometry outputs to {out_dir}")
 
 
+def save_geometry_outputs_cuteanything(outputs, out_dir, start_idx=0):
+    """
+    """
+    import imageio.v2 as iio
+    from src.CUT3R.src.dust3r.utils.camera import pose_encoding_to_camera
+    from src.CUT3R.src.dust3r.post_process import estimate_focal_knowing_depth
+    
+    preds = outputs["pred"]
+    views = outputs.get("views", None)
+
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(f"{out_dir}/pts3d_self", exist_ok=True)
+    os.makedirs(f"{out_dir}/pts3d_other", exist_ok=True)
+    os.makedirs(f"{out_dir}/conf", exist_ok=True)
+    os.makedirs(f"{out_dir}/depth", exist_ok=True)
+    os.makedirs(f"{out_dir}/camera", exist_ok=True)
+    os.makedirs(f"{out_dir}/color", exist_ok=True)
+
+    for i, pred in enumerate(preds):
+        fid = start_idx + i
+
+        if "pts3d_in_self_view" in pred:
+            pself_t = pred["pts3d_in_self_view"]  # [1,H,W,3]
+            pself = pself_t.detach().cpu().numpy()
+            np.save(f"{out_dir}/pts3d_self/{fid:06d}.npy", pself)
+            np.save(f"{out_dir}/depth/{fid:06d}.npy", pself[..., 2])
+
+            B, H, W, _ = pself_t.shape
+            pp = torch.tensor([W // 2, H // 2], device=pself_t.device).float().repeat(B, 1)
+            focal = estimate_focal_knowing_depth(pself_t, pp, focal_mode="weiszfeld")
+
+            intrinsics = torch.eye(3, device=pself_t.device).unsqueeze(0).repeat(B, 1, 1)
+            intrinsics[:, 0, 0] = focal
+            intrinsics[:, 1, 1] = focal
+            intrinsics[:, 0, 2] = pp[:, 0]
+            intrinsics[:, 1, 2] = pp[:, 1]
+
+            if "camera_pose" in pred:
+                c2w = pose_encoding_to_camera(pred["camera_pose"].clone())  # [1,4,4]
+                np.savez(
+                    f"{out_dir}/camera/{fid:06d}.npz",
+                    pose=c2w[0].detach().cpu().numpy(),
+                    intrinsics=intrinsics[0].detach().cpu().numpy(),
+                )
+
+        if "pts3d_in_other_view" in pred:
+            np.save(f"{out_dir}/pts3d_other/{fid:06d}.npy", pred["pts3d_in_other_view"].detach().cpu().numpy())
+
+        if "conf" in pred:
+            np.save(f"{out_dir}/conf/{fid:06d}.npy", pred["conf"].detach().cpu().numpy())
+        elif "conf_self" in pred:
+            np.save(f"{out_dir}/conf/{fid:06d}.npy", pred["conf_self"].detach().cpu().numpy())
+
+        # optional color save from corresponding view
+        if views is not None and i < len(views):
+            img = views[i]["img"]  # [1,3,H,W], normalized [-1,1]
+            rgb = 0.5 * (img[0].permute(1, 2, 0).cpu().numpy() + 1.0)
+            rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+            iio.imwrite(f"{out_dir}/color/{fid:06d}.png", rgb)
+
+    return start_idx + len(preds)
+
+
 # TODO: should true_size and shape use 504 (DA3 resolution) or 512 (CUT3R) resolution?
 def get_cut3r_shape(num_views, size: int = 504):
     shape = (torch.tensor([[size, size]], dtype=torch.int32),) * num_views
@@ -273,29 +336,76 @@ def da3_forward_pass(model, inputs, feat_layers: list[int]):
     return tokens
 
 
-def cut3r_forward_pass(shape, feat_ls, pos, model, device):
+def cut3r_forward_pass(shape, feat_ls, pos, model):
     """Performs a CUT3R memory update using the final-layer transformer tokens from DA3 backbone."""
     # from src.CUT3R.src.dust3r.inference import da3_forward
     outputs, state_args = model.da3_forward(shape, feat_ls, pos, ret_state=True)
     return outputs, state_args
 
 
-def main():
+def cuteanything_inference(args):
+    """Runs CUT3R inference with DA3 encoder and transformer tokens.
+    """
+    # Load frozen DA3 once.
+    da3_model = DepthAnything3.from_pretrained(args.da3_model)
+    da3_model.to(args.device)
+    da3_model.eval()
+    print(f"Loaded DA3 model from {da3_model}")
+
+    # Load frozen CUT3R once from my trained checkpoint.
+    cut3r_model = ARCroco3DStereo.from_pretrained(args.cut3r_model)
+    cut3r_model.to(args.device)
+    cut3r_model.eval()
+    print(f"Loaded CUT3R model from {cut3r_model}")
+
+    # Organize input pairs, robomimic uses jpg
+    inputs = sorted(glob.glob(os.path.join(args.input_path, "*.jpg")))
+    pairs = []
+    for i in range(0, len(inputs) - 1, args.views_per_step):
+        pairs.append(inputs[i:i+args.views_per_step])
+    print(f"Found {len(pairs)} pairs")
+
+
+
+    # Get encoder outputs needed for CUT3R.
+    all_shape, all_feat_ls, all_pos = [], [], []
+    for batch in pairs:
+        shape, feat_ls, pos = get_cut3r_encoder_outputs_from_da3(
+            batch,
+            da3_model,
+            [39],
+            args.da3_size,
+            args.device
+        )
+        all_shape.extend(shape)
+        all_feat_ls.extend(feat_ls)
+        all_pos.extend(pos)
+
+    # Do CUT3R forward after accumulating all DA3 outputs.
+    outputs, state_args = cut3r_forward_pass(
+        all_shape,
+        all_feat_ls,
+        all_pos,
+        cut3r_model
+    )
+    # Finish by returning CUT3R outputs.
+    return outputs, state_args
+
+
+def main_old():
     args = parse_args()
     os.makedirs(args.output_path, exist_ok=True)
 
-    # Load frozen DA3
+    # Load frozen DA3 once
     da3_model = DepthAnything3.from_pretrained(args.da3_model)
     da3_model.to(args.device)
     da3_model.eval()
     print(f"Loaded DA3 model from {args.da3_model}")
 
-    # Load frozen CUT3R
-    # TODO: later run with this unfrozen
+    # Load frozen CUT3R once from my trained checkpoint
     cut3r_model = ARCroco3DStereo.from_pretrained(args.cut3r_model)
     cut3r_model.to(args.device)
-    # cut3r_model.eval()
-    cut3r_model.train()
+    cut3r_model.eval()
     print(f"Loaded CUT3R model from {args.cut3r_model}")
 
     # Preprocess input pairs
@@ -345,6 +455,15 @@ def main():
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(args.device == "cuda")):
                     outputs, state_args = cut3r_forward_pass(shape, feat_ls, pos, cut3r_model, args.device)
         save_geometry_outputs(outputs, args.output_path)
+
+
+def main():
+    args = parse_args()
+    print(f"Arguments: {args}")
+    outputs, state_args = cuteanything_inference(args)
+    save_geometry_outputs(outputs, args.output_path)
+
+    # Visualize in viser.
 
 
 if __name__ == "__main__":

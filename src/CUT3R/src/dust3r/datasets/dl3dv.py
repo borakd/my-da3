@@ -16,6 +16,7 @@ class DL3DV_Multi(BaseMultiViewDataset):
         self.ROOT = ROOT
         self.video = True
         self.max_interval = 20
+        # self.max_interval = 1
         self.is_metric = False
         super().__init__(*args, **kwargs)
 
