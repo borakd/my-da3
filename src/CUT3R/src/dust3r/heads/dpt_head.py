@@ -158,25 +158,7 @@ class DPTPts3dPose(nn.Module):
         head_type = "regression"
         output_width_ratio = 1
 
-        # pts_dpt_args = dict(
-        #     output_width_ratio=output_width_ratio,
-        #     num_channels=pts_channels,
-        #     feature_dim=feature_dim,
-        #     last_dim=last_dim,
-        #     dim_tokens=dim_tokens,
-        #     hooks_idx=hooks_idx,
-        #     head_type=head_type,
-        # )
-        # rgb_dpt_args = dict(
-        #     output_width_ratio=output_width_ratio,
-        #     num_channels=rgb_channels,
-        #     feature_dim=feature_dim,
-        #     last_dim=last_dim,
-        #     dim_tokens=dim_tokens,
-        #     hooks_idx=hooks_idx,
-        #     head_type=head_type,
-        # )
-        patch_size = net.patch_embed.patch_size[0]
+        # patch_size = net.patch_embed.patch_size[0]
         pts_dpt_args = dict(
             output_width_ratio=output_width_ratio,
             num_channels=pts_channels,
@@ -185,7 +167,7 @@ class DPTPts3dPose(nn.Module):
             dim_tokens=dim_tokens,
             hooks_idx=hooks_idx,
             head_type=head_type,
-            patch_size=patch_size,
+            # patch_size=patch_size,
         )
         rgb_dpt_args = dict(
             output_width_ratio=output_width_ratio,
@@ -195,7 +177,7 @@ class DPTPts3dPose(nn.Module):
             dim_tokens=dim_tokens,
             hooks_idx=hooks_idx,
             head_type=head_type,
-            patch_size=patch_size,
+            # patch_size=patch_size,
         )
         if hooks_idx is not None:
             pts_dpt_args.update(hooks=hooks_idx)
