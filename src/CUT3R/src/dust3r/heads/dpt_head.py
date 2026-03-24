@@ -22,6 +22,46 @@ from dust3r.utils.camera import pose_encoding_to_camera, PoseDecoder
 from dust3r.blocks import ConditionModulationBlock
 from torch.utils.checkpoint import checkpoint
 
+from typing import Dict, Tuple
+import torch.nn.functional as F
+
+
+def _resize_dense_field_to_hw(x: torch.Tensor, size_hw: Tuple[int, int]) -> torch.Tensor:
+    """Bilinear resize for (B, H, W, C) or (B, H, W) to (Ht, Wt)."""
+    ht, wt = size_hw
+    if x.shape[1] == ht and x.shape[2] == wt:
+        return x
+    if x.ndim == 4:
+        y = x.permute(0, 3, 1, 2).contiguous()
+        y = F.interpolate(y, size=(ht, wt), mode="bilinear", align_corners=True)
+        return y.permute(0, 2, 3, 1).contiguous()
+    if x.ndim == 3:
+        y = x.unsqueeze(1)
+        y = F.interpolate(y, size=(ht, wt), mode="bilinear", align_corners=True)
+        return y.squeeze(1).contiguous()
+    return x
+
+
+def _resize_dpt_dense_predictions(pred: Dict[str, torch.Tensor], h: int, w: int) -> None:
+    """
+    When ViT patch size != 16, DPT conv upsampling can yield (16/patch)× the input
+    resolution. Resize dense maps to the true image size so losses align with GT masks.
+    Mutates pred in place.
+    """
+    for key in (
+        "pts3d_in_self_view",
+        "pts3d_in_other_view",
+        "rgb",
+        "conf_self",
+        "conf",
+    ):
+        if key not in pred:
+            continue
+        t = pred[key]
+        if not isinstance(t, torch.Tensor):
+            continue
+        pred[key] = _resize_dense_field_to_hw(t, (h, w))
+
 
 class DPTOutputAdapter_fix(DPTOutputAdapter):
     """
@@ -158,7 +198,7 @@ class DPTPts3dPose(nn.Module):
         head_type = "regression"
         output_width_ratio = 1
 
-        # patch_size = net.patch_embed.patch_size[0]
+        patch_size = net.patch_embed.patch_size[0]
         pts_dpt_args = dict(
             output_width_ratio=output_width_ratio,
             num_channels=pts_channels,
@@ -167,7 +207,7 @@ class DPTPts3dPose(nn.Module):
             dim_tokens=dim_tokens,
             hooks_idx=hooks_idx,
             head_type=head_type,
-            # patch_size=patch_size,
+            patch_size=patch_size,
         )
         rgb_dpt_args = dict(
             output_width_ratio=output_width_ratio,
@@ -177,7 +217,7 @@ class DPTPts3dPose(nn.Module):
             dim_tokens=dim_tokens,
             hooks_idx=hooks_idx,
             head_type=head_type,
-            # patch_size=patch_size,
+            patch_size=patch_size,
         )
         if hooks_idx is not None:
             pts_dpt_args.update(hooks=hooks_idx)
@@ -260,4 +300,8 @@ class DPTPts3dPose(nn.Module):
                 tmp = postprocess(cross_out, self.depth_mode, self.conf_mode)
                 final_output["pts3d_in_other_view"] = tmp.pop("pts3d")
                 final_output["conf"] = tmp.pop("conf")
+
+        h_i, w_i = int(img_info[0]), int(img_info[1])
+        _resize_dpt_dense_predictions(final_output, h_i, w_i)
+
         return final_output
