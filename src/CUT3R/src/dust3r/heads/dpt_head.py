@@ -25,6 +25,9 @@ from torch.utils.checkpoint import checkpoint
 from typing import Dict, Tuple
 import torch.nn.functional as F
 
+_LOGGED_DPT_PATH1_ALIGN = False
+_LOGGED_DPT_DENSE_VERIFY = False
+_LOGGED_DPT_LOGITS_ALIGN = False
 
 def _resize_dense_field_to_hw(x: torch.Tensor, size_hw: Tuple[int, int]) -> torch.Tensor:
     """Bilinear resize for (B, H, W, C) or (B, H, W) to (Ht, Wt)."""
@@ -44,10 +47,11 @@ def _resize_dense_field_to_hw(x: torch.Tensor, size_hw: Tuple[int, int]) -> torc
 
 def _resize_dpt_dense_predictions(pred: Dict[str, torch.Tensor], h: int, w: int) -> None:
     """
-    When ViT patch size != 16, DPT conv upsampling can yield (16/patch)× the input
-    resolution. Resize dense maps to the true image size so losses align with GT masks.
-    Mutates pred in place.
+    Fallback: bilinear resize dense maps to (h, w). With path_1 alignment in
+    DPTOutputAdapter_fix, this should no-op for typical even H×W inputs.
     """
+    global _LOGGED_DPT_DENSE_VERIFY
+    parts = []
     for key in (
         "pts3d_in_self_view",
         "pts3d_in_other_view",
@@ -60,7 +64,15 @@ def _resize_dpt_dense_predictions(pred: Dict[str, torch.Tensor], h: int, w: int)
         t = pred[key]
         if not isinstance(t, torch.Tensor):
             continue
+        oh, ow = int(t.shape[1]), int(t.shape[2])
+        if oh == h and ow == w:
+            parts.append(f"{key}={h}x{w} ok")
+            continue
         pred[key] = _resize_dense_field_to_hw(t, (h, w))
+        parts.append(f"{key} {oh}x{ow}->{h}x{w} (bilinear fallback)")
+    if not _LOGGED_DPT_DENSE_VERIFY:
+        print("[dpt_head] dense spatial verify: " + "; ".join(parts))
+        _LOGGED_DPT_DENSE_VERIFY = True
 
 
 class DPTOutputAdapter_fix(DPTOutputAdapter):
@@ -107,7 +119,34 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         path_2 = self.scratch.refinenet2(path_3, layers[1])
         path_1 = self.scratch.refinenet1(path_2, layers[0])
 
+        # @MODIFIED
+        Hi, Wi = int(H), int(W)
         out = self.head(path_1)
+        oh, ow = int(out.shape[2]), int(out.shape[3])
+
+        global _LOGGED_DPT_LOGITS_ALIGN
+        if not _LOGGED_DPT_LOGITS_ALIGN:
+            print(
+                f"[dpt_head] DPTOutputAdapter_fix: path_1={tuple(path_1.shape)} | "
+                f"head_out={tuple(out.shape)} | target_HW=({Hi},{Wi}) | "
+                f"N_H,N_W=({N_H},{N_W})"
+            )
+
+        if oh != Hi or ow != Wi:
+            if not _LOGGED_DPT_LOGITS_ALIGN:
+                print(
+                    f"[dpt_head] DPT logits resize: ({oh},{ow}) -> ({Hi},{Wi}) "
+                    f"(bilinear, pre-postprocess)"
+                )
+            out = F.interpolate(
+                out, size=(Hi, Wi), mode="bilinear", align_corners=True
+            )
+        elif not _LOGGED_DPT_LOGITS_ALIGN:
+            print("[dpt_head] DPT logits already match target HW; skip resize")
+
+        if not _LOGGED_DPT_LOGITS_ALIGN:
+            print(f"[dpt_head] DPTOutputAdapter_fix: final_out={tuple(out.shape)}")
+            _LOGGED_DPT_LOGITS_ALIGN = True
 
         return out
 
@@ -301,7 +340,7 @@ class DPTPts3dPose(nn.Module):
                 final_output["pts3d_in_other_view"] = tmp.pop("pts3d")
                 final_output["conf"] = tmp.pop("conf")
 
-        h_i, w_i = int(img_info[0]), int(img_info[1])
-        _resize_dpt_dense_predictions(final_output, h_i, w_i)
+        # h_i, w_i = int(img_info[0]), int(img_info[1])
+        # _resize_dpt_dense_predictions(final_output, h_i, w_i)
 
         return final_output
