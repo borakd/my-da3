@@ -119,9 +119,12 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         path_2 = self.scratch.refinenet2(path_3, layers[1])
         path_1 = self.scratch.refinenet1(path_2, layers[0])
 
+        out = self.head(path_1)
+
+        return out
+
         # @MODIFIED
         Hi, Wi = int(H), int(W)
-        out = self.head(path_1)
         oh, ow = int(out.shape[2]), int(out.shape[3])
 
         global _LOGGED_DPT_LOGITS_ALIGN
@@ -342,5 +345,11 @@ class DPTPts3dPose(nn.Module):
 
         # h_i, w_i = int(img_info[0]), int(img_info[1])
         # _resize_dpt_dense_predictions(final_output, h_i, w_i)
+
+        # Debug print
+        # print("********** DEBUG PRINT 4 **********")
+        # for k, t in final_output.items():
+        #     if isinstance(t, torch.Tensor) and t.ndim >= 3:
+        #         print(f"[DPTPts3dPose] {k} shape={tuple(t.shape)}")
 
         return final_output
