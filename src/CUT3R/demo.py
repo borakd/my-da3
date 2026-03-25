@@ -101,6 +101,7 @@ def prepare_input(
     from src.dust3r.utils.image import load_images_da3
 
     # TODO: come up with a more permanent solution. Maybe just enforce 14px patch for the whole pipeline?
+    # Set ps to 14 for cuteanything, set to 16 for regular cut3r
     images = load_images_da3(img_paths, size=size, ps=14, square_ok=True)
     views = []
 
