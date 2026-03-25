@@ -327,6 +327,15 @@ class Regr3DPose(Criterion, MultiLoss):
             pts = [torch.cat([x, y], dim=2) for x, y in zip(pts_self, pts_cross)]
             valids = [torch.cat([x, x], dim=2) for x in valids]
             confs = [torch.cat([x, y], dim=2) for x, y in zip(conf_self, conf_cross)]
+
+            # Debug print
+            # print("********** DEBUG PRINT 1 **********")
+            # for i, (p, va, co) in enumerate(zip(pts, valids, confs)):
+            #     print(
+            #         f"[get_norm_factor_point_cloud] i={i} pts={tuple(p.shape)} "
+            #         f"valids={tuple(va.shape)} confs={tuple(co.shape)}"
+            #     )
+
             norm_factor = normalize_pointcloud_group(
                 pts, self.norm_mode, valids, confs, ret_factor_only=True
             )
@@ -400,6 +409,26 @@ class Regr3DPose(Criterion, MultiLoss):
         pr_pts_cross = [pred["pts3d_in_other_view"] for pred in preds]
         conf_self = [torch.log(pred["conf_self"]).detach().clip(eps) for pred in preds]
         conf_cross = [torch.log(pred["conf"]).detach().clip(eps) for pred in preds]
+
+         # Debug print
+        # print("********** DEBUG PRINT 2 **********")
+        # for i, (v, cs, cc, ps, pc, gts_, gtc) in enumerate(
+        #     zip(
+        #         valids,
+        #         conf_self,
+        #         conf_cross,
+        #         pr_pts_self,
+        #         pr_pts_cross,
+        #         gt_pts_self,
+        #         gt_pts_cross,
+        #     )
+        # ):
+        #     print(
+        #         f"[get_all_pts3d] i={i} valid={tuple(v.shape)} "
+        #         f"conf_self={tuple(cs.shape)} conf_cross={tuple(cc.shape)} "
+        #         f"pr_pts_self={tuple(ps.shape)} pr_pts_cross={tuple(pc.shape)} "
+        #         f"gt_pts_self={tuple(gts_.shape)} gt_pts_cross={tuple(gtc.shape)}"
+        #     )
 
         if not self.norm_all:
             if self.max_metric_scale:
