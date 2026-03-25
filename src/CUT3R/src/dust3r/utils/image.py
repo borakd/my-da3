@@ -133,6 +133,70 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True):
     return imgs
 
 
+def load_images_da3(folder_or_list, size, ps, square_ok=False, verbose=True):
+    """open and convert all images in a list or folder to proper input format for DUSt3R"""
+    if isinstance(folder_or_list, str):
+        if verbose:
+            print(f">> Loading images from {folder_or_list}")
+        root, folder_content = folder_or_list, sorted(os.listdir(folder_or_list))
+
+    elif isinstance(folder_or_list, list):
+        if verbose:
+            print(f">> Loading a list of {len(folder_or_list)} images")
+        root, folder_content = "", folder_or_list
+
+    else:
+        raise ValueError(f"bad {folder_or_list=} ({type(folder_or_list)})")
+
+    supported_images_extensions = [".jpg", ".jpeg", ".png", ".bmp"]
+    if heif_support_enabled:
+        supported_images_extensions += [".heic", ".heif"]
+    supported_images_extensions = tuple(supported_images_extensions)
+
+    imgs = []
+    for path in folder_content:
+        if not path.lower().endswith(supported_images_extensions):
+            continue
+        img = exif_transpose(PIL.Image.open(os.path.join(root, path))).convert("RGB")
+        W1, H1 = img.size
+        if size == 224:
+
+            img = _resize_pil_image(img, round(size * max(W1 / H1, H1 / W1)))
+        else:
+
+            img = _resize_pil_image(img, size)
+        W, H = img.size
+        cx, cy = W // 2, H // 2
+        if size == 224:
+            half = min(cx, cy)
+            img = img.crop((cx - half, cy - half, cx + half, cy + half))
+        else:
+            # Sizing is now parameterizable
+            assert ps > 0 and ps % 2 == 0, "Patch size must be a positive even integer"
+            half_ps = ps // 2
+            halfw, halfh = ((2 * cx) // ps) * half_ps, ((2 * cy) // ps) * half_ps
+            if not (square_ok) and W == H:
+                halfh = 3 * halfw / 4
+            img = img.crop((cx - halfw, cy - halfh, cx + halfw, cy + halfh))
+
+        W2, H2 = img.size
+        if verbose:
+            print(f" - adding {path} with resolution {W1}x{H1} --> {W2}x{H2}")
+        imgs.append(
+            dict(
+                img=ImgNorm(img)[None],
+                true_shape=np.int32([img.size[::-1]]),
+                idx=len(imgs),
+                instance=str(len(imgs)),
+            )
+        )
+
+    assert imgs, "no images foud at " + root
+    if verbose:
+        print(f" (Found {len(imgs)} images)")
+    return imgs
+
+
 def load_images_for_eval(
     folder_or_list, size, square_ok=False, verbose=True, crop=True
 ):

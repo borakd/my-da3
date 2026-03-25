@@ -98,9 +98,10 @@ def prepare_input(
         list: A list of view dictionaries.
     """
     # Import image loader (delayed import needed after adding ckpt path).
-    from src.dust3r.utils.image import load_images
+    from src.dust3r.utils.image import load_images_da3
 
-    images = load_images(img_paths, size=size, square_ok=True)
+    # TODO: come up with a more permanent solution. Maybe just enforce 14px patch for the whole pipeline?
+    images = load_images_da3(img_paths, size=size, ps=14, square_ok=True)
     views = []
 
     if raymaps is None and raymap_mask is None:
@@ -390,7 +391,7 @@ def run_inference(args):
         f"Inference completed in {total_time:.2f} seconds (average {per_frame_time:.2f} s per frame)."
     )
 
-
+    # Debug prints
     print(f"type(outputs): {type(outputs)}, length: {len(outputs)}`")        # dict
     print(f"type(state_args): {type(state_args)}, length: {len(state_args)}")  # list
     print("Info for outputs")
