@@ -349,6 +349,16 @@ def normalize_pointcloud_group(
             ]
         )
         all_pts = torch.cat(nan_pts_list, dim=1)
+
+        # Debug print
+        # print("********** DEBUG PRINT 3 **********")
+        # if conf_list is not None:
+        #     for i, (conf1, valid1) in enumerate(zip(conf_list, valid_list)):
+        #         print(
+        #             f"[normalize_pointcloud_group] i={i} conf={tuple(conf1.shape)} "
+        #             f"valid={tuple(valid1.shape)} (before invalid_to_zeros)"
+        #         )
+
         if conf_list is not None:
             nan_conf_list = [
                 invalid_to_zeros(conf1[..., None], valid1, ndim=3)[0]
