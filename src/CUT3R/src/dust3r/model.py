@@ -700,6 +700,10 @@ class ARCroco3DStereo(CroCoNet):
             self.dec_norm_state(final_output[-1][0]),
             self.dec_norm(final_output[-1][1]),
         )
+        # Decoder returns a list of length dec_depth+1 where each element is a tuple
+        # (f_state, f_img). The outputs of the last decoder layer are replaced with
+        # normalized state and image features (see lines above).
+        # The zip return below transposes final_output into: (all states), (all images)
         return zip(*final_output)
 
     def _downstream_head(self, decout, img_shape, **kwargs):
@@ -879,6 +883,13 @@ class ARCroco3DStereo(CroCoNet):
                 dec[self.dec_depth * 3 // 4][:, 1:].float(),
                 dec[self.dec_depth].float(),
             ]
+            # Debug print
+            # print("********** DEBUG PRINT 6 **********")
+            # print(f"Head input shape: {head_input[0].shape}")
+            # print(f"Head input shape: {head_input[1].shape}")
+            # print(f"Head input shape: {head_input[2].shape}")
+            # print(f"Head input shape: {head_input[3].shape}")
+            # print("Supplying head input to downstream head")
             res = self._downstream_head(head_input, shape[i], pos=pos_i)
             ress.append(res)
             img_mask = views[i]["img_mask"]
