@@ -70,6 +70,9 @@ def loss_of_one_batch(
     if symmetrize_batch:
         batch = make_batch_symmetric(batch)
 
+    # print("********** DEBUG PRINT 5 **********")
+    # print(f"Size of batch (should be >1 for multiview): {len(batch)}")
+
     with torch.cuda.amp.autocast(enabled=not inference):
         if inference:
             output, state_args = model(batch, ret_state=True)
