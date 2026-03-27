@@ -8,7 +8,7 @@ import os
 from src.depth_anything_3.api import DepthAnything3
 from src.CUT3R.src.dust3r.model import ARCroco3DStereo
 from src.CUT3R.src.dust3r.inference import inference
-from src.CUT3R.src.dust3r.utils.image import load_images
+from src.CUT3R.src.dust3r.utils.image import load_images, load_images_da3
 from src.CUT3R.viser_utils import PointCloudViewer
 from src.CUT3R.demo import prepare_output
 from with_cut3r_v1 import get_cut3r_encoder_outputs_from_da3
@@ -34,7 +34,7 @@ def _build_views_from_image_paths(image_paths, size=512):
     """
     Build CUT3R-style views (same structure used by demo/inference path).
     """
-    images = load_images(image_paths, size=size, square_ok=True)
+    images = load_images_da3(image_paths, size=size, square_ok=True, ps=14)
     views = []
     for i, im in enumerate(images):
         img = im["img"]  # [1,3,H,W] normalized
@@ -86,7 +86,7 @@ if __name__ == "__main__":
     print(f"Arguments: {args}")
 
     # Build view pairs
-    image_paths = sorted(glob.glob(os.path.join(args.input_path, "*.jpg")))
+    image_paths = sorted(glob.glob(os.path.join(args.input_path, "*.png")))
     pairs = []
     for i in range(0, len(image_paths) - 1, args.views_per_step):
         pairs.append(image_paths[i:i+args.views_per_step])
@@ -110,7 +110,7 @@ if __name__ == "__main__":
 
     # after model = setup_models_and_patch(args)
 
-    image_paths = sorted(glob.glob(os.path.join(args.input_path, "*.jpg")))
+    image_paths = sorted(glob.glob(os.path.join(args.input_path, "*.png")))
     pairs = [image_paths[i:i+args.views_per_step] for i in range(0, len(image_paths)-1, args.views_per_step)]
     pairs = [p for p in pairs if len(p) == args.views_per_step]
     # flatten in temporal order
