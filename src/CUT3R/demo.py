@@ -98,11 +98,9 @@ def prepare_input(
         list: A list of view dictionaries.
     """
     # Import image loader (delayed import needed after adding ckpt path).
-    from src.dust3r.utils.image import load_images_da3
+    from src.dust3r.utils.image import load_images
 
-    # TODO: come up with a more permanent solution. Maybe just enforce 14px patch for the whole pipeline?
-    # Set ps to 14 for cuteanything, set to 16 for regular cut3r
-    images = load_images_da3(img_paths, size=size, ps=14, square_ok=True)
+    images = load_images(img_paths, size=size)
     views = []
 
     if raymaps is None and raymap_mask is None:
@@ -131,16 +129,6 @@ def prepare_input(
                 "reset": torch.tensor(False).unsqueeze(0),
             }
             views.append(view)
-
-            # Save views to text file for debugging
-            with open("views.txt", "w") as f:
-                for key, value in view.items():
-                    f.write(f"Key: {key}, Value: {value}\n")
-                f.write("\n")
-                for key, value in view.items():
-                    if isinstance(value, torch.Tensor):
-                        f.write(f"Key: {key}, Value.shape: {value.shape}\n")
-                f.write("-" * 80 + 2 * "\n")
     else:
         # Combine images and raymaps.
         num_views = len(images) + len(raymaps)
@@ -383,32 +371,12 @@ def run_inference(args):
     # Run inference.
     print("Running inference...")
     start_time = time.time()
-    # state_args: state_feat, state_pos, init_state_feat, mem, init_mem
-    # Shapes: [1, 768, 768] [1, 768, 2] [1, 768, 768] [1, 256, 1536] [1, 256, 1536]
     outputs, state_args = inference(views, model, device)
     total_time = time.time() - start_time
     per_frame_time = total_time / len(views)
     print(
         f"Inference completed in {total_time:.2f} seconds (average {per_frame_time:.2f} s per frame)."
     )
-
-    # Debug prints
-    print(f"type(outputs): {type(outputs)}, length: {len(outputs)}`")        # dict
-    print(f"type(state_args): {type(state_args)}, length: {len(state_args)}")  # list
-    print("Info for outputs")
-    for key, value in outputs.items():  # Two keys: views and pred, both are lists
-        print(f"Key: {key}, Value type: {type(value)}, Value len: {len(value)}")
-    for elem in state_args:
-        if isinstance(elem, torch.Tensor):
-            print(f"elem.shape: {elem.shape}")
-        else:
-            print(f"len(elem): {len(elem)}")
-            for i in range(len(elem)):
-                if isinstance(elem[i], torch.Tensor):
-                    print(f"elem[{i}].shape: {elem[i].shape}")
-                else:
-                    print(f"elem[{i}]: {elem[i]}")
-        break    # Only print the first state_arg
 
     # Process outputs for visualization.
     print("Preparing output for visualization...")
@@ -420,7 +388,6 @@ def run_inference(args):
     pts3ds_to_vis = [p.cpu().numpy() for p in pts3ds_other]
     colors_to_vis = [c.cpu().numpy() for c in colors]
     edge_colors = [None] * len(pts3ds_to_vis)
-
 
     # Create and run the point cloud viewer.
     print("Launching point cloud viewer...")
