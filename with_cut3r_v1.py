@@ -270,7 +270,6 @@ def get_cut3r_encoder_outputs_from_da3(
     returns: shape, feat_ls, pos   (CUT3R encoder-output contract)
     """
     # 1) convert batched npy images back to RGB images for DA3
-    # batch[i]["img"]: [B,3,H,W] in [-1,1], usually B=1
     imgs_for_da3 = []
     for view in batch:
         x = view["img"]                      # [B,3,H,W]
