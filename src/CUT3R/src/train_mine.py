@@ -64,6 +64,11 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 printer = get_logger(__name__, log_level="DEBUG")
 
+try:
+    import wandb  # type: ignore
+except Exception:
+    wandb = None
+
 
 def setup_for_distributed(accelerator: Accelerator):
     """
@@ -133,6 +138,19 @@ def train(args):
     if accelerator.is_main_process:
         dst_dir = save_current_code(outdir=args.output_dir)
         printer.info(f"Saving current code to {dst_dir}")
+
+    if accelerator.is_main_process and wandb is not None and wandb.run is None:
+        # Added a default project name so it doesn't silently fail to log
+        wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training") 
+        wandb.init(
+            project=wandb_project,
+            name=os.environ.get(
+                "WANDB_NAME", os.path.basename(args.output_dir.rstrip("/"))
+            ),
+            dir=args.output_dir,
+            # Converted OmegaConf DictConfig to a standard Python dictionary
+            config=OmegaConf.to_container(args, resolve=True), 
+        )
 
     # auto resume
     if not args.resume:
@@ -370,11 +388,26 @@ def train(args):
             args=args,
         )
 
+        if accelerator.is_main_process and wandb is not None and wandb.run is not None:
+            wandb_log = {f"train/{k}": v for k, v in train_stats.items()}
+            for test_name in data_loader_test:
+                if test_name not in test_stats:
+                    continue
+                wandb_log.update(
+                    {f"{test_name}/{k}": v for k, v in test_stats[test_name].items()}
+                )
+            wandb_log["epoch"] = epoch
+            wandb_log["best_so_far"] = best_so_far
+            wandb.log(wandb_log, step=epoch)
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     printer.info("Training time {}".format(total_time_str))
 
     save_final_model(accelerator, args, args.epochs, model, best_so_far=best_so_far)
+
+    if accelerator.is_main_process and wandb is not None and wandb.run is not None:
+        wandb.finish()
 
 
 def save_final_model(accelerator, args, epoch, model_without_ddp, best_so_far=None):
