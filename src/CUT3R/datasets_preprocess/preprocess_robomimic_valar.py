@@ -22,7 +22,37 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--mask_res", type=int, default=512)
     parser.add_argument("--tasks", type=str, default="can,lift,square,tool_hang,transport")
+    parser.add_argument(
+        "--only",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated subset to write (default: all). "
+            "Tokens: depth, rgb, intrinsics, extrinsics, cam, masks. "
+            "intrinsics and/or extrinsics (or cam) write dense/cam/*.npz; "
+            "depth writes dense/depth; rgb writes dense/rgb; masks writes sky_mask and outlier_mask."
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_save_flags(only: str | None):
+    """Returns which converters to run. If only is None/empty, save everything."""
+    allowed = {"depth", "rgb", "intrinsics", "extrinsics", "cam", "masks"}
+    if only is None or not str(only).strip():
+        return {"depth": True, "rgb": True, "cam": True, "masks": True}
+    raw = {x.strip().lower() for x in only.split(",") if x.strip()}
+    unknown = raw - allowed
+    if unknown:
+        raise ValueError(
+            f"Unknown --only token(s): {sorted(unknown)}. Allowed: {sorted(allowed)}"
+        )
+    return {
+        "depth": "depth" in raw,
+        "rgb": "rgb" in raw,
+        "cam": bool(raw & {"intrinsics", "extrinsics", "cam"}),
+        "masks": "masks" in raw,
+    }
 
 
 #################################################################################################
@@ -69,15 +99,6 @@ def load_all_robomimic_data(dataset_base_dir, output_dir, tasks):
             # data_paths[1] <--> extrinsics
             # data_paths[2] <--> intrinsics
             # data_paths[3] <--> rgb
-
-            # When doing 'transport', read_demo will return a interleaved demo contents paths as a list of length 2
-            # where each list is for a separate camera pairing for the transport task.
-            # if 'transport' in task_dirs[i]:
-            #     interleaved_demo_contents_paths, num_frames = read_demo(demo_path, task_dirs[i])
-            #     total_frames += num_frames
-            #     master_dict['transport0'][demo_folder] = interleaved_demo_contents_paths
-            #     master_dict['transport1'][demo_folder] = interleaved_demo_contents_paths
-            
             interleaved_demo_contents_paths, num_frames = read_demo(demo_path, task_dirs[i])
             total_frames += num_frames
             master_dict[task_dirs[i]][demo_folder] = interleaved_demo_contents_paths
@@ -97,8 +118,7 @@ def read_demo(demo_base_path, task_dir):
 
     # Build the master list, where each element of the list is a list containing the paths to each .npy file
     demo_contents_paths = {'depth': [], 'extrinsics': [], 'intrinsics': [], 'rgb': []}
-    # transport_second_half = {'depth': [], 'extrinsics': [], 'intrinsics': [], 'rgb': []}
-    
+
     for camera_folder_path in camera_folder_paths:
         data_subdirs = sorted(os.listdir(camera_folder_path))
         assert len(data_subdirs) == 4, f"Demo's per-camera folders should contain 4 subdirectories, found {len(data_subdirs)}"
@@ -111,13 +131,16 @@ def read_demo(demo_base_path, task_dir):
             demo_contents_paths[data_subdir].append(data_files_paths)
 
     # For each data type; depth, extrinsics, intrinsics, rgb,
-    # interleave the static and dynamic camera paths and count the total frames
-    num_frames = 0
+    # interleave camera paths (transport uses a 4-camera round-robin per timestep).
     for data_type in demo_contents_paths.keys():
-        
-        # Length of demo_contents_paths[data_type] is the number of cameras
-        demo_contents_paths[data_type] = interleave_data_contents(demo_contents_paths[data_type])
-        num_frames += len(demo_contents_paths[data_type])
+        lists = demo_contents_paths[data_type]
+        if task_dir == "transport":
+            demo_contents_paths[data_type] = interleave_transport_data_contents(lists)
+        else:
+            demo_contents_paths[data_type] = interleave_data_contents(lists)
+
+    # One interleaved index == one exported view (same length for every modality).
+    num_frames = len(demo_contents_paths["depth"])
 
     # Return a dictionary with per-data type lists of interleaved .npy's
     # e.g.
@@ -126,42 +149,54 @@ def read_demo(demo_base_path, task_dir):
     return demo_contents_paths, num_frames
 
 
+def _find_camera_list_index(data_paths, must_contain: str) -> int:
+    for idx, path_list in enumerate(data_paths):
+        if path_list and must_contain in path_list[0]:
+            return idx
+    raise ValueError(f"No camera list containing {must_contain!r} (example paths: {data_paths})")
+
+
+def interleave_transport_data_contents(data_paths):
+    """Per timestep: shouldercamera0 -> robot0_eye_in_hand -> shouldercamera1 -> robot1_eye_in_hand."""
+    sc0 = _find_camera_list_index(data_paths, "shouldercamera0")
+    r0 = _find_camera_list_index(data_paths, "robot0_eye_in_hand")
+    sc1 = _find_camera_list_index(data_paths, "shouldercamera1")
+    r1 = _find_camera_list_index(data_paths, "robot1_eye_in_hand")
+    cam_order = (sc0, r0, sc1, r1)
+    n = len(data_paths[sc0])
+    for idx in cam_order:
+        if len(data_paths[idx]) != n:
+            raise ValueError(
+                f"Transport camera length mismatch: cam {idx} has {len(data_paths[idx])}, expected {n}"
+            )
+    interleaved = []
+    for i in range(n):
+        for idx in cam_order:
+            interleaved.append(data_paths[idx][i])
+    return interleaved
+
+
 def interleave_data_contents(data_paths):
     """Helper function to interleave the data paths such that all the data is in a single collapsed directory
     where the files alternate between static and dynamic camera ground truth (static always comes first).
     """
-    # Use these to index which list is for the static and dynamic camera
     static_index, dynamic_index = -1, -1
 
-    if 'agentview' in data_paths[0][0]:
+    if "agentview" in data_paths[0][0]:
         static_index = 0
         dynamic_index = 1
-        dynamic_path = data_paths[1]
-    elif 'sideview' in data_paths[1][0]:
+    elif "sideview" in data_paths[1][0]:
         static_index = 1
         dynamic_index = 0
-    elif 'transport' in data_paths[0][0]:
-        static_index = 2    # shouldercamera0
-        dynamic_index = 0   # robot0_eye_in_hand
     else:
         raise ValueError(f"Invalid data paths configuration, found paths: {data_paths}")
 
-    # Interleave the data paths and return
     interleaved_data_paths = []
-    transport_second_half = []
-
     for i in range(len(data_paths[0])):
         interleaved_data_paths.append(data_paths[static_index][i])
         interleaved_data_paths.append(data_paths[dynamic_index][i])
 
-        # transport has four cameras:
-        # robot0_eye_in_hand, robot1_eye_in_hand, shouldercamera0, shouldercamera1
-        # First do both 0-numbered cams, and then do the 1-numbered cams here
-        if 'transport' in data_paths[0][0]:
-            transport_second_half.append(data_paths[static_index+1][i])
-            transport_second_half.append(data_paths[dynamic_index+1][i])
-
-    return interleaved_data_paths, transport_second_half
+    return interleaved_data_paths
 
 
 #############################################################################################
@@ -170,9 +205,11 @@ def interleave_data_contents(data_paths):
 
 def convert_intrinsics_and_poses(intrinsics_path, poses_path, output_path):
     """Load robomimic intrinsics and poses from input path and save them to output path.
+
+    output_path: scene root (…/task/demo_*) — writes under output_path/dense/cam/.
     """
     print("Saving intrinsics and poses to DL3DV_Multi format...")
-    output_path = os.path.join(output_path, "cam")
+    output_path = os.path.join(output_path, "dense", "cam")
     os.makedirs(output_path, exist_ok=True)
 
     # Save intrinsics and poses to a single npz. Note: they are already interleaved and we have full filepaths
@@ -182,51 +219,68 @@ def convert_intrinsics_and_poses(intrinsics_path, poses_path, output_path):
         pose = np.load(pose_path)
         np.savez(os.path.join(output_path, f"{i:06d}.npz"),
                 intrinsic=intrinsic, pose=pose)
-        if i % 50 == 0:
-            print(f"Saved intrinsics and poses to {os.path.join(output_path, f'{i:06d}.npz')}")
+        # if i % 50 == 0:
+            # print(f"Saved intrinsics and poses to {os.path.join(output_path, f'{i:06d}.npz')}")
     print("Saved {} intrinsics and poses to {}".format(i+1, output_path))
     return 0
 
 
 def convert_depths(input_path, output_path):
     """Load robomimic depths from input path and save them to output path.
+
+    output_path: scene root (…/task/demo_*) — writes under output_path/dense/depth/.
     """
     # Since depths are already saved as npy, just copy them to output path.
     print("Saving depths to DL3DV_Multi format...")
-    output_path = os.path.join(output_path, "depth")
+    output_path = os.path.join(output_path, "dense", "depth")
     os.makedirs(output_path, exist_ok=True)
 
     for i, src_path in enumerate(input_path):
-        shutil.copy2(src_path, output_path)
-        if i % 50 == 0:
-            print(f"saved depth from {src_path} to {os.path.join(output_path, f'{i:06d}.npy')}")
+        dst = os.path.join(output_path, f"{i:06d}.npy")
+        shutil.copy2(src_path, dst)
+        # if i % 50 == 0:
+            # print(f"saved depth from {src_path} to {dst}")
     print("Saved {} depths to {}".format(i+1, output_path))
     return 0
 
 
 def convert_rgb(input_path, output_path):
     """Loads robomimic rgb from path.
+
+    output_path: scene root (…/task/demo_*) — writes under output_path/dense/rgb/.
+    Matches preprocess_robomimic.py: cv2.imwrite expects BGR (same as VideoCapture frames).
+    Extracted .npy observations are RGB (H, W, 3); convert before writing.
     """
     print("Saving RGB frames to DL3DV_Multi format...")
-    output_path = os.path.join(output_path, "rgb")
+    output_path = os.path.join(output_path, "dense", "rgb")
     os.makedirs(output_path, exist_ok=True)
 
-    # Convert from .npy to .png and save only the .png to the output path
     for i, src_path in enumerate(input_path):
-        rgb = np.load(src_path)
-        cv2.imwrite(os.path.join(output_path, f"{i:06d}.png"), rgb)
-        if i % 50 == 0:
-            print(f"saved RGB frame from {src_path} to {os.path.join(output_path, f'{i:06d}.png')}")
+        img = np.load(src_path)
+        if img.dtype != np.uint8:
+            if float(img.max()) <= 1.0:
+                img = (np.clip(np.asarray(img, dtype=np.float64), 0.0, 1.0) * 255.0).astype(
+                    np.uint8
+                )
+            else:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+        if img.ndim == 3 and img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(output_path, f"{i:06d}.png"), img)
+        # if i % 50 == 0:
+            # print(f"saved RGB frame from {src_path} to {os.path.join(output_path, f'{i:06d}.png')}")
     print("Saved {} RGB frames to {}".format(i+1, output_path))
     return 0
 
 
 def create_masks(length, output_path, res):
     """Create blank masks, all zeros resxres.
+
+    output_path: scene root (…/task/demo_*) — writes under output_path/dense/{sky_mask,outlier_mask}/.
     """
     print("Creating masks for DL3DV_Multi format...")
-    sky_mask_output_path = os.path.join(output_path, "sky_mask")
-    outlier_mask_output_path = os.path.join(output_path, "outlier_mask")
+    sky_mask_output_path = os.path.join(output_path, "dense", "sky_mask")
+    outlier_mask_output_path = os.path.join(output_path, "dense", "outlier_mask")
     os.makedirs(sky_mask_output_path, exist_ok=True)
     os.makedirs(outlier_mask_output_path, exist_ok=True)
 
@@ -239,9 +293,10 @@ def create_masks(length, output_path, res):
     return 0
 
 
-def main_valar(input_dir, output_dir, tasks):
+def main_valar(input_dir, output_dir, tasks, save_flags, mask_res):
     os.makedirs(output_dir, exist_ok=True)
     print(f"Processing robomimic dataset from {input_dir} and saving to {output_dir}")
+    print(f"Save flags: {save_flags}")
 
     # Load all robomimic data from input_dir and save them in Valar format.
     # Returns a giant dictionary:
@@ -259,7 +314,6 @@ def main_valar(input_dir, output_dir, tasks):
             print()
 
     print(f"Total frames in robomimic dataset: {total_frames}")
-    exit()
 
     # Load the data to DL3DV_Multi format
     for task_dir, demo_folders in master_dict.items():
@@ -277,23 +331,33 @@ def main_valar(input_dir, output_dir, tasks):
                 f"rgb({len(data_types['rgb'])})"
             )
 
-            # Create the output base directory
-            output_base_dir = os.path.join(output_dir, task_dir, demo_folder, "dense")
-            print(f"Creating output base directory: {output_base_dir}")
-            os.makedirs(output_base_dir, exist_ok=True)
+            # Scene root: …/output_dir/<task>/<demo> (DL3DV layout: dense/ lives under this)
+            output_scene_dir = os.path.join(output_dir, task_dir, demo_folder)
+            dense_dir = os.path.join(output_scene_dir, "dense")
+            print(f"Creating output scene directory: {output_scene_dir}")
+            os.makedirs(dense_dir, exist_ok=True)
 
-            convert_intrinsics_and_poses(data_types['intrinsics'], data_types['extrinsics'], output_base_dir)
-            convert_depths(data_types['depth'], output_base_dir)
-            convert_rgb(data_types['rgb'], output_base_dir)
-            create_masks(len(data_types['depth']), output_base_dir, 512)
+            if save_flags["cam"]:
+                convert_intrinsics_and_poses(
+                    data_types["intrinsics"], data_types["extrinsics"], output_scene_dir
+                )
+            if save_flags["depth"]:
+                convert_depths(data_types["depth"], output_scene_dir)
+            if save_flags["rgb"]:
+                convert_rgb(data_types["rgb"], output_scene_dir)
+            if save_flags["masks"]:
+                create_masks(len(data_types["depth"]), output_scene_dir, mask_res)
 
     print(f"Saved DL3DV_Multi format robomimic ground truths to {output_dir}")
     return 0
 
 if __name__ == "__main__":
     args = parse_args()
+    save_flags = parse_save_flags(args.only)
     main_valar(
         args.input_dir,
         args.output_dir,
         args.tasks,
+        save_flags,
+        args.mask_res,
     )
