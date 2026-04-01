@@ -266,51 +266,63 @@ def get_cut3r_encoder_outputs_from_da3(
     device="cuda",
 ):
     """
-    batch: list[dict], CUT3R views from dataloader
+    batch: list[dict], CUT3R views from dataloader; each view["img"] is [B,3,H,W]
     returns: shape, feat_ls, pos   (CUT3R encoder-output contract)
     """
-    # 1) convert batched npy images back to RGB images for DA3
-    imgs_for_da3 = []
+    if not batch:
+        raise ValueError("get_cut3r_encoder_outputs_from_da3: empty batch")
+    B = int(batch[0]["img"].shape[0])
     for view in batch:
-        x = view["img"]                      # [B,3,H,W]
-        assert view["img"].shape[0] == 1, "Current DA3 bridge assumes batch_size=1"
-        x = x[0].detach().float()            # [3,H,W]
-        x = (x + 1.0) / 2.0                  # [0,1]
-        x = x.clamp(0, 1)
-        x = (x.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")  # HWC uint8
-        imgs_for_da3.append(x)
+        if view["img"].shape[0] != B:
+            raise ValueError(
+                "All views must share the same batch size; "
+                f"expected {B}, got {view['img'].shape[0]}"
+            )
 
-    # 2) run DA3 once on list of views (batch)
-    pred = da3_model.inference(
-        imgs_for_da3,
-        ref_view_strategy="first",
-        export_feat_layers=feat_layers,
-        process_res=da3_size,
-    )
+    layer_key = f"feat_layer_{feat_layers[0]}"
+    export_layers = list(feat_layers)
 
-    # 3) pull tokens from final transformer layer
-    tokens = torch.from_numpy(pred.aux[f"feat_layer_{feat_layers[0]}"]).to(device)
-    # expected: [V, Ht, Wt, C]
+    tokens_list: list[torch.Tensor] = []
+    with torch.inference_mode():
+        for b in range(B):
+            imgs_for_da3 = []
+            for view in batch:
+                x = view["img"][b].detach().float()  # [3,H,W]
+                x = (x + 1.0) / 2.0
+                x = x.clamp(0, 1)
+                x = (x.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                imgs_for_da3.append(x)
+            pred = da3_model.inference(
+                imgs_for_da3,
+                ref_view_strategy="first",
+                export_feat_layers=export_layers,
+                process_res=da3_size,
+            )
+            t = torch.from_numpy(pred.aux[layer_key]).to(device)
+            tokens_list.append(t)
 
-    # 4) build CUT3R-style outputs
-    V, Ht, Wt, C = tokens.shape
-    feat_ls = [tokens[i : i + 1].reshape(1, Ht * Wt, C) for i in range(V)]
+    # [B, V, Ht, Wt, C]
+    tokens = torch.stack(tokens_list, dim=0)
+    _, V, Ht, Wt, C = tokens.shape
+
+    feat_ls = [
+        tokens[:, i, :, :, :].reshape(B, Ht * Wt, C) for i in range(V)
+    ]
 
     ys = torch.arange(Ht, device=tokens.device)
     xs = torch.arange(Wt, device=tokens.device)
     Y, X = torch.meshgrid(ys, xs, indexing="ij")
-    p = torch.stack([Y, X], dim=-1).reshape(1, Ht * Wt, 2)
+    p = torch.stack([Y, X], dim=-1).reshape(1, Ht * Wt, 2).expand(B, -1, -1).contiguous()
     pos = [p.clone() for _ in range(V)]
 
-    # choose shape consistent with token grid / downstream head expectations
     patch = 14
     H_img, W_img = Ht * patch, Wt * patch
     assert H_img % patch == 0 and W_img % patch == 0
 
-    shape = [
-        torch.tensor([[H_img, W_img]], dtype=torch.int32, device=tokens.device)
-        for _ in range(V)
-    ]
+    shape_base = torch.tensor(
+        [[H_img, W_img]], dtype=torch.int32, device=tokens.device
+    ).expand(B, -1)
+    shape = [shape_base.clone() for _ in range(V)]
 
     return shape, feat_ls, pos
 
