@@ -57,6 +57,7 @@ import shutil
 from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.logging import get_logger
+from accelerate.utils import send_to_device
 from datetime import timedelta
 import torch.multiprocessing
 
@@ -65,8 +66,9 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 printer = get_logger(__name__, log_level="DEBUG")
 
 try:
-    import wandb  # type: ignore
+    import wandb
 except Exception:
+    print("Wandb not found")
     wandb = None
 
 
@@ -244,9 +246,14 @@ def train(args):
     loss_scaler = NativeScaler(accelerator=accelerator)
 
     accelerator.even_batches = False
-    optimizer, model, data_loader_train = accelerator.prepare(
-        optimizer, model, data_loader_train
+    # Accelerate does not prepare loaders inside a dict; unpack test loaders so batches are on device.
+    _test_keys = list(data_loader_test.keys())
+    _test_loaders = list(data_loader_test.values())
+    _prepared = accelerator.prepare(
+        optimizer, model, data_loader_train, *_test_loaders
     )
+    optimizer, model, data_loader_train = _prepared[0], _prepared[1], _prepared[2]
+    data_loader_test = dict(zip(_test_keys, _prepared[3:]))
 
     # Load DA3 model once per training cycle, keep it fully frozen
     da3_model = DepthAnything3.from_pretrained(args.da3_model_name_or_path)
@@ -661,6 +668,7 @@ def test_one_epoch(
     for _, batch in enumerate(
         metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
     ):
+        batch = send_to_device(batch, device)
         result = loss_of_one_batch(
             batch,
             model,
