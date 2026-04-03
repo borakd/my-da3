@@ -145,6 +145,8 @@ def train(args):
         # Added a default project name so it doesn't silently fail to log
         wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training")
         wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
+        tb_dir = os.path.join(args.output_dir, "tb")
+        os.makedirs(tb_dir, exist_ok=True)
         if os.path.isfile(wandb_id_path):
             with open(wandb_id_path, "r", encoding="utf-8") as f:
                 wandb_run_id = f.read().strip()
@@ -152,6 +154,7 @@ def train(args):
             wandb_run_id = wandb.util.generate_id()
             with open(wandb_id_path, "w", encoding="utf-8") as f:
                 f.write(wandb_run_id)
+        wandb.tensorboard.patch(root_logdir=tb_dir)
         wandb.init(
             project=wandb_project,
             sync_tensorboard=True,
@@ -341,8 +344,11 @@ def train(args):
     )
     if best_so_far is None:
         best_so_far = float("inf")
+    tb_dir = os.path.join(args.output_dir, "tb")
+    if accelerator.is_main_process:
+        os.makedirs(tb_dir, exist_ok=True)
     log_writer = (
-        SummaryWriter(log_dir=args.output_dir, flush_secs=10, max_queue=10)
+        SummaryWriter(log_dir=tb_dir, flush_secs=10, max_queue=10)
         if accelerator.is_main_process
         else None
     )
