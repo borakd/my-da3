@@ -143,15 +143,26 @@ def train(args):
 
     if accelerator.is_main_process and wandb is not None and wandb.run is None:
         # Added a default project name so it doesn't silently fail to log
-        wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training") 
+        wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training")
+        wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
+        if os.path.isfile(wandb_id_path):
+            with open(wandb_id_path, "r", encoding="utf-8") as f:
+                wandb_run_id = f.read().strip()
+        else:
+            wandb_run_id = wandb.util.generate_id()
+            with open(wandb_id_path, "w", encoding="utf-8") as f:
+                f.write(wandb_run_id)
         wandb.init(
             project=wandb_project,
+            sync_tensorboard=True,
             name=os.environ.get(
                 "WANDB_NAME", os.path.basename(args.output_dir.rstrip("/"))
             ),
             dir=args.output_dir,
+            id=wandb_run_id,
+            resume=os.environ.get("WANDB_RESUME", "allow"),
             # Converted OmegaConf DictConfig to a standard Python dictionary
-            config=OmegaConf.to_container(args, resolve=True), 
+            config=OmegaConf.to_container(args, resolve=True),
         )
 
     # auto resume
@@ -331,7 +342,9 @@ def train(args):
     if best_so_far is None:
         best_so_far = float("inf")
     log_writer = (
-        SummaryWriter(log_dir=args.output_dir) if accelerator.is_main_process else None
+        SummaryWriter(log_dir=args.output_dir, flush_secs=10, max_queue=10)
+        if accelerator.is_main_process
+        else None
     )
 
     printer.info(f"Start training for {args.epochs} epochs")
@@ -395,23 +408,15 @@ def train(args):
             args=args,
         )
 
-        if accelerator.is_main_process and wandb is not None and wandb.run is not None:
-            wandb_log = {f"train/{k}": v for k, v in train_stats.items()}
-            for test_name in data_loader_test:
-                if test_name not in test_stats:
-                    continue
-                wandb_log.update(
-                    {f"{test_name}/{k}": v for k, v in test_stats[test_name].items()}
-                )
-            wandb_log["epoch"] = epoch
-            wandb_log["best_so_far"] = best_so_far
-            wandb.log(wandb_log, step=epoch)
-
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     printer.info("Training time {}".format(total_time_str))
 
     save_final_model(accelerator, args, args.epochs, model, best_so_far=best_so_far)
+
+    if log_writer is not None:
+        log_writer.flush()
+        log_writer.close()
 
     if accelerator.is_main_process and wandb is not None and wandb.run is not None:
         wandb.finish()
