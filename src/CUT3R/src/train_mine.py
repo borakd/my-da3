@@ -41,6 +41,8 @@ from dust3r.losses import *  # noqa: F401, needed when loading the model
 from dust3r.inference import loss_of_one_batch, loss_of_one_batch_tbptt  # noqa
 from dust3r.viz import colorize
 from dust3r.utils.render import get_render_results
+from dust3r.utils.geometry import inv, geotrf
+from dust3r.utils.camera import pose_encoding_to_camera
 import dust3r.utils.path_to_croco  # noqa: F401
 import croco.utils.misc as misc  # noqa
 from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
@@ -676,6 +678,122 @@ def test_one_epoch(
     ):
         data_loader.batch_sampler.batch_sampler.set_epoch(0)
 
+    def _compute_depth_absrel_a1(gts, preds, eps=1e-8):
+        absrels = []
+        a1s = []
+        for gt, pred in zip(gts, preds):
+            gt_depth = geotrf(inv(gt["camera_pose"]), gt["pts3d"])[..., -1]
+            pr_depth = pred["pts3d_in_self_view"][..., -1]
+            valid = gt.get(
+                "valid_mask", torch.ones_like(gt_depth, dtype=torch.bool)
+            ).bool()
+            valid = valid & torch.isfinite(gt_depth) & torch.isfinite(pr_depth)
+            valid = valid & (gt_depth > 0)
+
+            for b in range(gt_depth.shape[0]):
+                mask = valid[b]
+                if mask.sum() == 0:
+                    continue
+                g = gt_depth[b][mask].double()
+                p = pr_depth[b][mask].double()
+                scale = torch.median(g) / (torch.median(p) + eps)
+                p_aligned = p * scale
+                abs_rel = torch.mean(torch.abs(g - p_aligned) / (g + eps))
+                ratio = torch.maximum(
+                    g / (p_aligned + eps), p_aligned / (g + eps)
+                )
+                a1 = torch.mean((ratio < 1.25).double())
+                absrels.append(float(abs_rel))
+                a1s.append(float(a1))
+
+        if len(absrels) == 0:
+            return {}
+        return {"absrel": float(np.mean(absrels)), "a1": float(np.mean(a1s))}
+
+    def _align_points_similarity(pr_pts, gt_pts, eps=1e-8):
+        pr = pr_pts.double()
+        gt = gt_pts.double()
+        n = pr.shape[0]
+        if n < 2:
+            return None
+        pr_mean = pr.mean(dim=0)
+        gt_mean = gt.mean(dim=0)
+        pr_c = pr - pr_mean
+        gt_c = gt - gt_mean
+        cov = (gt_c.T @ pr_c) / n
+        U, S, Vh = torch.linalg.svd(cov)
+        V = Vh.T
+        d = torch.ones(3, dtype=pr.dtype, device=pr.device)
+        if torch.det(U @ V.T) < 0:
+            d[-1] = -1.0
+        R = U @ torch.diag(d) @ V.T
+        var_pr = (pr_c.square().sum()) / n
+        if float(var_pr) < eps:
+            return None
+        scale = (S * d).sum() / var_pr
+        t = gt_mean - scale * (R @ pr_mean)
+        return scale, R, t
+
+    def _pose_rot_err_deg(R_err):
+        cos_theta = ((torch.trace(R_err) - 1.0) / 2.0).clamp(-1.0, 1.0)
+        return torch.rad2deg(torch.acos(cos_theta))
+
+    def _compute_pose_metrics(gts, preds):
+        pr_cams = [pose_encoding_to_camera(pred["camera_pose"]) for pred in preds]
+        num_views = len(gts)
+        batch_size = gts[0]["camera_pose"].shape[0]
+        ate_list = []
+        rpe_rot_list = []
+        rpe_trans_list = []
+
+        for b in range(batch_size):
+            view_mask = torch.ones(num_views, dtype=torch.bool, device=device)
+            for i in range(num_views):
+                if "img_mask" in gts[i]:
+                    view_mask[i] = bool(gts[i]["img_mask"][b].item())
+            if int(view_mask.sum()) < 2:
+                continue
+            valid_ids = torch.where(view_mask)[0].tolist()
+
+            gt_seq = torch.stack(
+                [gts[i]["camera_pose"][b] for i in valid_ids], dim=0
+            ).double()
+            pr_seq = torch.stack([pr_cams[i][b] for i in valid_ids], dim=0).double()
+
+            gt_seq = torch.linalg.inv(gt_seq[:1]) @ gt_seq
+            pr_seq = torch.linalg.inv(pr_seq[:1]) @ pr_seq
+
+            aligned = _align_points_similarity(pr_seq[:, :3, 3], gt_seq[:, :3, 3])
+            if aligned is None:
+                continue
+            scale, R_align, t_align = aligned
+
+            pr_aligned = pr_seq.clone()
+            pr_aligned[:, :3, :3] = R_align @ pr_seq[:, :3, :3]
+            pr_aligned[:, :3, 3] = (
+                scale * (R_align @ pr_seq[:, :3, 3].T)
+            ).T + t_align
+
+            ate = torch.sqrt(
+                torch.mean(torch.sum((pr_aligned[:, :3, 3] - gt_seq[:, :3, 3]) ** 2, dim=-1))
+            )
+            ate_list.append(float(ate))
+
+            for i in range(pr_aligned.shape[0] - 1):
+                gt_rel = torch.linalg.inv(gt_seq[i]) @ gt_seq[i + 1]
+                pr_rel = torch.linalg.inv(pr_aligned[i]) @ pr_aligned[i + 1]
+                err = torch.linalg.inv(gt_rel) @ pr_rel
+                rpe_trans_list.append(float(torch.linalg.norm(err[:3, 3])))
+                rpe_rot_list.append(float(_pose_rot_err_deg(err[:3, :3])))
+
+        if len(ate_list) == 0:
+            return {}
+
+        out = {"ate": float(np.mean(ate_list))}
+        out["rpe_rot"] = float(np.mean(rpe_rot_list)) if rpe_rot_list else 0.0
+        out["rpe_trans"] = float(np.mean(rpe_trans_list)) if rpe_trans_list else 0.0
+        return out
+
     for _, batch in enumerate(
         metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
     ):
@@ -691,6 +809,12 @@ def test_one_epoch(
 
         loss_value, loss_details = result["loss"]  # criterion returns two values
         metric_logger.update(loss=float(loss_value), **loss_details)
+        depth_metrics = _compute_depth_absrel_a1(batch, result["pred"])
+        if depth_metrics:
+            metric_logger.update(**depth_metrics)
+        pose_metrics = _compute_pose_metrics(batch, result["pred"])
+        if pose_metrics:
+            metric_logger.update(**pose_metrics)
 
     printer.info("Averaged stats: %s", metric_logger)
 
