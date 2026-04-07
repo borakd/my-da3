@@ -307,6 +307,8 @@ def train(args):
         return shape_out, feat_ls_out, pos_out
 
     base_model._encode_views = types.MethodType(_encode_views_da3, base_model)
+    base_model.views_per_step = int(getattr(args, "views_per_step", 1))
+    printer.info(f"Configured grouped recurrence with views_per_step={base_model.views_per_step}")
 
 
     def write_log_stats(epoch, train_stats, test_stats):

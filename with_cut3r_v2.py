@@ -72,6 +72,7 @@ def setup_models_and_patch(args):
         return tuple(shape_per_view), [tuple(feat_per_view)], tuple(pos_per_view)
 
     model._encode_views = types.MethodType(_encode_views_da3, model)
+    model.views_per_step = int(getattr(args, "views_per_step", 1))
     return model
 
 

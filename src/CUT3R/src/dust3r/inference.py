@@ -115,6 +115,9 @@ def loss_of_one_batch_tbptt(
     all_preds = []
     all_loss = 0.0
     all_loss_details = {}
+    base_model = accelerator.unwrap_model(model)
+    views_per_step = max(1, int(getattr(base_model, "views_per_step", 1)))
+    chunk_groups = max(1, (chunk_size + views_per_step - 1) // views_per_step)
     with torch.cuda.amp.autocast(enabled=not inference):
         with torch.no_grad():
             (feat, pos, shape), (
@@ -123,42 +126,46 @@ def loss_of_one_batch_tbptt(
                 state_feat,
                 state_pos,
                 mem,
-            ) = accelerator.unwrap_model(model)._forward_encoder(batch)
+            ) = base_model._forward_encoder(batch)
         feat = [f.detach() for f in feat]
         pos = [p.detach() for p in pos]
         shape = [s.detach() for s in shape]
         init_state_feat = init_state_feat.detach()
         init_mem = init_mem.detach()
+        group_ranges = base_model._group_view_ranges(len(batch))
+        num_chunks = (len(group_ranges) - 1) // chunk_groups + 1
+        seen_views = 0
 
-        for chunk_id in range((len(batch) - 1) // chunk_size + 1):
+        for chunk_id in range(num_chunks):
             preds = []
             chunk = []
             state_feat = state_feat.detach()
             state_pos = state_pos.detach()
             mem = mem.detach()
-            if chunk_id < ((len(batch) - 1) // chunk_size + 1) - 4:
+            start_group = chunk_id * chunk_groups
+            end_group = min(start_group + chunk_groups, len(group_ranges))
+            active_groups = group_ranges[start_group:end_group]
+            if chunk_id < num_chunks - 4:
                 with torch.no_grad():
-                    for in_chunk_idx in range(chunk_size):
-                        i = chunk_id * chunk_size + in_chunk_idx
-                        if i >= len(batch):
-                            break
-                        res, (state_feat, mem) = accelerator.unwrap_model(
-                            model
-                        )._forward_decoder_step(
-                            batch,
-                            i,
-                            feat_i=feat[i],
-                            pos_i=pos[i],
-                            shape_i=shape[i],
+                    for group_start, group_end in active_groups:
+                        view_indices = list(range(group_start, group_end))
+                        res_group, (state_feat, mem) = base_model._forward_decoder_group_step(
+                            views=batch,
+                            view_indices=view_indices,
+                            feat_group=[feat[i] for i in view_indices],
+                            pos_group=[pos[i] for i in view_indices],
+                            shape_group=[shape[i] for i in view_indices],
                             init_state_feat=init_state_feat,
                             init_mem=init_mem,
                             state_feat=state_feat,
                             state_pos=state_pos,
                             mem=mem,
                         )
-                        preds.append(res)
-                        all_preds.append({k: v.detach() for k, v in res.items()})
-                        chunk.append(batch[i])
+                        for local_idx, view_idx in enumerate(view_indices):
+                            res = res_group[local_idx]
+                            preds.append(res)
+                            all_preds.append({k: v.detach() for k, v in res.items()})
+                            chunk.append(batch[view_idx])
                 with torch.cuda.amp.autocast(enabled=False):
                     loss, loss_details = (
                         criterion(chunk, preds, camera1=batch[0]["camera_pose"])
@@ -167,31 +174,30 @@ def loss_of_one_batch_tbptt(
                     )
                     all_loss += float(loss)
                     all_loss_details = merge_chunk_dict(
-                        all_loss_details, loss_details, chunk_id * chunk_size
+                        all_loss_details, loss_details, seen_views
                     )
+                    seen_views += len(chunk)
                     del loss
             else:
-                for in_chunk_idx in range(chunk_size):
-                    i = chunk_id * chunk_size + in_chunk_idx
-                    if i >= len(batch):
-                        break
-                    res, (state_feat, mem) = accelerator.unwrap_model(
-                        model
-                    )._forward_decoder_step(
-                        batch,
-                        i,
-                        feat_i=feat[i],
-                        pos_i=pos[i],
-                        shape_i=shape[i],
+                for group_start, group_end in active_groups:
+                    view_indices = list(range(group_start, group_end))
+                    res_group, (state_feat, mem) = base_model._forward_decoder_group_step(
+                        views=batch,
+                        view_indices=view_indices,
+                        feat_group=[feat[i] for i in view_indices],
+                        pos_group=[pos[i] for i in view_indices],
+                        shape_group=[shape[i] for i in view_indices],
                         init_state_feat=init_state_feat,
                         init_mem=init_mem,
                         state_feat=state_feat,
                         state_pos=state_pos,
                         mem=mem,
                     )
-                    preds.append(res)
-                    all_preds.append({k: v.detach() for k, v in res.items()})
-                    chunk.append(batch[i])
+                    for local_idx, view_idx in enumerate(view_indices):
+                        res = res_group[local_idx]
+                        preds.append(res)
+                        all_preds.append({k: v.detach() for k, v in res.items()})
+                        chunk.append(batch[view_idx])
                 with torch.cuda.amp.autocast(enabled=False):
                     loss, loss_details = (
                         criterion(chunk, preds, camera1=batch[0]["camera_pose"])
@@ -200,8 +206,9 @@ def loss_of_one_batch_tbptt(
                     )
                     all_loss += float(loss)
                     all_loss_details = merge_chunk_dict(
-                        all_loss_details, loss_details, chunk_id * chunk_size
+                        all_loss_details, loss_details, seen_views
                     )
+                    seen_views += len(chunk)
                     loss_scaler(
                         loss,
                         optimizer,
@@ -214,7 +221,7 @@ def loss_of_one_batch_tbptt(
     result = dict(
         views=batch,
         pred=all_preds,
-        loss=(all_loss / ((len(batch) - 1) // chunk_size + 1), all_loss_details),
+        loss=(all_loss / num_chunks, all_loss_details),
         already_backprop=True,
     )
     return result[ret] if ret else result
