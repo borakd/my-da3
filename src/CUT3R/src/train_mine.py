@@ -988,6 +988,7 @@ def vis_and_cat(
 
 def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
     ret_dict = {}
+    num_imgs_vis = min(num_imgs_vis, loss_details["gt_img1"].shape[0])
     gt_img_list = [[] for _ in range(num_imgs_vis)]
     pred_img_list = [[] for _ in range(num_imgs_vis)]
 
