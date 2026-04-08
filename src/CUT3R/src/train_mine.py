@@ -41,7 +41,6 @@ from dust3r.datasets import get_data_loader
 from dust3r.losses import *  # noqa: F401, needed when loading the model
 from dust3r.inference import loss_of_one_batch, loss_of_one_batch_tbptt  # noqa
 from dust3r.viz import colorize
-from dust3r.utils.render import get_render_results
 from dust3r.utils.geometry import inv, geotrf
 from dust3r.utils.camera import pose_encoding_to_camera
 import dust3r.utils.path_to_croco  # noqa: F401
@@ -625,10 +624,10 @@ def train_one_epoch(
                 if log_writer is None:
                     continue
                 with torch.no_grad():
-                    depths_self, gt_depths_self = get_render_results(
+                    depths_self, gt_depths_self = get_depth_results_direct(
                         batch, result["pred"], self_view=True
                     )
-                    depths_cross, gt_depths_cross = get_render_results(
+                    depths_cross, gt_depths_cross = get_depth_results_direct(
                         batch, result["pred"], self_view=False
                     )
                     for k in range(len(batch)):
@@ -854,10 +853,10 @@ def test_one_epoch(
                 continue
             log_writer.add_scalar(prefix + "_" + name, val, 1000 * epoch)
 
-        depths_self, gt_depths_self = get_render_results(
+        depths_self, gt_depths_self = get_depth_results_direct(
             batch, result["pred"], self_view=True
         )
-        depths_cross, gt_depths_cross = get_render_results(
+        depths_cross, gt_depths_cross = get_depth_results_direct(
             batch, result["pred"], self_view=False
         )
         for k in range(len(batch)):
@@ -887,6 +886,30 @@ def batch_append(original_list, new_list):
     for sublist, new_item in zip(original_list, new_list):
         sublist.append(new_item)
     return original_list
+
+
+@torch.no_grad()
+def get_depth_results_direct(gts, preds, self_view=False):
+    """Return per-pixel depth (z) directly from point maps, without gsplat rendering."""
+    depths = []
+    gt_depths = []
+    for i, (gt, pred) in enumerate(zip(gts, preds)):
+        if self_view:
+            gt_depth = geotrf(inv(gt["camera_pose"]), gt["pts3d"])[..., -1]
+            pred_depth = pred["pts3d_in_self_view"][..., -1]
+        else:
+            gt_depth = geotrf(inv(gts[0]["camera_pose"]), gt["pts3d"])[..., -1]
+            pred_depth = pred["pts3d_in_other_view"][..., -1]
+
+        valid = gt.get("valid_mask", torch.ones_like(gt_depth, dtype=torch.bool)).bool()
+        valid = valid & torch.isfinite(gt_depth) & torch.isfinite(pred_depth) & (gt_depth > 0)
+
+        gt_depth = torch.where(valid, gt_depth, torch.zeros_like(gt_depth))
+        pred_depth = torch.where(valid, pred_depth, torch.zeros_like(pred_depth))
+        gt_depths.append(gt_depth)
+        depths.append(pred_depth)
+
+    return depths, gt_depths
 
 
 def gen_mask_indicator(img_mask_list, ray_mask_list, num_views, h, w):
@@ -951,6 +974,7 @@ def vis_and_cat(
 
     cross_gt_depths_vis = colorize(
         cross_gt_depths,
+        cmap_name="viridis",
         range=(
             (cross_depth_min, cross_depth_max)
             if is_metric
@@ -960,6 +984,7 @@ def vis_and_cat(
     )
     cross_pred_depths_vis = colorize(
         cross_pred_depths,
+        cmap_name="viridis",
         range=(
             (cross_depth_min, cross_depth_max)
             if is_metric
@@ -977,6 +1002,7 @@ def vis_and_cat(
 
     self_gt_depths_vis = colorize(
         self_gt_depths,
+        cmap_name="viridis",
         range=(
             (self_depth_min, self_depth_max)
             if is_metric
@@ -986,6 +1012,7 @@ def vis_and_cat(
     )
     self_pred_depths_vis = colorize(
         self_pred_depths,
+        cmap_name="viridis",
         range=(
             (self_depth_min, self_depth_max)
             if is_metric
@@ -994,9 +1021,9 @@ def vis_and_cat(
         append_cbar=True,
     )
     if len(cross_conf) > 0:
-        cross_conf_vis = colorize(cross_conf, append_cbar=True)
+        cross_conf_vis = colorize(cross_conf, cmap_name="viridis", append_cbar=True)
     if len(self_conf) > 0:
-        self_conf_vis = colorize(self_conf, append_cbar=True)
+        self_conf_vis = colorize(self_conf, cmap_name="viridis", append_cbar=True)
     gt_imgs_vis = torch.zeros_like(cross_gt_depths_vis)
     gt_imgs_vis[: gt_imgs.shape[0], : gt_imgs.shape[1]] = gt_imgs
     pred_imgs_vis = torch.zeros_like(cross_gt_depths_vis)
