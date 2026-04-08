@@ -130,12 +130,12 @@ class DL3DV_Multi(BaseMultiViewDataset):
             depthmap[sky_mask] = -1.0
             depthmap[outlier_mask >= 127] = 0.0
             depthmap = np.nan_to_num(depthmap, nan=0, posinf=0, neginf=0)
-            threshold = (
-                np.percentile(depthmap[depthmap > 0], 98)
-                if depthmap[depthmap > 0].size > 0
-                else 0
-            )
-            depthmap[depthmap > threshold] = 0.0
+            # threshold = (
+            #     np.percentile(depthmap[depthmap > 0], 99.5)
+            #     if depthmap[depthmap > 0].size > 0
+            #     else 0
+            # )
+            # depthmap[depthmap > threshold] = 0.0
 
             intrinsics = cam_file["intrinsic"].astype(np.float32)
             camera_pose = cam_file["pose"].astype(np.float32)
