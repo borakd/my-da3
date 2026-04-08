@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import math
+import cv2
 from collections import defaultdict
 from pathlib import Path
 from typing import Sized
@@ -904,6 +905,31 @@ def gen_mask_indicator(img_mask_list, ray_mask_list, num_views, h, w):
     return output
 
 
+def _caption_row(img: torch.Tensor, caption: str) -> torch.Tensor:
+    """Overlay a minimal caption in the top-left corner of a visualization row."""
+    if img.ndim != 3 or img.shape[-1] != 3:
+        return img
+
+    device = img.device
+    img_np = (img.detach().cpu().clamp(0, 1).numpy() * 255.0).astype(np.uint8)
+    img_np = np.ascontiguousarray(img_np)
+
+    box_h = min(26, img_np.shape[0])
+    box_w = min(max(140, 8 * len(caption) + 20), img_np.shape[1])
+    cv2.rectangle(img_np, (0, 0), (box_w, box_h), (0, 0, 0), thickness=-1)
+    cv2.putText(
+        img_np,
+        caption,
+        (6, min(18, box_h - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    return torch.from_numpy(img_np).to(device=device).float() / 255.0
+
+
 def vis_and_cat(
     gt_imgs,
     pred_imgs,
@@ -986,18 +1012,19 @@ def vis_and_cat(
         ],
         dim=1,
     )
+    rows = [
+        _caption_row(ray_indicator_vis, "mask indicator"),
+        _caption_row(gt_imgs_vis, "gt rgb"),
+        _caption_row(pred_imgs_vis, "pred rgb"),
+        _caption_row(self_gt_depths_vis, "self-view gt depth"),
+        _caption_row(self_pred_depths_vis, "self-view pred depth"),
+        _caption_row(self_conf_vis, "self-view confidence"),
+        _caption_row(cross_gt_depths_vis, "cross-view gt depth"),
+        _caption_row(cross_pred_depths_vis, "cross-view pred depth"),
+        _caption_row(cross_conf_vis, "cross-view confidence"),
+    ]
     out = torch.cat(
-        [
-            ray_indicator_vis,
-            gt_imgs_vis,
-            pred_imgs_vis,
-            self_gt_depths_vis,
-            self_pred_depths_vis,
-            self_conf_vis,
-            cross_gt_depths_vis,
-            cross_pred_depths_vis,
-            cross_conf_vis,
-        ],
+        rows,
         dim=0,
     )
     return out
