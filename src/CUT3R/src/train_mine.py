@@ -137,13 +137,27 @@ def train(args):
 
     printer.info("output_dir: " + args.output_dir)
     if args.output_dir:
+        printer.info(f"Creating output_dir (mkdir -p): {args.output_dir}")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        printer.info(f"output_dir ready: {args.output_dir}")
 
-    if accelerator.is_main_process:
+    save_code_snapshot = bool(getattr(args, "save_code_snapshot", False))
+    printer.info(f"Code snapshot block reached; save_code_snapshot={save_code_snapshot}")
+    if accelerator.is_main_process and save_code_snapshot:
+        printer.info("Saving current code snapshot...")
+        snapshot_start = time.time()
         dst_dir = save_current_code(outdir=args.output_dir)
-        printer.info(f"Saving current code to {dst_dir}")
+        snapshot_sec = time.time() - snapshot_start
+        printer.info(
+            f"Saved current code to {dst_dir} in {snapshot_sec:.1f}s"
+        )
+    elif accelerator.is_main_process:
+        printer.info(
+            "Skipping code snapshot (set save_code_snapshot=true to enable)"
+        )
 
-    if accelerator.is_main_process and wandb is not None and wandb.run is None:
+    use_wandb = bool(getattr(args, "use_wandb", True))
+    if accelerator.is_main_process and wandb is not None and wandb.run is None and use_wandb:
         # Added a default project name so it doesn't silently fail to log
         wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training")
         wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
@@ -157,6 +171,8 @@ def train(args):
             with open(wandb_id_path, "w", encoding="utf-8") as f:
                 f.write(wandb_run_id)
         wandb.tensorboard.patch(root_logdir=tb_dir)
+        printer.info("Initializing Weights & Biases...")
+        wandb_start = time.time()
         wandb.init(
             project=wandb_project,
             sync_tensorboard=True,
@@ -169,6 +185,7 @@ def train(args):
             # Converted OmegaConf DictConfig to a standard Python dictionary
             config=OmegaConf.to_container(args, resolve=True),
         )
+        printer.info(f"W&B initialized in {time.time() - wandb_start:.1f}s")
 
     # auto resume
     if not args.resume:
