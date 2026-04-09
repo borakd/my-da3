@@ -350,7 +350,7 @@ class DPTOutputAdapter(nn.Module):
                 nn.Conv2d(
                     feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1
                 ),
-                Interpolate(scale_factor=1.75, mode="bilinear", align_corners=True),
+                Interpolate(scale_factor=self.patch_size[0] / 8, mode="bilinear", align_corners=True),
                 nn.Conv2d(
                     feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1
                 ),
