@@ -276,6 +276,12 @@ def train(args):
     optimizer, model, data_loader_train = accelerator.prepare(
         optimizer, model, data_loader_train
     )
+    # Add MVU to CUT3R
+    base_model = accelerator.unwrap_model(model)
+    base_model.views_per_step = int(getattr(args, "views_per_step", 1))
+    printer.info(
+        f"Configured grouped recurrence with views_per_step={base_model.views_per_step}"
+    )
 
     def write_log_stats(epoch, train_stats, test_stats):
         if accelerator.is_main_process:
