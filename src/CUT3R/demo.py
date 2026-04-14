@@ -100,7 +100,7 @@ def prepare_input(
     # Import image loader (delayed import needed after adding ckpt path).
     from src.dust3r.utils.image import load_images
 
-    images = load_images(img_paths, size=size)
+    images = load_images(img_paths, size=size, square_ok=True)
     views = []
 
     if raymaps is None and raymap_mask is None:
