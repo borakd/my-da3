@@ -802,6 +802,20 @@ class ARCroco3DStereo(CroCoNet):
         feat_cat, pos_cat, token_offsets = self._concat_group_feat_pos(
             feat_group, pos_group
         )
+        debug_grouped = bool(getattr(self, "debug_grouped_updates", False))
+        debug_once = bool(getattr(self, "debug_grouped_updates_once", True))
+        debug_emitted = int(getattr(self, "_debug_grouped_updates_emitted", 0))
+        should_debug_print = debug_grouped and group_size > 1 and (
+            (not debug_once) or (debug_emitted == 0)
+        )
+        if should_debug_print:
+            for local_idx, view_idx in enumerate(view_indices):
+                print(
+                    f"[GroupedUpdate] received view {view_idx} ({local_idx + 1}/{group_size}); not committing state/memory yet"
+                )
+            print(
+                f"[GroupedUpdate] concatenated group tokens: feat_cat={tuple(feat_cat.shape)}, pos_cat={tuple(pos_cat.shape)}"
+            )
         if self.pose_head_flag:
             global_img_feat_group = torch.stack(
                 [self._get_img_level_feat(f) for f in feat_group], dim=0
@@ -898,6 +912,11 @@ class ARCroco3DStereo(CroCoNet):
         reset_mask = reset_mask[:, None, None].float()
         state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
         mem = init_mem * reset_mask + mem * (1 - reset_mask)
+        if should_debug_print:
+            print(
+                f"[GroupedUpdate] committed single state/memory update for views {view_indices}"
+            )
+            self._debug_grouped_updates_emitted = debug_emitted + 1
         return res_group, (state_feat, mem)
 
     def _forward_decoder_step(

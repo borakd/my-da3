@@ -279,9 +279,21 @@ def train(args):
     # Add MVU to CUT3R
     base_model = accelerator.unwrap_model(model)
     base_model.views_per_step = int(getattr(args, "views_per_step", 1))
+    base_model.debug_grouped_updates = bool(
+        getattr(args, "debug_grouped_updates", False)
+    ) and accelerator.is_main_process
+    base_model.debug_grouped_updates_once = bool(
+        getattr(args, "debug_grouped_updates_once", True)
+    )
+    base_model._debug_grouped_updates_emitted = 0
     printer.info(
         f"Configured grouped recurrence with views_per_step={base_model.views_per_step}"
     )
+    if base_model.debug_grouped_updates:
+        printer.info(
+            "Grouped-update debug prints enabled"
+            f" (once={base_model.debug_grouped_updates_once})"
+        )
 
     def write_log_stats(epoch, train_stats, test_stats):
         if accelerator.is_main_process:
