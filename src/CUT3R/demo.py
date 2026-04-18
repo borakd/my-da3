@@ -75,6 +75,11 @@ def parse_args():
         default="./demo_tmp",
         help="value for tempfile.tempdir",
     )
+    parser.add_argument(
+        "--disable_viewer",
+        action="store_true",
+        help="Disable the point cloud viewer.",
+    )
 
     return parser.parse_args()
 
@@ -390,21 +395,24 @@ def run_inference(args):
     edge_colors = [None] * len(pts3ds_to_vis)
 
     # Create and run the point cloud viewer.
-    print("Launching point cloud viewer...")
-    viewer = PointCloudViewer(
-        model,
-        state_args,
-        pts3ds_to_vis,
-        colors_to_vis,
-        conf,
-        cam_dict,
-        device=device,
-        edge_color_list=edge_colors,
-        show_camera=True,
-        vis_threshold=args.vis_threshold,
-        size = args.size
-    )
-    viewer.run()
+    if not args.disable_viewer:
+        print("Launching point cloud viewer...")
+        viewer = PointCloudViewer(
+            model,
+            state_args,
+            pts3ds_to_vis,
+            colors_to_vis,
+            conf,
+            cam_dict,
+            device=device,
+            edge_color_list=edge_colors,
+            show_camera=True,
+            vis_threshold=args.vis_threshold,
+            size = args.size
+        )
+        viewer.run()
+    else:
+        print("Point cloud viewer disabled. Skipping...")
 
 
 def main():
