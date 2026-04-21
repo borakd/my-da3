@@ -187,10 +187,11 @@ def train(args):
         )
         printer.info(f"W&B initialized in {time.time() - wandb_start:.1f}s")
 
-    # auto resume
-    if not args.resume:
-        last_ckpt_fname = os.path.join(args.output_dir, f"checkpoint-last.pth")
-        args.resume = last_ckpt_fname if os.path.isfile(last_ckpt_fname) else None
+    # Explicit resume only: if args.resume is null/empty, always start from scratch.
+    if args.resume:
+        printer.info(f"Resuming from explicitly provided checkpoint: {args.resume}")
+    else:
+        printer.info("No resume checkpoint provided; starting training from scratch.")
 
     printer.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
 
