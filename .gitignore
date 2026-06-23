@@ -37,3 +37,9 @@ temp*.png
 
 # Ignore streaming version, takes unnecessary space
 da3_streaming/
+
+
+
+
+my-da3/logs
+my-da3/checkpoints
