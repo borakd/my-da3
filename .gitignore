@@ -40,6 +40,7 @@ da3_streaming/
 
 
 
-
+# Ignore CUT3R logs, checkpoints, and old configs
 my-da3/logs
 my-da3/checkpoints
+my-da3/src/CUT3R/config/old
