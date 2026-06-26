@@ -48,9 +48,11 @@ class BaseMultiViewDataset(EasyDataset):
         seed=None,
         allow_repeat=False,
         seq_aug_crop=False,
+        force_consecutive_frame_sampling=False,
     ):
         assert num_views is not None, "undefined num_views"
         self.num_views = num_views
+        self.force_consecutive_frame_sampling = force_consecutive_frame_sampling
         self.split = split
         self._set_resolutions(resolution)
 
@@ -204,6 +206,19 @@ class BaseMultiViewDataset(EasyDataset):
         ), f"min_interval should be <= max_interval, got {min_interval} and {max_interval}"
         assert id_ref in ids_all
         pos_ref = ids_all.index(id_ref)
+
+        if getattr(self, "force_consecutive_frame_sampling", False):
+            # Strictly consecutive (interval=1), temporally ordered window of
+            # num_views frames starting at id_ref. If id_ref is too close to the
+            # end of the sequence, shift the window back so it still fits; for
+            # sequences shorter than num_views, the last frame is repeated.
+            n_total = len(ids_all)
+            start = pos_ref
+            if start + num_views > n_total:
+                start = max(0, n_total - num_views)
+            pos = [min(start + i, n_total - 1) for i in range(num_views)]
+            return pos, True
+
         all_possible_pos = np.arange(pos_ref, len(ids_all))
 
         remaining_sum = len(ids_all) - 1 - pos_ref
