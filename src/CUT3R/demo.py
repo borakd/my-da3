@@ -48,7 +48,7 @@ def parse_args():
     parser.add_argument(
         "--seq_path",
         type=str,
-        default="",
+        default="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist/dl3dv_multi/AUTOLab+0d4edc83+2023-10-21-19h-06m-10s/18026681+wrist/dense/rgb",
         help="Path to the directory containing the image sequence.",
     )
     parser.add_argument(
@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--size",
         type=int,
-        default="512",
+        default="380",
         help="Shape that input images will be rescaled to; if using 224+linear model, choose 224 otherwise 512",
     )
     parser.add_argument(
