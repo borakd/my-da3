@@ -166,7 +166,7 @@ dependencies:
       - cycler==0.12.1
       - dash==3.3.0
       - decorator==4.4.2
-      - depth-anything-3==0.0.0
+      # - depth-anything-3==0.0.0 # get this by running this command from root: python -m pip install -e.
       - distlib==0.4.0
       - e3nn==0.5.9
       - einops==0.8.1
@@ -277,7 +277,7 @@ dependencies:
       - pure-eval==0.2.3
       - pycollada==0.9.2
       - pycolmap==3.13.0
-      - pydantic==2.12.5
+      - pydantic==2.12.4
       - pydantic-core==2.41.5
       - pydub==0.25.1
       - pyglet==1.5.31
