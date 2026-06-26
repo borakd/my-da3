@@ -615,7 +615,7 @@ class PointCloudViewer:
             np.array(list(range(len(pc_list))))
             / np.array(list(range(len(pc_list)))).max()
         )
-        cmap = cm.viridis
+        cmap = cm.turbo
         self.camera_colors = cmap(normalized_indices)
         return pcs, step_list
 
@@ -675,6 +675,7 @@ class PointCloudViewer:
         fov = 2 * np.arctan(pp[0] / focal)
         aspect = pp[0] / pp[1]
         self.traj_list.append((q, t))
+        rgb = (np.array(self.camera_colors[step][:3]) * 255).astype(np.uint8)
         self.cam_handles.append(
             self.server.add_camera_frustum(
                 name=f"/frames/{step}/camera",
@@ -683,7 +684,7 @@ class PointCloudViewer:
                 wxyz=q,
                 position=t,
                 scale=0.1,
-                color=(50, 205, 50),
+                color=tuple(int(c) for c in rgb),
             )
         )
 
