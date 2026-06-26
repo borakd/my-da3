@@ -25,6 +25,7 @@ import torch.distributed as dist
 from torch import inf
 from accelerate import Accelerator
 from accelerate.logging import get_logger
+from accelerate.utils import gather_object
 
 printer = get_logger(__name__, log_level="DEBUG")
 
@@ -122,8 +123,48 @@ class MetricLogger(object):
         return self.delimiter.join(loss_str)
 
     def synchronize_between_processes(self, accelerator):
-        for meter in self.meters.values():
-            meter.synchronize_between_processes(accelerator)
+        """Collective-safe sync of all meters across processes.
+
+        The previous implementation issued one all-reduce per meter while
+        iterating each rank's *own* ``self.meters`` dict. When ranks hold
+        different key sets -- e.g. variable ``num_views`` produces a different
+        number of per-view loss keys (``conf_loss/i``, ``pts3d/i``, ...) on each
+        rank -- the number of collectives differs across ranks and NCCL
+        dead-locks (watchdog timeout on the ``Numel=2`` all-reduce).
+
+        Instead we agree on the rank-union of meter keys, pack the
+        ``(count, total)`` of every key into a single vector (zero-filled for
+        keys a rank is missing), and run ONE all-reduce. The summed
+        ``count``/``total`` -> ``global_avg`` is exactly what a non-divergent run
+        would log; logging-only, no effect on training. Single-process is a
+        no-op, matching the original.
+        """
+        if accelerator.num_processes == 1:
+            return
+        # 1. Deterministic, rank-identical key ordering (union across all ranks).
+        gathered_keys = gather_object(list(self.meters.keys()))
+        union = sorted({k for rank_keys in gathered_keys for k in rank_keys})
+        if not union:
+            return
+        # 2. Pack [count_k, total_k, ...] over the union; 0 where this rank lacks k.
+        buf = torch.zeros(
+            2 * len(union), dtype=torch.float64, device=accelerator.device
+        )
+        for i, k in enumerate(union):
+            meter = self.meters.get(k)
+            if meter is not None:
+                buf[2 * i] = meter.count
+                buf[2 * i + 1] = meter.total
+        # 3. ONE all-reduce for every meter at once (identical shape on all ranks).
+        accelerator.wait_for_everyone()
+        accelerator.reduce(buf, reduction="sum")
+        # 4. Write the global totals back into the meters this rank actually has
+        #    (don't materialise empty meters -> keeps median/window stats valid).
+        vals = buf.tolist()
+        for i, k in enumerate(union):
+            if k in self.meters:
+                self.meters[k].count = int(vals[2 * i])
+                self.meters[k].total = vals[2 * i + 1]
 
     def add_meter(self, name, meter):
         self.meters[name] = meter
