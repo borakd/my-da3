@@ -153,17 +153,18 @@ def train(args):
     use_wandb = bool(getattr(args, "use_wandb", True))
     if accelerator.is_main_process and wandb is not None and wandb.run is None and use_wandb:
         # Added a default project name so it doesn't silently fail to log
-        wandb_project = os.environ.get("WANDB_PROJECT", "da3-with-cut3r-training-dist")
+        wandb_project = os.environ.get("WANDB_PROJECT", "pointworld-droid-v1")
         wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
         tb_dir = os.path.join(args.output_dir, "tb")
         os.makedirs(tb_dir, exist_ok=True)
-        if os.path.isfile(wandb_id_path):
-            with open(wandb_id_path, "r", encoding="utf-8") as f:
-                wandb_run_id = f.read().strip()
-        else:
-            wandb_run_id = wandb.util.generate_id()
-            with open(wandb_id_path, "w", encoding="utf-8") as f:
-                f.write(wandb_run_id)
+        # Fresh run id per launch. Reusing a persisted id with resume="allow"
+        # makes wandb re-attach to the old run; with sync_tensorboard the
+        # restarted (non-monotonic) tensorboard steps then get dropped, so the
+        # run looks "active" but records nothing. Generate a new id every launch
+        # (export WANDB_RUN_ID to intentionally resume a specific run).
+        wandb_run_id = os.environ.get("WANDB_RUN_ID") or wandb.util.generate_id()
+        with open(wandb_id_path, "w", encoding="utf-8") as f:
+            f.write(wandb_run_id)
         wandb.tensorboard.patch(root_logdir=tb_dir)
         printer.info("Initializing Weights & Biases...")
         wandb_start = time.time()
@@ -239,6 +240,16 @@ def train(args):
         f">> Creating test criterion = {args.test_criterion or args.train_criterion}"
     )
     test_criterion = eval(args.test_criterion or args.criterion).to(device)
+
+    # Optional extra diagnostic test criteria. These are evaluated on the SAME forward
+    # pass as test_criterion (no extra model forward), so you can keep test_criterion
+    # equal to train_criterion to watch overfitting while ALSO tracking the original
+    # test loss. Each is logged under its own name, so every term gets its own plot:
+    #   <test_prefix>_<name>/loss_{avg,med} and <test_prefix>_<name>/<term>_{avg,med}.
+    extra_test_criteria = {}
+    for name, expr in dict(getattr(args, "extra_test_criteria", {}) or {}).items():
+        printer.info(f">> Creating extra test criterion '{name}' = {expr}")
+        extra_test_criteria[name] = eval(expr).to(device)
 
     model.to(device)
 
@@ -347,6 +358,12 @@ def train(args):
 
     for epoch in range(args.start_epoch, args.epochs + 1):
 
+        # Keep all ranks in lockstep at the epoch boundary. The save_model() calls below
+        # run on the main process only; without a barrier the other ranks race ahead into
+        # the next collective (eval forward / next-epoch backward) while rank 0 is still in
+        # torch.save(), which desyncs NCCL and hangs until the watchdog timeout.
+        accelerator.wait_for_everyone()
+
         # Save immediately the last checkpoint
         if epoch > args.start_epoch:
             if (
@@ -371,12 +388,18 @@ def train(args):
                     log_writer=log_writer,
                     args=args,
                     prefix=test_name,
+                    extra_criteria=extra_test_criteria,
                 )
                 test_stats[test_name] = stats
 
-                # Save best of all
-                if stats["loss_med"] < best_so_far:
-                    best_so_far = stats["loss_med"]
+                # Save best of all. Aggregation is configurable via best_ckpt_agg
+                # ('med' or 'avg', default 'med'); falls back to avg if the chosen
+                # key is unavailable (e.g. median logging disabled).
+                best_key = f"loss_{getattr(args, 'best_ckpt_agg', 'med')}"
+                if best_key not in stats:
+                    best_key = "loss_avg"
+                if stats[best_key] < best_so_far:
+                    best_so_far = stats[best_key]
                     new_best = True
         # Save more stuff
         write_log_stats(epoch, train_stats, test_stats)
@@ -388,6 +411,10 @@ def train(args):
                 save_model(epoch - 1, "best", best_so_far)
         if epoch >= args.epochs:
             break  # exit after writing last test to disk
+
+        # Barrier so the main-only keep/best saves above finish before any rank enters
+        # the next training epoch's collectives.
+        accelerator.wait_for_everyone()
 
         # Train
         train_stats = train_one_epoch(
@@ -645,9 +672,18 @@ def test_one_epoch(
     args,
     log_writer=None,
     prefix="test",
+    extra_criteria=None,
 ):
 
     model.eval()
+    # Eval on the UNWRAPPED module. The test loaders are not sharded across ranks
+    # (only data_loader_train is passed to accelerator.prepare), so every rank already
+    # computes identical metrics. Keeping the DDP wrapper here makes each forward fire a
+    # buffer-broadcast collective (broadcast_buffers=True, the model has RoPE/pos-embed
+    # buffers) that deadlocks against rank 0 while it is busy in the main-only
+    # save_model() torch.save(). Unwrapping removes all eval-time collectives.
+    # Eval/logging only -> no effect on training optimization.
+    model = accelerator.unwrap_model(model)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.meters = defaultdict(lambda: misc.SmoothedValue(window_size=9**9))
     header = "Test Epoch: [{}]".format(epoch)
@@ -795,6 +831,20 @@ def test_one_epoch(
 
         loss_value, loss_details = result["loss"]  # criterion returns two values
         metric_logger.update(loss=float(loss_value), **loss_details)
+
+        # Extra diagnostic criteria on the SAME preds/views (no extra forward).
+        # Keys are namespaced by criterion so they get their own plots and never
+        # collide with the primary criterion's terms (e.g. RGBLoss_rgb/i, pose_loss).
+        if extra_criteria:
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+                for cname, crit in extra_criteria.items():
+                    extra_loss, extra_details = crit(result["views"], result["pred"])
+                    extra_kwargs = {f"{cname}/loss": float(extra_loss)}
+                    extra_kwargs.update(
+                        {f"{cname}/{k}": v for k, v in extra_details.items()}
+                    )
+                    metric_logger.update(**extra_kwargs)
+
         depth_metrics = _compute_depth_absrel_a1(batch, result["pred"])
         if depth_metrics:
             metric_logger.update(**depth_metrics)
@@ -804,7 +854,10 @@ def test_one_epoch(
 
     printer.info("Averaged stats: %s", metric_logger)
 
-    aggs = [("avg", "global_avg"), ("med", "median")]
+    # Always log avg; log median only when enabled (config: log_median, default True).
+    aggs = [("avg", "global_avg")]
+    if getattr(args, "log_median", True):
+        aggs.append(("med", "median"))
     results = {
         f"{k}_{tag}": getattr(meter, attr)
         for k, meter in metric_logger.meters.items()
@@ -1044,14 +1097,8 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
     img_mask_list = [[] for _ in range(num_imgs_vis)]
     ray_mask_list = [[] for _ in range(num_imgs_vis)]
 
-    if num_views > 30:
-        stride = 5
-    elif num_views > 20:
-        stride = 3
-    elif num_views > 10:
-        stride = 2
-    else:
-        stride = 1
+    # Always visualize every view (stride=1) regardless of sequence length.
+    stride = 1
     for i in range(0, num_views, stride):
         gt_imgs = 0.5 * (loss_details[f"gt_img{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
         width = gt_imgs.shape[2]
