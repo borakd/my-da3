@@ -163,13 +163,14 @@ def train(args):
         wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
         tb_dir = os.path.join(args.output_dir, "tb")
         os.makedirs(tb_dir, exist_ok=True)
-        if os.path.isfile(wandb_id_path):
-            with open(wandb_id_path, "r", encoding="utf-8") as f:
-                wandb_run_id = f.read().strip()
-        else:
-            wandb_run_id = wandb.util.generate_id()
-            with open(wandb_id_path, "w", encoding="utf-8") as f:
-                f.write(wandb_run_id)
+        # Fresh run id per launch. Reusing a persisted id with resume="allow"
+        # makes wandb re-attach to the old run; with sync_tensorboard the
+        # restarted (non-monotonic) tensorboard steps then get dropped, so the
+        # run looks "active" but records nothing. Generate a new id every launch
+        # (export WANDB_RUN_ID to intentionally resume a specific run).
+        wandb_run_id = os.environ.get("WANDB_RUN_ID") or wandb.util.generate_id()
+        with open(wandb_id_path, "w", encoding="utf-8") as f:
+            f.write(wandb_run_id)
         wandb.tensorboard.patch(root_logdir=tb_dir)
         printer.info("Initializing Weights & Biases...")
         wandb_start = time.time()
