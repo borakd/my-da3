@@ -60,13 +60,13 @@ def parse_args():
     parser.add_argument(
         "--size",
         type=int,
-        default="380",
+        default="320",
         help="Shape that input images will be rescaled to; if using 224+linear model, choose 224 otherwise 512",
     )
     parser.add_argument(
         "--vis_threshold",
         type=float,
-        default=1.5,
+        default=1.0,
         help="Visualization threshold for the point cloud viewer. Ranging from 1 to INF",
     )
     parser.add_argument(
@@ -103,9 +103,13 @@ def prepare_input(
         list: A list of view dictionaries.
     """
     # Import image loader (delayed import needed after adding ckpt path).
-    from src.dust3r.utils.image import load_images
+    # Use the training-matched cover-resize so e.g. a 320x180 frame at size=320
+    # becomes 320x192 (the training resolution), not 320x176 as load_images'
+    # long-edge+floor-to-16 would give. See load_images_cover in
+    # dust3r/utils/image.py. (Resolution-only change; nothing else differs.)
+    from src.dust3r.utils.image import load_images_cover
 
-    images = load_images(img_paths, size=size, square_ok=True)
+    images = load_images_cover(img_paths, size=size, square_ok=True)
     views = []
 
     if raymaps is None and raymap_mask is None:

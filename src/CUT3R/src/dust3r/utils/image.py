@@ -133,6 +133,78 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True):
     return imgs
 
 
+def load_images_cover(folder_or_list, size, square_ok=False, verbose=True, patch=16):
+    """Eval loader matching the TRAINING resize convention.
+
+    `load_images` fits the LONG edge to `size` and then crops each side DOWN to a
+    multiple of 16, so a 320x180 frame at size=320 becomes 320x176. Training
+    instead resizes to COVER a fixed (W,H) box and center-crops to it (see
+    datasets.utils.cropping.rescale_image_depthmap), which yields 320x192.
+
+    This reproduces that behaviour without touching the training path: for native
+    (W1,H1) and a requested ``size`` (interpreted as the target width), the box is
+
+        tw = (size // patch) * patch
+        th = ceil(H1 * tw / W1 / patch) * patch    # round the partial patch row UP
+
+    The image is scaled to *cover* (tw, th) (scale = max ratio, i.e. the short
+    side is upscaled if needed) and center-cropped to exactly (tw, th). A 320x180
+    frame at size=320 -> 320x192, matching the resolution the model trained at.
+    Everything downstream (true_shape, ImgNorm) is identical to ``load_images``.
+    """
+    if isinstance(folder_or_list, str):
+        if verbose:
+            print(f">> Loading images from {folder_or_list}")
+        root, folder_content = folder_or_list, sorted(os.listdir(folder_or_list))
+    elif isinstance(folder_or_list, list):
+        if verbose:
+            print(f">> Loading a list of {len(folder_or_list)} images")
+        root, folder_content = "", folder_or_list
+    else:
+        raise ValueError(f"bad {folder_or_list=} ({type(folder_or_list)})")
+
+    supported_images_extensions = [".jpg", ".jpeg", ".png", ".bmp"]
+    if heif_support_enabled:
+        supported_images_extensions += [".heic", ".heif"]
+    supported_images_extensions = tuple(supported_images_extensions)
+
+    imgs = []
+    for path in folder_content:
+        if not path.lower().endswith(supported_images_extensions):
+            continue
+        img = exif_transpose(PIL.Image.open(os.path.join(root, path))).convert("RGB")
+        W1, H1 = img.size
+        # target box: width = size (floored to patch); height = native-aspect
+        # height rounded UP to a patch multiple (partial row kept, not dropped).
+        tw = max(patch, (int(size) // patch) * patch)
+        th = ((H1 * tw + W1 * patch - 1) // (W1 * patch)) * patch  # ceil to patch
+        # scale to COVER (tw, th), then center-crop to exactly (tw, th).
+        scale = max(tw / W1, th / H1)
+        new_w = max(tw, int(round(W1 * scale)))
+        new_h = max(th, int(round(H1 * scale)))
+        interp = PIL.Image.BICUBIC if scale >= 1 else PIL.Image.LANCZOS
+        img = img.resize((new_w, new_h), interp)
+        left = (new_w - tw) // 2
+        top = (new_h - th) // 2
+        img = img.crop((left, top, left + tw, top + th))
+        W2, H2 = img.size
+        if verbose:
+            print(f" - adding {path} with resolution {W1}x{H1} --> {W2}x{H2}")
+        imgs.append(
+            dict(
+                img=ImgNorm(img)[None],
+                true_shape=np.int32([img.size[::-1]]),
+                idx=len(imgs),
+                instance=str(len(imgs)),
+            )
+        )
+
+    assert imgs, "no images foud at " + root
+    if verbose:
+        print(f" (Found {len(imgs)} images)")
+    return imgs
+
+
 def load_images_da3(folder_or_list, size, ps, square_ok=False, verbose=True):
     """open and convert all images in a list or folder to proper input format for DUSt3R"""
     if isinstance(folder_or_list, str):
