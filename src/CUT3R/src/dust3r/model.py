@@ -119,6 +119,8 @@ class ARCroco3DStereoConfig(PretrainedConfig):
         rgb_head=False,
         pose_conf_head=False,
         pose_head=False,
+        gt_pose_input=False,
+        gt_pose_fusion="mem_only",  # "mem_only" (default) | "add" | "replace"
         **croco_kwargs,
     ):
         super().__init__()
@@ -139,6 +141,8 @@ class ARCroco3DStereoConfig(PretrainedConfig):
         self.rgb_head = rgb_head
         self.pose_conf_head = pose_conf_head
         self.pose_head = pose_head
+        self.gt_pose_input = gt_pose_input
+        self.gt_pose_fusion = gt_pose_fusion
         self.croco_kwargs = croco_kwargs
 
 
@@ -259,6 +263,11 @@ class ARCroco3DStereo(CroCoNet):
         self.enc_norm_ray_map = nn.LayerNorm(self.enc_embed_dim, eps=1e-6)
         self.dec_num_heads = self.croco_args["dec_num_heads"]
         self.pose_head_flag = config.pose_head
+        # Ground-truth camera pose injected into the recurrent memory (research probe).
+        # Default off -> byte-identical to baseline. See _encode_gt_relpose_group /
+        # _forward_decoder_group_step for the memory-write injection.
+        self.gt_pose_input = bool(getattr(config, "gt_pose_input", False))
+        self.gt_pose_fusion = str(getattr(config, "gt_pose_fusion", "mem_only"))
         if self.pose_head_flag:
             self.pose_token = nn.Parameter(
                 torch.randn(1, 1, self.dec_embed_dim) * 0.02, requires_grad=True
@@ -274,6 +283,16 @@ class ARCroco3DStereo(CroCoNet):
                 norm_layer=partial(nn.LayerNorm, eps=1e-6),
                 rope=None,
             )
+            if self.gt_pose_input:
+                # 4x4 cam2world -> 768D via harmonic absT_quaR encoder (reused, no new math).
+                self.gt_pose_encoder = PoseEncoder(hidden_size=self.dec_embed_dim)
+                # Zero-init the final linear so the added term is 0 at init ->
+                # a warm-started baseline checkpoint reproduces baseline exactly.
+                nn.init.zeros_(self.gt_pose_encoder.pose_encoder.fc2.weight)
+                nn.init.zeros_(self.gt_pose_encoder.pose_encoder.fc2.bias)
+        else:
+            # gt_pose_input has no effect without the pose head / memory pathway.
+            self.gt_pose_input = False
         self.register_tokens = nn.Embedding(config.state_size, self.enc_embed_dim)
         self.state_size = config.state_size
         self.state_pe = config.state_pe
@@ -742,6 +761,33 @@ class ARCroco3DStereo(CroCoNet):
     def _get_img_level_feat(self, feat):
         return torch.mean(feat, dim=1, keepdim=True)
 
+    def _group_has_valid_gt_pose(self, views, view_indices):
+        # Guard: the reference (view 0) and every view in the group must carry a
+        # finite (B,4,4) camera_pose. Prevents feeding identity/NaN placeholder poses
+        # to a flag-on model (e.g. inference without real poses).
+        for i in [0] + list(view_indices):
+            cp = views[i].get("camera_pose", None)
+            if cp is None or not torch.isfinite(cp).all():
+                return False
+        return True
+
+    def _encode_gt_relpose_group(self, views, view_indices):
+        # Embed each view's ground-truth pose, expressed in the view-0-local frame
+        # (exactly the convention the pose loss uses: in_camera1 @ gt_camera_pose).
+        # Computed in float32 (stable batched inverse under AMP), cast back to the
+        # pose-token dtype for the additive fusion.
+        ref_inv = torch.inverse(views[0]["camera_pose"].float())  # (B,4,4) cam2world
+        feats = [
+            self.gt_pose_encoder(ref_inv @ views[i]["camera_pose"].float())  # (B,768)
+            for i in view_indices
+        ]
+        gt = torch.stack(feats, dim=1).to(self.pose_token.dtype)  # (B, group_size, 768)
+        if os.environ.get("GT_POSE_SHUFFLE", "0") == "1" and gt.shape[0] > 1:
+            # Falsifier (eval only): break the pose<->image correspondence across the
+            # batch. If metrics match the correctly-posed run, the pose isn't being used.
+            gt = gt[torch.randperm(gt.shape[0], device=gt.device)]
+        return gt
+
     def _forward_encoder(self, views):
         shape, feat_ls, pos = self._encode_views(views)
         feat = feat_ls[-1]
@@ -835,6 +881,17 @@ class ARCroco3DStereo(CroCoNet):
             pose_pos_group[..., 1] = torch.arange(
                 group_size, device=feat_cat.device, dtype=pos_cat.dtype
             )[None]
+            gt_pose_feat = None
+            if getattr(self, "gt_pose_input", False) and self._group_has_valid_gt_pose(
+                views, view_indices
+            ):
+                gt_pose_feat = self._encode_gt_relpose_group(views, view_indices)
+                if self.gt_pose_fusion == "add":
+                    pose_feat_group = pose_feat_group + gt_pose_feat
+                elif self.gt_pose_fusion == "replace":
+                    pose_feat_group = gt_pose_feat
+                # "mem_only" (default): leave the current-frame pose token unchanged;
+                # the GT signal is folded into the memory-write value below.
         else:
             global_img_feat_group = None
             pose_feat_group = None
@@ -850,6 +907,14 @@ class ARCroco3DStereo(CroCoNet):
         )
         if self.pose_head_flag:
             out_pose_feat_group = dec[-1][:, :group_size]
+            if (
+                getattr(self, "gt_pose_input", False)
+                and self.gt_pose_fusion == "mem_only"
+                and gt_pose_feat is not None
+            ):
+                # Memory-write-only fusion: the value stored in LocalMemory carries the
+                # ground-truth pose, but the current frame's prediction is untouched.
+                out_pose_feat_group = out_pose_feat_group + gt_pose_feat
             pooled_pose_feat = out_pose_feat_group.mean(dim=1, keepdim=True)
             new_mem = self.pose_retriever.update_mem(
                 mem, global_img_feat_group, pooled_pose_feat

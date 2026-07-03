@@ -28,7 +28,28 @@ def parse_args():
     parser.add_argument("--views_per_step", type=int, default=2, help="Number of synchronized views per timestep in the interleaved stream.")
     parser.add_argument("--device", type=str, default="cuda", help="Inference device.")
     parser.add_argument("--vis_threshold", type=float, default=1.5)
+    parser.add_argument("--cam_dir", type=str, default=None, help="Directory of DL3DV_Multi cam/<basename>.npz ground-truth poses. Defaults to the sibling 'cam' dir of --input_path.")
+    parser.add_argument("--disable_gt_pose", action="store_true", help="Do not feed ground-truth camera poses into the memory, even if a gt_pose_input model / cam files are available.")
     return parser.parse_args()
+
+
+def _load_c2w_for_image_path(img_path, cam_dir=None):
+    """Ground-truth cam2world (4x4) for an rgb frame, from the sibling DL3DV_Multi
+    `cam/<basename>.npz` (key 'pose'). Returns None if unavailable/invalid, so the
+    model's guard trips and it degrades to baseline instead of seeing a bogus pose."""
+    basename = os.path.splitext(os.path.basename(img_path))[0]
+    if cam_dir is None:
+        cam_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), "cam")
+    cam_path = os.path.join(cam_dir, basename + ".npz")
+    if not os.path.exists(cam_path):
+        return None
+    try:
+        pose = np.load(cam_path)["pose"].astype(np.float32)  # (4,4) cam2world
+    except Exception:
+        return None
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        return None
+    return torch.from_numpy(pose)
 
 
 def _build_views_from_image_paths(image_paths, size=512):
@@ -104,15 +125,34 @@ def run_streamed_inference_and_save(model, seq_paths, args):
     chunk_size = max(1, int(args.views_per_step))
     total_views = len(seq_paths)
 
-    # Keep only the per-view flags needed by CUT3R decoder state updates.
-    global_view_meta = [
-        {
+    # Keep only the per-view flags needed by CUT3R decoder state updates, plus the
+    # ground-truth camera pose (absolute world-frame cam2world) so a gt_pose_input
+    # model can fold it into the recurrent memory. views[0] is global frame 0, so the
+    # model's internal inv(views[0]) @ views[i] anchors on the true first frame.
+    use_gt_pose = not getattr(args, "disable_gt_pose", False)
+    cam_dir = getattr(args, "cam_dir", None)
+    global_view_meta = []
+    n_with_pose = 0
+    for i in range(total_views):
+        meta = {
             "img_mask": torch.tensor(True, device=args.device).unsqueeze(0),
             "update": torch.tensor(True, device=args.device).unsqueeze(0),
             "reset": torch.tensor(i == 0, device=args.device).unsqueeze(0),
         }
-        for i in range(total_views)
-    ]
+        if use_gt_pose:
+            c2w = _load_c2w_for_image_path(seq_paths[i], cam_dir=cam_dir)
+            if c2w is not None:
+                meta["camera_pose"] = c2w.unsqueeze(0).to(args.device)  # (1,4,4)
+                n_with_pose += 1
+        global_view_meta.append(meta)
+    if use_gt_pose:
+        # Partial coverage is safe: the per-group guard skips GT injection for any
+        # step whose views (incl. view 0) lack a finite pose -> never fed identity.
+        print(
+            f">> GT poses loaded for {n_with_pose}/{total_views} views "
+            f"(model.gt_pose_input={getattr(model, 'gt_pose_input', False)}, "
+            f"fusion={getattr(model, 'gt_pose_fusion', 'n/a')})"
+        )
 
     state_feat = state_pos = init_state_feat = mem = init_mem = None
     last_state_args = None
