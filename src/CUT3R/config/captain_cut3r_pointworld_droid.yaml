@@ -1,13 +1,13 @@
-# Design B (use_gt_pose): identical to cut3r_pointworld_droid.yaml except the model is
-# built with use_gt_pose=True, so the pose-retriever memory is teacher-forced with the
+# Design B (gt_pose_input): identical to the overfit_test_scene run's config except the model
+# is built with gt_pose_input=True, so the pose-retriever memory is teacher-forced with the
 # GT-encoded camera pose (inv(gt_0) @ gt_i) instead of the model's predicted pose, on
 # every forward pass (train + inference). The new PoseEncoder params are absent from the
 # pretrained checkpoint and load at random init (strict=False) -> trained during finetune.
 # exp_name is distinct so checkpoints/logs do not collide with the baseline.
-model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, use_gt_pose=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, gt_pose_input=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
 load_only_encoder: False
-long_context: False
+long_context: True
 fixed_length: False
 resume: null
 benchmark: False
@@ -37,8 +37,8 @@ force_consecutive_frame_sampling: True
 
 # Symlinked train/test splits under scenes/pointworld_droid_splits. ROOT must point at the
 # `dl3dv_multi` level (the loader walks ROOT/wrist/<scene>/dense and follows symlinks).
-train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/train/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
-test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
 
 # 38633 4292
 train_dataset: 672 @ ${train_data}
