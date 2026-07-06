@@ -268,6 +268,12 @@ class ARCroco3DStereo(CroCoNet):
         # _forward_decoder_group_step for the memory-write injection.
         self.gt_pose_input = bool(getattr(config, "gt_pose_input", False))
         self.gt_pose_fusion = str(getattr(config, "gt_pose_fusion", "mem_only"))
+        assert self.gt_pose_fusion in (
+            "mem_only",
+            "mem_same_step",
+            "add",
+            "replace",
+        ), f"unknown gt_pose_fusion={self.gt_pose_fusion!r}"
         if self.pose_head_flag:
             self.pose_token = nn.Parameter(
                 torch.randn(1, 1, self.dec_embed_dim) * 0.02, requires_grad=True
@@ -866,10 +872,28 @@ class ARCroco3DStereo(CroCoNet):
             global_img_feat_group = torch.stack(
                 [self._get_img_level_feat(f) for f in feat_group], dim=0
             ).mean(dim=0)
+            # Encode the ground-truth pose(s) for this group up front. The same-step
+            # fusion needs them BEFORE the memory read so frame x's own prediction is
+            # conditioned on its own GT pose (removes the mem_only off-by-one).
+            gt_pose_feat = None
+            if getattr(self, "gt_pose_input", False) and self._group_has_valid_gt_pose(
+                views, view_indices
+            ):
+                gt_pose_feat = self._encode_gt_relpose_group(views, view_indices)
+            # `mem_read` is the memory the current frame reads from. For "mem_same_step"
+            # we pre-write GT pose x into it before the inquire, so the read (and the
+            # rollout it seeds) sees GT pose x. We keep the original `mem` untouched so
+            # the masked/reset gating at the end still references the incoming state.
+            mem_read = mem
+            if self.gt_pose_fusion == "mem_same_step" and gt_pose_feat is not None:
+                gt_pooled = gt_pose_feat.mean(dim=1, keepdim=True)
+                mem_read = self.pose_retriever.update_mem(
+                    mem, global_img_feat_group, gt_pooled
+                )
             if view_indices[0] == 0:
                 pose_feat_group = self.pose_token.expand(feat_cat.shape[0], group_size, -1)
             else:
-                pose_seed = self.pose_retriever.inquire(global_img_feat_group, mem)
+                pose_seed = self.pose_retriever.inquire(global_img_feat_group, mem_read)
                 pose_feat_group = pose_seed.expand(-1, group_size, -1).contiguous()
             pose_pos_group = torch.zeros(
                 feat_cat.shape[0],
@@ -881,21 +905,19 @@ class ARCroco3DStereo(CroCoNet):
             pose_pos_group[..., 1] = torch.arange(
                 group_size, device=feat_cat.device, dtype=pos_cat.dtype
             )[None]
-            gt_pose_feat = None
-            if getattr(self, "gt_pose_input", False) and self._group_has_valid_gt_pose(
-                views, view_indices
-            ):
-                gt_pose_feat = self._encode_gt_relpose_group(views, view_indices)
+            if gt_pose_feat is not None:
                 if self.gt_pose_fusion == "add":
                     pose_feat_group = pose_feat_group + gt_pose_feat
                 elif self.gt_pose_fusion == "replace":
                     pose_feat_group = gt_pose_feat
-                # "mem_only" (default): leave the current-frame pose token unchanged;
-                # the GT signal is folded into the memory-write value below.
+                # "mem_only" / "mem_same_step": the current-frame pose token comes from
+                # memory; the GT signal enters via the memory write (post-rollout for
+                # mem_only, pre-read for mem_same_step) rather than the token itself.
         else:
             global_img_feat_group = None
             pose_feat_group = None
             pose_pos_group = None
+            mem_read = mem
         new_state_feat, dec = self._recurrent_rollout(
             state_feat,
             state_pos,
@@ -912,12 +934,15 @@ class ARCroco3DStereo(CroCoNet):
                 and self.gt_pose_fusion == "mem_only"
                 and gt_pose_feat is not None
             ):
-                # Memory-write-only fusion: the value stored in LocalMemory carries the
-                # ground-truth pose, but the current frame's prediction is untouched.
+                # Legacy off-by-one fusion: GT pose x lands in memory only AFTER the
+                # rollout, so it conditions frame x+1, not frame x.
                 out_pose_feat_group = out_pose_feat_group + gt_pose_feat
             pooled_pose_feat = out_pose_feat_group.mean(dim=1, keepdim=True)
+            # Normal recurrent content write. For mem_same_step this builds on mem_read,
+            # so the committed memory carries both GT pose x (pre-write) and the frame's
+            # content; for every other mode mem_read == mem (byte-identical to before).
             new_mem = self.pose_retriever.update_mem(
-                mem, global_img_feat_group, pooled_pose_feat
+                mem_read, global_img_feat_group, pooled_pose_feat
             )
         else:
             new_mem = mem

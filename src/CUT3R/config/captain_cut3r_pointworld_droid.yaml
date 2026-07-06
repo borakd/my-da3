@@ -1,10 +1,12 @@
 # Design B (gt_pose_input): identical to the overfit_test_scene run's config except the model
-# is built with gt_pose_input=True, so the pose-retriever memory is teacher-forced with the
-# GT-encoded camera pose (inv(gt_0) @ gt_i) instead of the model's predicted pose, on
-# every forward pass (train + inference). The new PoseEncoder params are absent from the
+# is built with gt_pose_input=True + gt_pose_fusion='mem_same_step', so the pose-retriever
+# memory is teacher-forced with the GT-encoded camera pose (inv(gt_0) @ gt_i) at every
+# step. mem_same_step writes GT pose x into memory BEFORE frame x reads it, so frame x's
+# own prediction (and its loss) is conditioned on GT pose x -- no off-by-one delay (the
+# legacy 'mem_only' only conditioned frame x+1). The new PoseEncoder params are absent from the
 # pretrained checkpoint and load at random init (strict=False) -> trained during finetune.
 # exp_name is distinct so checkpoints/logs do not collide with the baseline.
-model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, gt_pose_input=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, gt_pose_input=True, gt_pose_fusion='mem_same_step', patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
 load_only_encoder: False
 long_context: True
@@ -76,7 +78,7 @@ print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_overfit'
-exp_name: 'overfit_test_scene_captain'
+exp_name: 'overfit_test_scene_captain_v2'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/
