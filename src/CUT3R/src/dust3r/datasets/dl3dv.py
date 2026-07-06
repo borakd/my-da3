@@ -19,12 +19,15 @@ from dust3r.utils.image import imread_cv2
 
 
 class DL3DV_Multi(BaseMultiViewDataset):
-    def __init__(self, *args, split, ROOT, is_metric=False, **kwargs):
+    def __init__(
+        self, *args, split, ROOT, is_metric=False, feed_gt_ray_map=False, **kwargs
+    ):
         self.ROOT = ROOT
         self.video = True
         self.max_interval = 20
         # self.max_interval = 1
         self.is_metric = is_metric
+        self.feed_gt_ray_map = feed_gt_ray_map
         super().__init__(*args, **kwargs)
 
         self.loaded_data = self._load_data()
@@ -347,4 +350,12 @@ class DL3DV_Multi(BaseMultiViewDataset):
                     reset=False,
                 )
             )
+        if self.feed_gt_ray_map:
+            # GT-pose oracle: expose each view's ground-truth camera to the model
+            # through the pretrained ray-map encoder branch (img_mask stays True,
+            # so the image is fed alongside the rays). View 0 keeps ray_mask=False:
+            # it defines the reference frame, so its relative pose is identity and
+            # its ray map carries no pose information.
+            for v in range(1, len(views)):
+                views[v]["ray_mask"] = True
         return views

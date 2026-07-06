@@ -1,3 +1,4 @@
+import os
 import PIL
 import numpy as np
 import torch
@@ -420,6 +421,15 @@ class BaseMultiViewDataset(EasyDataset):
                 res, err_msg = is_good_type(key, val)
                 assert res, f"{err_msg} with {key}={val} for view {view_name(view)}"
             K = view["camera_intrinsics"]
+
+        if os.environ.get("GT_RAY_MAP_SHUFFLE") == "1" and len(views) > 1:
+            # Falsifier for GT-ray-map conditioning: cyclically shift the ray maps
+            # so every ray-fed view receives another view's (wrong) camera, while
+            # supervision (camera_pose/pts3d) stays correct. If metrics do not
+            # degrade vs. correct ray maps, the model is ignoring the rays.
+            shifted = [views[-1]["ray_map"]] + [w["ray_map"] for w in views[:-1]]
+            for view, rmap in zip(views, shifted):
+                view["ray_map"] = rmap
 
         if self.n_corres > 0:
             ref_view = views[0]
