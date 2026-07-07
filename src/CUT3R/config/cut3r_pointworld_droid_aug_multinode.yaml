@@ -51,8 +51,8 @@ train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scr
 test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
 
 # 38633 4292
-train_dataset: 10000 @ ${train_data}
-test_dataset: 1000 @ ${test_data}
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
 
 seed: 0
 # ===== MULTINODE (5 nodes x 4 GPUs = 20 processes) =====
@@ -95,7 +95,7 @@ print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_multinode'
-exp_name: 'multinode_finetune_aug_mini'
+exp_name: 'multinode_finetune_aug_full'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/

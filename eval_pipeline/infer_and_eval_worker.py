@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Batched CUT3R inference + depth/pose evaluation over a shard of test scenes.
+
+Loads ONE checkpoint once and processes a (round-robin) shard of scenes:
+  1. CUT3R inference on all frames of <scene>/dense/rgb  (reuses demo.py's
+     prepare_input + the model's inference(), so outputs match demo.py).
+  2. Save per-frame depth (.npy) + camera (.npz: pose=c2w, intrinsics) -- the exact
+     same depth/camera demo.py's prepare_output writes (conf/color are skipped).
+  3. Run eval_depth_poses.py (all default args) comparing pred vs <scene>/dense GT.
+
+Resumable: a scene whose eval CSV already exists (non-empty) is skipped.
+"""
+import os
+# Reduce CUDA fragmentation OOMs on very long sequences (read before torch init).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import argparse
+import contextlib
+import gc
+import glob
+import subprocess
+import sys
+import time
+import traceback
+
+import numpy as np
+import torch
+
+
+def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_knowing_depth):
+    """Replicates the depth + camera saving of demo.py:prepare_output (revisit=1),
+    writing ONLY depth/ and camera/ (skips conf/ and color/)."""
+    preds = outputs["pred"]
+
+    pts3ds_self = torch.cat([p["pts3d_in_self_view"].cpu() for p in preds], 0)  # B,H,W,3
+
+    pr_poses = [pose_encoding_to_camera(p["camera_pose"].clone()).cpu() for p in preds]
+    cam2world = torch.cat(pr_poses)  # B,4,4
+
+    B, H, W, _ = pts3ds_self.shape
+    pp = torch.tensor([W // 2, H // 2], device=pts3ds_self.device).float().repeat(B, 1)
+    focal = estimate_focal_knowing_depth(pts3ds_self, pp, focal_mode="weiszfeld")
+
+    depths = pts3ds_self[..., 2]  # B,H,W
+    intrinsics = torch.eye(3).unsqueeze(0).repeat(B, 1, 1)
+    intrinsics[:, 0, 0] = focal.detach().cpu()
+    intrinsics[:, 1, 1] = focal.detach().cpu()
+    intrinsics[:, 0, 2] = pp[:, 0]
+    intrinsics[:, 1, 2] = pp[:, 1]
+
+    depth_dir = os.path.join(outdir, "depth")
+    cam_dir = os.path.join(outdir, "camera")
+    os.makedirs(depth_dir, exist_ok=True)
+    os.makedirs(cam_dir, exist_ok=True)
+    for i in range(B):
+        np.save(os.path.join(depth_dir, f"{i:06d}.npy"), depths[i].cpu().numpy())
+        np.savez(
+            os.path.join(cam_dir, f"{i:06d}.npz"),
+            pose=cam2world[i].cpu().numpy(),
+            intrinsics=intrinsics[i].cpu().numpy(),
+        )
+    return B
+
+
+def _release_claim(claim_path, eval_csv):
+    """Remove a cooperative claim so the scene can be retried by another worker,
+    unless it actually completed (a non-empty eval CSV exists)."""
+    if not claim_path:
+        return
+    if os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0:
+        return
+    try:
+        os.rmdir(claim_path)
+    except OSError:
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--label", required=True)
+    ap.add_argument("--size", type=int, default=320)
+    ap.add_argument("--scenes_root", required=True, help=".../test/dl3dv_multi/wrist")
+    ap.add_argument("--scene_list", required=True, help="txt of scene names (one per line)")
+    ap.add_argument("--pred_base", required=True)
+    ap.add_argument("--eval_base", required=True)
+    ap.add_argument("--eval_script", required=True)
+    ap.add_argument("--cut3r_dir", required=True)
+    ap.add_argument("--shard_id", type=int, default=0)
+    ap.add_argument("--num_shards", type=int, default=1)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--limit", type=int, default=0, help="process at most N scenes (smoke test)")
+    ap.add_argument(
+        "--claim_dir",
+        default="",
+        help="If set, enable cooperative-queue mode: every worker walks ALL "
+        "scenes and atomically claims each via mkdir under this dir, so any "
+        "number of workers (across nodes / GPU types) cooperatively drain one "
+        "shared queue with no double-processing and no stall if some workers "
+        "never start. shard_id/num_shards then only set a starting offset.",
+    )
+    ap.add_argument(
+        "--ignore_skip_sentinel",
+        action="store_true",
+        help="Run even if <OUT>/logs/SKIP_<label> exists. Default: respect the "
+        "sentinel and exit immediately (used to disable a job's pass for a label "
+        "that another job is handling).",
+    )
+    args = ap.parse_args()
+
+    # Skip sentinel: lets us disable a specific (job, label) pass without editing
+    # a running job's launch loop. OUT = parent-of-parent of eval_base.
+    out_root = os.path.dirname(os.path.dirname(os.path.abspath(args.eval_base)))
+    sentinel = os.path.join(out_root, "logs", f"SKIP_{args.label}")
+    if (not args.ignore_skip_sentinel) and os.path.exists(sentinel):
+        print(f"[{args.label} shard {args.shard_id}] SKIP sentinel present "
+              f"({sentinel}); exiting without work.", flush=True)
+        return
+
+    sys.path.insert(0, args.cut3r_dir)
+    from add_ckpt_path import add_path_to_dust3r
+    add_path_to_dust3r(args.ckpt)
+
+    import demo  # provides prepare_input (no GPU/viser side effects on import)
+    from src.dust3r.inference import inference
+    from src.dust3r.model import ARCroco3DStereo
+    from src.dust3r.utils.camera import pose_encoding_to_camera
+    from src.dust3r.post_process import estimate_focal_knowing_depth
+
+    device = args.device
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
+
+    with open(args.scene_list) as f:
+        all_scenes = [ln.strip() for ln in f if ln.strip()]
+    if args.claim_dir:
+        # Cooperative-queue mode: every worker considers ALL scenes and claims
+        # each atomically (mkdir) below. shard_id/num_shards only pick a distinct
+        # starting offset so workers begin in different parts of the list and
+        # don't all contend for the same first scene.
+        os.makedirs(args.claim_dir, exist_ok=True)
+        n = len(all_scenes)
+        off = (args.shard_id * (n // max(args.num_shards, 1))) % n if n else 0
+        my_scenes = all_scenes[off:] + all_scenes[:off]
+    else:
+        my_scenes = [s for i, s in enumerate(all_scenes)
+                     if i % args.num_shards == args.shard_id]
+    if args.limit > 0:
+        my_scenes = my_scenes[: args.limit]
+
+    tag = f"[{args.label} shard {args.shard_id}/{args.num_shards}]"
+    print(f"{tag} {len(my_scenes)} scenes (of {len(all_scenes)} total). device={device}",
+          flush=True)
+
+    print(f"{tag} loading model from {args.ckpt} ...", flush=True)
+    t0 = time.time()
+    model = ARCroco3DStereo.from_pretrained(args.ckpt).to(device)
+    model.eval()
+    print(f"{tag} model loaded in {time.time()-t0:.1f}s", flush=True)
+
+    fail_log = os.path.join(args.eval_base, f"_failures_shard{args.shard_id}.txt")
+    os.makedirs(args.eval_base, exist_ok=True)
+
+    done = 0
+    skipped = 0
+    failed = 0
+    t_start = time.time()
+    for idx, scene in enumerate(my_scenes):
+        claim_path = None
+        eval_dir = os.path.join(args.eval_base, scene)
+        eval_csv = os.path.join(eval_dir, "eval_depth_pose_metrics.csv")
+        if os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0:
+            skipped += 1
+            continue
+
+        # Cooperative claim: atomically reserve this scene so concurrent workers
+        # don't process it twice. mkdir is atomic on POSIX; FileExistsError means
+        # another worker already owns it (in-progress or done).
+        if args.claim_dir:
+            claim_path = os.path.join(args.claim_dir, scene)
+            try:
+                os.mkdir(claim_path)
+            except FileExistsError:
+                skipped += 1
+                continue
+
+        rgb_dir = os.path.join(args.scenes_root, scene, "dense", "rgb")
+        gt_dense = os.path.join(args.scenes_root, scene, "dense")
+        pred_dir = os.path.join(args.pred_base, scene)
+        img_paths = sorted(glob.glob(os.path.join(rgb_dir, "*.png")) +
+                           glob.glob(os.path.join(rgb_dir, "*.jpg")))
+        if len(img_paths) < 2:
+            skipped += 1
+            _release_claim(claim_path, eval_csv)
+            continue
+
+        try:
+            ts = time.time()
+            # Run inference with one OOM retry (after a cache clear) for very long
+            # sequences; silence load_images/inference per-frame prints.
+            nfr = None
+            last_exc = None
+            for attempt in range(2):
+                outputs = state_args = views = None
+                try:
+                    with open(os.devnull, "w") as _dn, contextlib.redirect_stdout(_dn):
+                        views = demo.prepare_input(
+                            img_paths=img_paths,
+                            img_mask=[True] * len(img_paths),
+                            size=args.size,
+                            revisit=1,
+                            update=True,
+                        )
+                        with torch.no_grad():
+                            outputs, state_args = inference(views, model, device)
+                        nfr = save_depth_camera(
+                            outputs, pred_dir, pose_encoding_to_camera,
+                            estimate_focal_knowing_depth,
+                        )
+                    break
+                except torch.cuda.OutOfMemoryError as oom:
+                    last_exc = oom
+                    print(f"{tag} OOM on {scene} (frames={len(img_paths)}) "
+                          f"attempt {attempt+1}/2", flush=True)
+                finally:
+                    del outputs, state_args, views
+                    gc.collect()
+                    if device.startswith("cuda"):
+                        torch.cuda.empty_cache()
+            if nfr is None:
+                raise last_exc if last_exc is not None else RuntimeError("no output")
+
+            os.makedirs(eval_dir, exist_ok=True)
+            cmd = [
+                sys.executable, args.eval_script,
+                "--pred_root", pred_dir,
+                "--gt_root", gt_dense,
+                "--output_csv", eval_csv,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0 or not (os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0):
+                raise RuntimeError(f"eval failed rc={r.returncode}: {r.stderr[-500:]}")
+
+            done += 1
+            dt = time.time() - ts
+            if done <= 3 or done % 25 == 0:
+                rate = (time.time() - t_start) / max(done, 1)
+                remaining = (len(my_scenes) - skipped - done - failed) * rate
+                print(f"{tag} [{idx+1}/{len(my_scenes)}] {scene} frames={nfr} "
+                      f"{dt:.1f}s | done={done} skip={skipped} fail={failed} "
+                      f"ETA~{remaining/3600:.1f}h", flush=True)
+        except Exception as e:
+            failed += 1
+            with open(fail_log, "a") as fh:
+                fh.write(f"{scene}\t{repr(e)}\n")
+            print(f"{tag} FAIL {scene}: {repr(e)[:200]}", flush=True)
+            traceback.print_exc()
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
+            # Release the claim so another worker (or a later sweep) can retry.
+            _release_claim(claim_path, eval_csv)
+
+    print(f"{tag} DONE done={done} skipped={skipped} failed={failed} "
+          f"elapsed={(time.time()-t_start)/3600:.2f}h", flush=True)
+
+
+if __name__ == "__main__":
+    main()

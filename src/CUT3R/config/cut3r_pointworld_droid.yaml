@@ -1,7 +1,7 @@
 model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
 load_only_encoder: False
-long_context: False
+long_context: True
 fixed_length: False
 resume: null
 benchmark: False
@@ -29,26 +29,12 @@ allow_repeat: True
 # ordered window of `num_views` frames. When False, behaves exactly as before.
 force_consecutive_frame_sampling: True
 
-# Symlinked train/test splits under scenes/pointworld_droid_splits. ROOT must point at the
-# `dl3dv_multi` level (the loader walks ROOT/wrist/<scene>/dense and follows symlinks).
-#
-# ===== SMOKE TEST (cache verification) =====
-# Subset ROOTs with only 100 train / 10 test scenes (symlinks resolving to the same frozen
-# targets) so the raw-scan cache builds in seconds. Use this to verify caching + num_views
-# re-derive behaviour, then comment these out and restore the FULL lines below.
-# train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits_smoke/train/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
-# test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits_smoke/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
-
-# train_dataset: 100 @ ${train_data}
-# test_dataset: 10 @ ${test_data}
-
-# ===== FULL RUN (restore after smoke test passes) =====
-train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/train/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
-test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
 
 # 38633 4292
-train_dataset: 5000 @ ${train_data}
-test_dataset: 500 @ ${test_data}
+train_dataset: 672 @ ${train_data}
+test_dataset: 672 @ ${test_data}
 
 seed: 0
 batch_size: 4
@@ -62,7 +48,7 @@ min_lr: 1e-7
 warmup_epochs: 0.5
 amp: 1
 
-num_workers: 12
+num_workers: 10
 world_size: 1
 local-rank: -1
 dist_url: 'env://'
@@ -82,7 +68,7 @@ print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_overfit'
-exp_name: 'large_finetune_wrist_mini'
+exp_name: 'overfit_test_scene'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/
