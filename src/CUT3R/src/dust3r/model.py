@@ -1,42 +1,41 @@
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from collections import OrderedDict
+from dataclasses import dataclass
+from functools import partial
+from typing import Any, List, Optional
+import dust3r.utils.path_to_croco  # noqa: F401
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
-from copy import deepcopy
-from functools import partial
-from typing import Optional, Tuple, List, Any
-from dataclasses import dataclass
-from transformers import PretrainedConfig
-from transformers import PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutput
-from transformers.file_utils import ModelOutput
-import time
+from dust3r.blocks import (  # noqa
+    Attention,
+    Block,
+    CrossAttention,
+    CustomDecoderBlock,
+    DecoderBlock,
+    DropPath,
+    Mlp,
+)
+from dust3r.heads import head_factory
+from dust3r.patch_embed import get_patch_embed
+# Relative import on purpose: demo scripts call add_ckpt_path with the checkpoint's
+# own repo, which prepends THAT repo's src/ to sys.path — a plain
+# `dust3r.utils.camera` would then resolve to the other tree, which may lack
+# get_ray_map_torch. `.utils.camera` always binds to the tree this file lives in.
+from .utils.camera import get_ray_map_torch, pose_encoding_to_camera
 from dust3r.utils.misc import (
     fill_default_args,
     freeze_all_params,
-    is_symmetrized,
-    interleave,
     transpose_to_landscape,
 )
-from dust3r.heads import head_factory
-from dust3r.utils.camera import PoseEncoder
-from dust3r.patch_embed import get_patch_embed
-import dust3r.utils.path_to_croco  # noqa: F401
-from models.croco import CroCoNet, CrocoConfig  # noqa
-from dust3r.blocks import (
-    Block,
-    DecoderBlock,
-    Mlp,
-    Attention,
-    CrossAttention,
-    DropPath,
-    CustomDecoderBlock,
-)  # noqa
+from torch.utils.checkpoint import checkpoint
+from transformers import PretrainedConfig
+from transformers import PreTrainedModel  # noqa: F401  re-exported: train*.py do `from dust3r.model import PreTrainedModel`
+from transformers.file_utils import ModelOutput
+
+from models.croco import CrocoConfig, CroCoNet  # noqa
 
 inf = float("inf")
 from accelerate.logging import get_logger
@@ -84,9 +83,7 @@ def load_model(model_path, device, verbose=True):
     if "landscape_only" not in args:
         args = args[:-2] + ", landscape_only=False))"
     else:
-        args = args.replace(" ", "").replace(
-            "landscape_only=True", "landscape_only=False"
-        )
+        args = args.replace(" ", "").replace("landscape_only=True", "landscape_only=False")
     assert "landscape_only=False" in args
     if verbose:
         print(f"instantiating : {args}")
@@ -163,12 +160,8 @@ class LocalMemory(nn.Module):
         super().__init__()
         self.v_dim = v_dim
         self.proj_q = nn.Linear(k_dim, v_dim)
-        self.masked_token = nn.Parameter(
-            torch.randn(1, 1, v_dim) * 0.2, requires_grad=True
-        )
-        self.mem = nn.Parameter(
-            torch.randn(1, size, 2 * v_dim) * 0.2, requires_grad=True
-        )
+        self.masked_token = nn.Parameter(torch.randn(1, 1, v_dim) * 0.2, requires_grad=True)
+        self.mem = nn.Parameter(torch.randn(1, size, 2 * v_dim) * 0.2, requires_grad=True)
         self.write_blocks = nn.ModuleList(
             [
                 DecoderBlock(
@@ -235,9 +228,7 @@ class ARCroco3DStereo(CroCoNet):
     def __init__(self, config: ARCroco3DStereoConfig):
         self.gradient_checkpointing = False
         self.fixed_input_length = True
-        config.croco_kwargs = fill_default_args(
-            config.croco_kwargs, CrocoConfig.__init__
-        )
+        config.croco_kwargs = fill_default_args(config.croco_kwargs, CrocoConfig.__init__)
         self.config = config
         self.patch_embed_cls = config.patch_embed_cls
         self.croco_args = config.croco_kwargs
@@ -314,10 +305,8 @@ class ARCroco3DStereo(CroCoNet):
             return load_model(pretrained_model_name_or_path, device="cpu")
         else:
             try:
-                model = super(ARCroco3DStereo, cls).from_pretrained(
-                    pretrained_model_name_or_path, **kw
-                )
-            except TypeError as e:
+                model = super().from_pretrained(pretrained_model_name_or_path, **kw)
+            except TypeError:
                 raise Exception(
                     f"tried to load {pretrained_model_name_or_path} from huggingface, but failed"
                 )
@@ -515,9 +504,7 @@ class ARCroco3DStereo(CroCoNet):
             has_pose_conf=bool(pose_conf_head),
             has_pose=bool(pose_head),
         )
-        self.head = transpose_to_landscape(
-            self.downstream_head, activate=landscape_only
-        )
+        self.head = transpose_to_landscape(self.downstream_head, activate=landscape_only)
 
     def _encode_image(self, image, true_shape):
         x, pos = self.patch_embed(image, true_shape=true_shape)
@@ -543,9 +530,7 @@ class ARCroco3DStereo(CroCoNet):
 
     def _encode_state(self, image_tokens, image_pos):
         batch_size = image_tokens.shape[0]
-        state_feat = self.register_tokens(
-            torch.arange(self.state_size, device=image_pos.device)
-        )
+        state_feat = self.register_tokens(torch.arange(self.state_size, device=image_pos.device))
         if self.state_pe == "1d":
             state_pos = (
                 torch.tensor(
@@ -599,12 +584,8 @@ class ARCroco3DStereo(CroCoNet):
             else:
                 shape = torch.tensor(view["img"].shape[-2:], device=device)
                 shapes.append(shape.unsqueeze(0).repeat(batch_size, 1))
-        shapes = torch.stack(shapes, dim=0).to(
-            imgs.device
-        )  # Shape: (num_views, batch_size, 2)
-        imgs = imgs.view(
-            -1, *imgs.shape[2:]
-        )  # Shape: (num_views * batch_size, C, H, W)
+        shapes = torch.stack(shapes, dim=0).to(imgs.device)  # Shape: (num_views, batch_size, 2)
+        imgs = imgs.view(-1, *imgs.shape[2:])  # Shape: (num_views * batch_size, C, H, W)
         ray_maps = ray_maps.view(
             -1, *ray_maps.shape[2:]
         )  # Shape: (num_views * batch_size, H, W, C)
@@ -618,9 +599,7 @@ class ARCroco3DStereo(CroCoNet):
         else:
             raise NotImplementedError
         full_out = [
-            torch.zeros(
-                len(views) * batch_size, *img_out[0].shape[1:], device=img_out[0].device
-            )
+            torch.zeros(len(views) * batch_size, *img_out[0].shape[1:], device=img_out[0].device)
             for _ in range(len(img_out))
         ]
         full_pos = torch.zeros(
@@ -637,9 +616,7 @@ class ARCroco3DStereo(CroCoNet):
         selected_ray_maps = ray_maps[ray_masks_flat]
         selected_shapes_ray = shapes[ray_masks_flat]
         if selected_ray_maps.size(0) > 0:
-            ray_out, ray_pos, _ = self._encode_ray_map(
-                selected_ray_maps, selected_shapes_ray
-            )
+            ray_out, ray_pos, _ = self._encode_ray_map(selected_ray_maps, selected_shapes_ray)
             assert len(ray_out) == len(full_out), f"{len(ray_out)}, {len(full_out)}"
             for i in range(len(ray_out)):
                 full_out[i][ray_masks_flat] += ray_out[i]
@@ -657,6 +634,19 @@ class ARCroco3DStereo(CroCoNet):
             for i in range(len(ray_out)):
                 full_out[i][ray_mask_flat] += ray_out[i] * 0.0
                 full_out[i][~ray_mask_flat] += self.masked_ray_map_token * 0.0
+        if getattr(self, "feed_prev_pred", False):
+            # Previous-prediction conditioning: views >= 1 get ray tokens built
+            # from the model's own pose prediction inside the decode loop (see
+            # _forward_decoder_group_step), so the dataset must not feed rays.
+            assert not ray_masks_flat.any(), (
+                "feed_prev_pred is incompatible with dataset-side ray feeding "
+                "(feed_gt_ray_map / feed_prev_gt_ray_map / ray_mask=True)"
+            )
+            # Mirror the GT-conditioned runs, where every ray-free view gets the
+            # pretrained masked_ray_map_token: here only view 0 stays ray-free.
+            # Rows are view-major after the flatten, so view 0 is [:batch_size].
+            for i in range(len(full_out)):
+                full_out[i][:batch_size] += self.masked_ray_map_token
         return (
             shapes.chunk(len(views), dim=0),
             [out.chunk(len(views), dim=0) for out in full_out],
@@ -673,11 +663,7 @@ class ARCroco3DStereo(CroCoNet):
             pos_img = torch.cat([pos_pose, pos_img], dim=1)
         final_output.append((f_state, f_img))
         for blk_state, blk_img in zip(self.dec_blocks_state, self.dec_blocks):
-            if (
-                self.gradient_checkpointing
-                and self.training
-                and torch.is_grad_enabled()
-            ):
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
                 f_state, _ = checkpoint(
                     blk_state,
                     *final_output[-1][::+1],
@@ -799,14 +785,64 @@ class ARCroco3DStereo(CroCoNet):
         mem,
     ):
         group_size = len(view_indices)
-        feat_cat, pos_cat, token_offsets = self._concat_group_feat_pos(
-            feat_group, pos_group
-        )
+        feed_prev_pred = bool(getattr(self, "feed_prev_pred", False))
+        if feed_prev_pred:
+            # Condition view x on the pose the model itself predicted at step
+            # x-1, fed through the pretrained ray-map encoder — the closed-loop
+            # counterpart of feed_prev_gt_ray_map. The predicted pose only
+            # exists at rollout time, so the ray map is built here rather than
+            # in the dataset. The pose is stashed on the module because this
+            # step function is driven sequentially by both _forward_impl and
+            # the TBPTT loop in loss_of_one_batch_tbptt (which bypasses
+            # _forward_impl); the stash also carries it across TBPTT chunks.
+            assert group_size == 1, "feed_prev_pred requires views_per_step=1"
+            if view_indices[0] == 0:
+                # Sequence start: nothing predicted yet. View 0 already carries
+                # the masked_ray_map_token from _encode_views. Resetting here
+                # also prevents leakage across batches/sequences.
+                self._prev_pred_pose_enc = None
+            else:
+                prev_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
+                assert prev_pose_enc is not None, (
+                    "feed_prev_pred: no stashed pose from the previous step — "
+                    "views must be processed sequentially starting at view 0"
+                )
+                if os.environ.get("PREV_PRED_RAY_SHUFFLE") == "1" and prev_pose_enc.shape[0] > 1:
+                    # Falsifier: batch-roll the fed-back pose so every sample is
+                    # conditioned on another sample's prediction (same masks,
+                    # wrong content). Supervision is untouched.
+                    prev_pose_enc = torch.roll(prev_pose_enc, shifts=1, dims=0)
+                prev_view = views[view_indices[0] - 1]
+                assert "camera_intrinsics" in prev_view, (
+                    "feed_prev_pred needs per-view camera_intrinsics "
+                    "to build ray maps from predicted poses"
+                )
+                # The ray encoder is frozen (freeze='encoder') and the pose is
+                # detached by design, so nothing here needs gradients.
+                with torch.no_grad():
+                    # Build the map in fp32 even under an ambient autocast: the
+                    # GT path gets loader-built fp32 maps, only the encoder runs
+                    # autocast'd — mirror that split exactly.
+                    with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
+                        # Predicted camera_pose is the postprocessed absT_quaR
+                        # encoding, supervised relative to view 0 — the same
+                        # frame the GT ray maps use (inv(cam0) @ cam_i).
+                        # Intrinsics come from view x-1, matching
+                        # feed_prev_gt_ray_map's shift of view x-1's entire map.
+                        c2w = pose_encoding_to_camera(prev_pose_enc.float())
+                        h, w = views[view_indices[0]]["img"].shape[-2:]
+                        rmap = get_ray_map_torch(c2w, prev_view["camera_intrinsics"], h, w)
+                    ray_out, _, _ = self._encode_ray_map(
+                        rmap.permute(0, 3, 1, 2).to(feat_group[0].dtype),
+                        shape_group[0],
+                    )
+                feat_group = [feat_group[0] + ray_out[-1].to(feat_group[0].dtype)]
+        feat_cat, pos_cat, token_offsets = self._concat_group_feat_pos(feat_group, pos_group)
         debug_grouped = bool(getattr(self, "debug_grouped_updates", False))
         debug_once = bool(getattr(self, "debug_grouped_updates_once", True))
         debug_emitted = int(getattr(self, "_debug_grouped_updates_emitted", 0))
-        should_debug_print = debug_grouped and group_size > 1 and (
-            (not debug_once) or (debug_emitted == 0)
+        should_debug_print = (
+            debug_grouped and group_size > 1 and ((not debug_once) or (debug_emitted == 0))
         )
         if should_debug_print:
             for local_idx, view_idx in enumerate(view_indices):
@@ -851,9 +887,7 @@ class ARCroco3DStereo(CroCoNet):
         if self.pose_head_flag:
             out_pose_feat_group = dec[-1][:, :group_size]
             pooled_pose_feat = out_pose_feat_group.mean(dim=1, keepdim=True)
-            new_mem = self.pose_retriever.update_mem(
-                mem, global_img_feat_group, pooled_pose_feat
-            )
+            new_mem = self.pose_retriever.update_mem(mem, global_img_feat_group, pooled_pose_feat)
         else:
             new_mem = mem
         assert len(dec) == self.dec_depth + 1
@@ -886,16 +920,26 @@ class ARCroco3DStereo(CroCoNet):
             )
             res_group.append(res)
 
-        img_mask_group = torch.stack(
-            [views[i]["img_mask"] for i in view_indices], dim=0
-        ).any(dim=0)
+        if feed_prev_pred:
+            # Stash this step's predicted pose for the next step's ray map.
+            # detach(): the fed-back pose is an INPUT at step x+1, not a second
+            # gradient path into step x's pose head — and under TBPTT the
+            # previous chunk's graph is already freed, so backprop through a
+            # non-detached pose would crash at the chunk boundary.
+            self._prev_pred_pose_enc = res_group[-1]["camera_pose"].detach()
+
+        img_mask_group = torch.stack([views[i]["img_mask"] for i in view_indices], dim=0).any(
+            dim=0
+        )
         updates = [views[i].get("update", None) for i in view_indices]
         if any(update is not None for update in updates):
             update_group = torch.stack(
                 [
-                    update
-                    if update is not None
-                    else torch.ones_like(img_mask_group, dtype=torch.bool)
+                    (
+                        update
+                        if update is not None
+                        else torch.ones_like(img_mask_group, dtype=torch.bool)
+                    )
                     for update in updates
                 ],
                 dim=0,
@@ -906,16 +950,12 @@ class ARCroco3DStereo(CroCoNet):
         update_mask = update_mask[:, None, None].float()
         state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
         mem = new_mem * update_mask + mem * (1 - update_mask)
-        reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(
-            dim=0
-        )
+        reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(dim=0)
         reset_mask = reset_mask[:, None, None].float()
         state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
         mem = init_mem * reset_mask + mem * (1 - reset_mask)
         if should_debug_print:
-            print(
-                f"[GroupedUpdate] committed single state/memory update for views {view_indices}"
-            )
+            print(f"[GroupedUpdate] committed single state/memory update for views {view_indices}")
             self._debug_grouped_updates_emitted = debug_emitted + 1
         return res_group, (state_feat, mem)
 
@@ -947,7 +987,7 @@ class ARCroco3DStereo(CroCoNet):
         return res_group[0], (state_feat, mem)
 
     def _forward_impl(self, views, ret_state=False):
-        shape, feat_ls, pos = self._encode_views(views) # monkey patched to use DA3 tokens
+        shape, feat_ls, pos = self._encode_views(views)  # monkey patched to use DA3 tokens
 
         # feat_ls is a single tuple of length 118. Each tensor has shape (1, 1024, 1024)
         feat = feat_ls[-1]
@@ -960,7 +1000,6 @@ class ARCroco3DStereo(CroCoNet):
         init_state_feat = state_feat.clone()
         init_mem = mem.clone()
         all_state_args = [(state_feat, state_pos, init_state_feat, mem, init_mem)]
-
 
         ress = []
         for start, end in self._group_view_ranges(len(views)):
@@ -982,9 +1021,7 @@ class ARCroco3DStereo(CroCoNet):
             )
             ress.extend(res_group)
             for _ in view_indices:
-                all_state_args.append(
-                    (state_feat, state_pos, init_state_feat, mem, init_mem)
-                )
+                all_state_args.append((state_feat, state_pos, init_state_feat, mem, init_mem))
         if ret_state:
             return ress, views, all_state_args
         return ress, views
@@ -1043,7 +1080,7 @@ class ARCroco3DStereo(CroCoNet):
             else:
                 pose_feat_i = None
                 pose_pos_i = None
-            
+
             # Manually set image mask, reset mask, and update
             img_mask = torch.ones(feat_i.shape[0], dtype=torch.bool, device=feat_i.device)
             reset_mask = torch.zeros(feat_i.shape[0], dtype=torch.bool, device=feat_i.device)
@@ -1064,9 +1101,7 @@ class ARCroco3DStereo(CroCoNet):
                 update=update,
             )
             out_pose_feat_i = dec[-1][:, 0:1]
-            new_mem = self.pose_retriever.update_mem(
-                mem, global_img_feat_i, out_pose_feat_i
-            )
+            new_mem = self.pose_retriever.update_mem(mem, global_img_feat_i, out_pose_feat_i)
             assert len(dec) == self.dec_depth + 1
             head_input = [
                 dec[0].float(),
@@ -1079,51 +1114,41 @@ class ARCroco3DStereo(CroCoNet):
             img_mask = torch.ones(feat_i.shape[0], dtype=torch.bool, device=feat_i.device)
             update = torch.ones(feat_i.shape[0], dtype=torch.bool, device=feat_i.device)
             if update is not None:
-                update_mask = (
-                    img_mask & update
-                )  # if don't update, then whatever img_mask
+                update_mask = img_mask & update  # if don't update, then whatever img_mask
             else:
                 update_mask = img_mask
             update_mask = update_mask[:, None, None].float()
             state_feat = new_state_feat * update_mask + state_feat * (
                 1 - update_mask
             )  # update global state
-            mem = new_mem * update_mask + mem * (
-                1 - update_mask
-            )  # then update local state
+            mem = new_mem * update_mask + mem * (1 - update_mask)  # then update local state
             # reset_mask = views[i]["reset"]
             reset_mask = torch.zeros(feat_i.shape[0], dtype=torch.bool, device=feat_i.device)
             if reset_mask is not None:
                 reset_mask = reset_mask[:, None, None].float()
-                state_feat = init_state_feat * reset_mask + state_feat * (
-                    1 - reset_mask
-                )
+                state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
                 mem = init_mem * reset_mask + mem * (1 - reset_mask)
-            all_state_args.append(
-                (state_feat, state_pos, init_state_feat, mem, init_mem)
-            )
+            all_state_args.append((state_feat, state_pos, init_state_feat, mem, init_mem))
         if ret_state:
             return ress, None, all_state_args
         return ress, None
 
-
     def da3_forward(self, shape, feat_ls, pos, ret_state=False):
         if ret_state:
-            ress, views, state_args = self._da3_forward_impl(shape, feat_ls, pos, ret_state=ret_state)
+            ress, views, state_args = self._da3_forward_impl(
+                shape, feat_ls, pos, ret_state=ret_state
+            )
             return ARCroco3DStereoOutput(ress, views), state_args
         else:
             print(f"Running DA3 forward WITHOUT returning state arguments.")
             ress, views = self._da3_forward_impl(shape, feat_ls, pos, ret_state=ret_state)
             return ARCroco3DStereoOutput(ress=ress, views=views)
+
     ##################################################################################################
     ##################################################################################################
     ##################################################################################################
 
-
-
-    def inference_step(
-        self, view, state_feat, state_pos, init_state_feat, mem, init_mem
-    ):
+    def inference_step(self, view, state_feat, state_pos, init_state_feat, mem, init_mem):
         batch_size = view["img"].shape[0]
         raymaps = []
         shapes = []
@@ -1172,9 +1197,7 @@ class ARCroco3DStereo(CroCoNet):
         )
 
         out_pose_feat_i = dec[-1][:, 0:1]
-        new_mem = self.pose_retriever.update_mem(
-            mem, global_img_feat_i, out_pose_feat_i
-        )
+        self.pose_retriever.update_mem(mem, global_img_feat_i, out_pose_feat_i)
         assert len(dec) == self.dec_depth + 1
         head_input = [
             dec[0].float(),
@@ -1191,16 +1214,10 @@ class ARCroco3DStereo(CroCoNet):
         for i, view in enumerate(views):
             device = view["img"].device
             batch_size = view["img"].shape[0]
-            img_mask = view["img_mask"].reshape(
-                -1, batch_size
-            )  # Shape: (1, batch_size)
-            ray_mask = view["ray_mask"].reshape(
-                -1, batch_size
-            )  # Shape: (1, batch_size)
+            img_mask = view["img_mask"].reshape(-1, batch_size)  # Shape: (1, batch_size)
+            ray_mask = view["ray_mask"].reshape(-1, batch_size)  # Shape: (1, batch_size)
             imgs = view["img"].unsqueeze(0)  # Shape: (1, batch_size, C, H, W)
-            ray_maps = view["ray_map"].unsqueeze(
-                0
-            )  # Shape: (num_views, batch_size, H, W, C)
+            ray_maps = view["ray_map"].unsqueeze(0)  # Shape: (num_views, batch_size, H, W, C)
             shapes = (
                 view["true_shape"].unsqueeze(0)
                 if "true_shape" in view
@@ -1209,15 +1226,11 @@ class ARCroco3DStereo(CroCoNet):
                 .repeat(batch_size, 1)
                 .unsqueeze(0)
             )  # Shape: (num_views, batch_size, 2)
-            imgs = imgs.view(
-                -1, *imgs.shape[2:]
-            )  # Shape: (num_views * batch_size, C, H, W)
+            imgs = imgs.view(-1, *imgs.shape[2:])  # Shape: (num_views * batch_size, C, H, W)
             ray_maps = ray_maps.view(
                 -1, *ray_maps.shape[2:]
             )  # Shape: (num_views * batch_size, H, W, C)
-            shapes = shapes.view(-1, 2).to(
-                imgs.device
-            )  # Shape: (num_views * batch_size, 2)
+            shapes = shapes.view(-1, 2).to(imgs.device)  # Shape: (num_views * batch_size, 2)
             img_masks_flat = img_mask.view(-1)  # Shape: (num_views * batch_size)
             ray_masks_flat = ray_mask.view(-1)
             selected_imgs = imgs[img_masks_flat]
@@ -1230,9 +1243,7 @@ class ARCroco3DStereo(CroCoNet):
             selected_ray_maps = ray_maps[ray_masks_flat]
             selected_shapes_ray = shapes[ray_masks_flat]
             if selected_ray_maps.size(0) > 0:
-                ray_out, ray_pos, _ = self._encode_ray_map(
-                    selected_ray_maps, selected_shapes_ray
-                )
+                ray_out, ray_pos, _ = self._encode_ray_map(selected_ray_maps, selected_shapes_ray)
             else:
                 ray_out, ray_pos = None, None
 
@@ -1254,9 +1265,7 @@ class ARCroco3DStereo(CroCoNet):
                 mem = self.pose_retriever.mem.expand(feat_i.shape[0], -1, -1)
                 init_state_feat = state_feat.clone()
                 init_mem = mem.clone()
-                all_state_args.append(
-                    (state_feat, state_pos, init_state_feat, mem, init_mem)
-                )
+                all_state_args.append((state_feat, state_pos, init_state_feat, mem, init_mem))
 
             if self.pose_head_flag:
                 global_img_feat_i = self._get_img_level_feat(feat_i)
@@ -1286,9 +1295,7 @@ class ARCroco3DStereo(CroCoNet):
                 update=view.get("update", None),
             )
             out_pose_feat_i = dec[-1][:, 0:1]
-            new_mem = self.pose_retriever.update_mem(
-                mem, global_img_feat_i, out_pose_feat_i
-            )
+            new_mem = self.pose_retriever.update_mem(mem, global_img_feat_i, out_pose_feat_i)
             assert len(dec) == self.dec_depth + 1
             head_input = [
                 dec[0].float(),
@@ -1301,28 +1308,20 @@ class ARCroco3DStereo(CroCoNet):
             img_mask = view["img_mask"]
             update = view.get("update", None)
             if update is not None:
-                update_mask = (
-                    img_mask & update
-                )  # if don't update, then whatever img_mask
+                update_mask = img_mask & update  # if don't update, then whatever img_mask
             else:
                 update_mask = img_mask
             update_mask = update_mask[:, None, None].float()
             state_feat = new_state_feat * update_mask + state_feat * (
                 1 - update_mask
             )  # update global state
-            mem = new_mem * update_mask + mem * (
-                1 - update_mask
-            )  # then update local state
+            mem = new_mem * update_mask + mem * (1 - update_mask)  # then update local state
             reset_mask = view["reset"]
             if reset_mask is not None:
                 reset_mask = reset_mask[:, None, None].float()
-                state_feat = init_state_feat * reset_mask + state_feat * (
-                    1 - reset_mask
-                )
+                state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
                 mem = init_mem * reset_mask + mem * (1 - reset_mask)
-            all_state_args.append(
-                (state_feat, state_pos, init_state_feat, mem, init_mem)
-            )
+            all_state_args.append((state_feat, state_pos, init_state_feat, mem, init_mem))
         if ret_state:
             return ress, views, all_state_args
         return ress, views

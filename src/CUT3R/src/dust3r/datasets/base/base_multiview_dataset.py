@@ -1,14 +1,14 @@
-import os
-import PIL
-import numpy as np
-import torch
-import random
 import itertools
+import os
+import random
+import dust3r.datasets.utils.cropping as cropping
+import numpy as np
+import PIL
+import torch
 from dust3r.datasets.base.easy_dataset import EasyDataset
+from dust3r.datasets.utils.corr import extract_correspondences_from_pts3d
 from dust3r.datasets.utils.transforms import ImgNorm, SeqColorJitter
 from dust3r.utils.geometry import depthmap_to_absolute_camera_coordinates
-import dust3r.datasets.utils.cropping as cropping
-from dust3r.datasets.utils.corr import extract_correspondences_from_pts3d
 
 
 def get_ray_map(c2w1, c2w2, intrinsics, h, w):
@@ -62,13 +62,9 @@ class BaseMultiViewDataset(EasyDataset):
         assert (
             self.n_corres == "all"
             or isinstance(self.n_corres, int)
-            or (
-                isinstance(self.n_corres, list) and len(self.n_corres) == self.num_views
-            )
+            or (isinstance(self.n_corres, list) and len(self.n_corres) == self.num_views)
         ), f"Error, n_corres should either be 'all', a single integer or a list of length {self.num_views}"
-        assert (
-            self.nneg == 0 or self.n_corres != "all"
-        ), "nneg should be 0 if n_corres is all"
+        assert self.nneg == 0 or self.n_corres != "all", "nneg should be 0 if n_corres is all"
 
         self.is_seq_color_jitter = False
         if isinstance(transform, str):
@@ -96,13 +92,10 @@ class BaseMultiViewDataset(EasyDataset):
         seed=42,
     ):
         if random.random() < fixed_interval_prob:
-            intervals = random.choices(interval_range, weights=weights) * (
-                num_elements - 1
-            )
+            intervals = random.choices(interval_range, weights=weights) * (num_elements - 1)
         else:
             intervals = [
-                random.choices(interval_range, weights=weights)[0]
-                for _ in range(num_elements - 1)
+                random.choices(interval_range, weights=weights)[0] for _ in range(num_elements - 1)
             ]
         return list(itertools.accumulate([start] + intervals))
 
@@ -135,9 +128,7 @@ class BaseMultiViewDataset(EasyDataset):
             ids_sel_list.append(sorted(ids_sel))
 
         if self.allow_repeat:
-            ids_sel_list.append(
-                sorted(np.random.choice(ids_candidate, num_views, replace=True))
-            )
+            ids_sel_list.append(sorted(np.random.choice(ids_candidate, num_views, replace=True)))
 
         # add sequences with fixed intervals (all possible intervals)
         pos_i = np.where(ids_candidate == i)[0][0]
@@ -230,8 +221,7 @@ class BaseMultiViewDataset(EasyDataset):
                 return [pos_ref + i for i in range(num_views)], True
             max_interval = min(max_interval, 2 * remaining_sum // (num_views - 1))
             intervals = [
-                rng.choice(range(min_interval, max_interval + 1))
-                for _ in range(num_views - 1)
+                rng.choice(range(min_interval, max_interval + 1)) for _ in range(num_views - 1)
             ]
 
             # if video or collection
@@ -253,18 +243,9 @@ class BaseMultiViewDataset(EasyDataset):
             pos = list(itertools.accumulate([pos_ref] + intervals))
             pos = [p for p in pos if p < len(ids_all)]
             pos_candidates = [p for p in all_possible_pos if p not in pos]
-            pos = (
-                pos
-                + rng.choice(
-                    pos_candidates, num_views - len(pos), replace=False
-                ).tolist()
-            )
+            pos = pos + rng.choice(pos_candidates, num_views - len(pos), replace=False).tolist()
 
-            pos = (
-                sorted(pos)
-                if is_video
-                else self.blockwise_shuffle(pos, rng, block_shuffle)
-            )
+            pos = sorted(pos) if is_video else self.blockwise_shuffle(pos, rng, block_shuffle)
         else:
             # assert self.allow_repeat
             uniq_num = remaining_sum
@@ -287,16 +268,9 @@ class BaseMultiViewDataset(EasyDataset):
             is_video = False
             if revisit_random < 0.5 or video_prob == 1.0:  # revisit, video / collection
                 is_video = video_random < video_prob
-                pos = (
-                    self.blockwise_shuffle(pos, rng, block_shuffle)
-                    if not is_video
-                    else pos
-                )
+                pos = self.blockwise_shuffle(pos, rng, block_shuffle) if not is_video else pos
                 num_full_repeat = num_views // uniq_num
-                pos = (
-                    pos * num_full_repeat
-                    + pos[: num_views - len(pos) * num_full_repeat]
-                )
+                pos = pos * num_full_repeat + pos[: num_views - len(pos) * num_full_repeat]
             elif revisit_random < 0.9:  # random
                 pos = rng.choice(pos, num_views, replace=True)
             else:  # ordered
@@ -420,7 +394,19 @@ class BaseMultiViewDataset(EasyDataset):
             for key, val in view.items():
                 res, err_msg = is_good_type(key, val)
                 assert res, f"{err_msg} with {key}={val} for view {view_name(view)}"
-            K = view["camera_intrinsics"]
+            view["camera_intrinsics"]
+
+        if getattr(self, "feed_prev_gt_ray_map", False) and len(views) > 1:
+            # One-step-lagged GT-pose oracle: view v is conditioned on view v-1's
+            # ground-truth camera by receiving view v-1's entire ray map (pose AND
+            # intrinsics — exactly what would have been encoded at step v-1).
+            # View 0 has no predecessor; the loader keeps its ray_mask=False, so
+            # its (unshifted) ray map is never encoded. Supervision is untouched.
+            # Kept BEFORE the GT_RAY_MAP_SHUFFLE block so that falsifier remains
+            # a valid control for prev-gt runs (it then corrupts the shifted maps).
+            prev_maps = [v["ray_map"] for v in views]
+            for k in range(1, len(views)):
+                views[k]["ray_map"] = prev_maps[k - 1]
 
         if os.environ.get("GT_RAY_MAP_SHUFFLE") == "1" and len(views) > 1:
             # Falsifier for GT-ray-map conditioning: cyclically shift the ray maps
@@ -457,9 +443,7 @@ class BaseMultiViewDataset(EasyDataset):
                 width = height = resolution
             else:
                 width, height = resolution
-            assert isinstance(
-                width, int
-            ), f"Bad type for {width=} {type(width)=}, should be int"
+            assert isinstance(width, int), f"Bad type for {width=} {type(width)=}, should be int"
             assert isinstance(
                 height, int
             ), f"Bad type for {height=} {type(height)=}, should be int"
@@ -510,9 +494,7 @@ class BaseMultiViewDataset(EasyDataset):
         intrinsics2 = cropping.camera_matrix_of_crop(
             intrinsics, image.size, resolution, offset_factor=0.5
         )
-        crop_bbox = cropping.bbox_from_intrinsics_in_out(
-            intrinsics, intrinsics2, resolution
-        )
+        crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
         image, depthmap, intrinsics2 = cropping.crop_image_depthmap(
             image, depthmap, intrinsics, crop_bbox
         )

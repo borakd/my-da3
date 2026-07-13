@@ -1,9 +1,7 @@
 from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from croco.models.blocks import Mlp
 from dust3r.heads.postprocess import postprocess_pose
 
@@ -246,9 +244,7 @@ class HarmonicEmbedding(torch.nn.Module):
         which use harmonic embedding for positional encoding,
         so the input might be xyz.
         """
-        return self.get_output_dim_static(
-            input_dims, len(self._frequencies), self.append_input
-        )
+        return self.get_output_dim_static(input_dims, len(self._frequencies), self.append_input)
 
 
 class PoseEmbedding(nn.Module):
@@ -320,9 +316,9 @@ def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
     flr = torch.tensor(0.1).to(dtype=q_abs.dtype, device=q_abs.device)
     quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(flr))
 
-    out = quat_candidates[
-        F.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :
-    ].reshape(batch_dim + (4,))
+    out = quat_candidates[F.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :].reshape(
+        batch_dim + (4,)
+    )
     return standardize_quaternion(out)
 
 
@@ -418,6 +414,39 @@ def pose_encoding_to_camera(
     c2w_mats[:, :3, 3] = abs_T
 
     return c2w_mats
+
+
+def get_ray_map_torch(c2w, intrinsics, h, w):
+    """
+    Batched torch replica of datasets.base.base_multiview_dataset.get_ray_map,
+    for building ray maps inside the model (e.g. from a predicted pose).
+
+    c2w:        (B, 4, 4) camera-to-world ALREADY relative to the reference view
+                (the numpy version computes inv(c2w1) @ c2w2 itself; here the
+                caller passes that product — a predicted pose is natively in the
+                reference-view frame).
+    intrinsics: (B, 3, 3) pixel intrinsics of the camera the rays describe.
+
+    Returns (B, h, w, 6): [ray_origin | "direction"] where, matching the numpy
+    version exactly, the "direction" is normalize(c2w @ homog(K^-1 @ pixel)) —
+    a transformed *point* (translation included), not a pure direction.
+    """
+    B = c2w.shape[0]
+    device = c2w.device
+    c2w = c2w.float()
+    intrinsics = intrinsics.float()
+    ys, xs = torch.meshgrid(
+        torch.arange(h, device=device, dtype=torch.float32),
+        torch.arange(w, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    grid = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1)  # (h, w, 3)
+    rd = torch.linalg.inv(intrinsics) @ grid.reshape(-1, 3).T  # (B, 3, h*w)
+    rd = torch.cat([rd, torch.ones_like(rd[:, :1])], dim=1)  # (B, 4, h*w)
+    rd = (c2w @ rd)[:, :3].transpose(1, 2).reshape(B, h, w, 3)
+    rd = rd / rd.norm(dim=-1, keepdim=True)
+    ro = c2w[:, :3, 3].view(B, 1, 1, 3).expand(B, h, w, 3)
+    return torch.cat([ro, rd], dim=-1)
 
 
 def quaternion_conjugate(q):

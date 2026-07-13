@@ -4,58 +4,50 @@
 # References:
 # DUSt3R: https://github.com/naver/dust3r
 # --------------------------------------------------------
-import argparse
 import datetime
 import json
-import numpy as np
+import math
 import os
 import sys
 import time
-import math
-import cv2
 from collections import defaultdict
 from pathlib import Path
 from typing import Sized
-
+import cv2
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
 
-from dust3r.model import (
-    PreTrainedModel,
-    ARCroco3DStereo,
-    ARCroco3DStereoConfig,
-    inf,
-    strip_module,
-)  # noqa: F401, needed when loading the model
-from dust3r.datasets import get_data_loader
-from dust3r.losses import *  # noqa: F401, needed when loading the model
-from dust3r.inference import loss_of_one_batch, loss_of_one_batch_tbptt  # noqa
-from dust3r.viz import colorize
-from dust3r.utils.geometry import inv, geotrf
-from dust3r.utils.camera import pose_encoding_to_camera
-import dust3r.utils.path_to_croco  # noqa: F401
-import croco.utils.misc as misc  # noqa
-from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
-
-import hydra
-from omegaconf import OmegaConf
-import logging
-import pathlib
-from tqdm import tqdm
-import random
 import builtins
+import pathlib
+import random
 import shutil
-
-from accelerate import Accelerator
-from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
+from datetime import timedelta
+import croco.utils.misc as misc  # noqa
+import dust3r.utils.path_to_croco  # noqa: F401
+import hydra
+import torch.multiprocessing
+from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import send_to_device
-from datetime import timedelta
-import torch.multiprocessing
+from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
+from dust3r.datasets import get_data_loader
+from dust3r.inference import loss_of_one_batch, loss_of_one_batch_tbptt  # noqa
+from dust3r.losses import *  # noqa: F401, needed when loading the model
+from dust3r.model import (  # noqa: F401, needed when loading the model
+    ARCroco3DStereo,
+    ARCroco3DStereoConfig,
+    PreTrainedModel,
+    inf,
+    strip_module,
+)
+from dust3r.utils.camera import pose_encoding_to_camera
+from dust3r.utils.geometry import geotrf, inv
+from dust3r.viz import colorize
+from omegaconf import OmegaConf
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -79,7 +71,7 @@ def setup_for_distributed(accelerator: Accelerator):
         force = force or (accelerator.num_processes > 8)
         if accelerator.is_main_process or force:
             now = datetime.datetime.now().time()
-            builtin_print("[{}] ".format(now), end="")  # print with time stamp
+            builtin_print(f"[{now}] ", end="")  # print with time stamp
             builtin_print(*args, **kwargs)
 
     builtins.print = print
@@ -89,7 +81,7 @@ def save_current_code(outdir):
     now = datetime.datetime.now()  # current date and time
     date_time = now.strftime("%m_%d-%H-%M-%S")
     src_dir = "."
-    dst_dir = os.path.join(outdir, "code", "{}".format(date_time))
+    dst_dir = os.path.join(outdir, "code", f"{date_time}")
     shutil.copytree(
         src_dir,
         dst_dir,
@@ -142,13 +134,9 @@ def train(args):
         snapshot_start = time.time()
         dst_dir = save_current_code(outdir=args.output_dir)
         snapshot_sec = time.time() - snapshot_start
-        printer.info(
-            f"Saved current code to {dst_dir} in {snapshot_sec:.1f}s"
-        )
+        printer.info(f"Saved current code to {dst_dir} in {snapshot_sec:.1f}s")
     elif accelerator.is_main_process:
-        printer.info(
-            "Skipping code snapshot (set save_code_snapshot=true to enable)"
-        )
+        printer.info("Skipping code snapshot (set save_code_snapshot=true to enable)")
 
     use_wandb = bool(getattr(args, "use_wandb", True))
     if accelerator.is_main_process and wandb is not None and wandb.run is None and use_wandb:
@@ -171,9 +159,7 @@ def train(args):
         wandb.init(
             project=wandb_project,
             sync_tensorboard=True,
-            name=os.environ.get(
-                "WANDB_NAME", os.path.basename(args.output_dir.rstrip("/"))
-            ),
+            name=os.environ.get("WANDB_NAME", os.path.basename(args.output_dir.rstrip("/"))),
             dir=args.output_dir,
             id=wandb_run_id,
             resume=os.environ.get("WANDB_RESUME", "allow"),
@@ -187,13 +173,11 @@ def train(args):
         last_ckpt_fname = os.path.join(args.output_dir, f"checkpoint-last.pth")
         args.resume = last_ckpt_fname if os.path.isfile(last_ckpt_fname) else None
 
-    printer.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
+    printer.info(f"job dir: {os.path.dirname(os.path.realpath(__file__))}")
 
     # fix the seed
     seed = args.seed + accelerator.state.process_index
-    printer.info(
-        f"Setting seed to {seed} for process {accelerator.state.process_index}"
-    )
+    printer.info(f"Setting seed to {seed} for process {accelerator.state.process_index}")
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -208,7 +192,7 @@ def train(args):
         args.num_workers,
         accelerator=accelerator,
         test=False,
-        fixed_length=args.fixed_length
+        fixed_length=args.fixed_length,
     )
     printer.info("Building test dataset %s", args.test_dataset)
     data_loader_test = {
@@ -218,7 +202,7 @@ def train(args):
             args.num_workers,
             accelerator=accelerator,
             test=True,
-            fixed_length=True
+            fixed_length=True,
         )
         for dataset in args.test_dataset.split("+")
     }
@@ -227,18 +211,12 @@ def train(args):
     printer.info("Loading model: %s", args.model)
     model: PreTrainedModel = eval(args.model)
     printer.info(f"All model parameters: {sum(p.numel() for p in model.parameters())}")
-    printer.info(
-        f"Encoder parameters: {sum(p.numel() for p in model.enc_blocks.parameters())}"
-    )
-    printer.info(
-        f"Decoder parameters: {sum(p.numel() for p in model.dec_blocks.parameters())}"
-    )
+    printer.info(f"Encoder parameters: {sum(p.numel() for p in model.enc_blocks.parameters())}")
+    printer.info(f"Decoder parameters: {sum(p.numel() for p in model.dec_blocks.parameters())}")
 
     printer.info(f">> Creating train criterion = {args.train_criterion}")
     train_criterion = eval(args.train_criterion).to(device)
-    printer.info(
-        f">> Creating test criterion = {args.test_criterion or args.train_criterion}"
-    )
+    printer.info(f">> Creating test criterion = {args.test_criterion or args.train_criterion}")
     test_criterion = eval(args.test_criterion or args.criterion).to(device)
 
     # Optional extra diagnostic test criteria. These are evaluated on the SAME forward
@@ -264,17 +242,11 @@ def train(args):
         load_only_encoder = getattr(args, "load_only_encoder", False)
         if load_only_encoder:
             filtered_state_dict = {
-                k: v
-                for k, v in ckpt["model"].items()
-                if "enc_blocks" in k or "patch_embed" in k
+                k: v for k, v in ckpt["model"].items() if "enc_blocks" in k or "patch_embed" in k
             }
-            printer.info(
-                model.load_state_dict(strip_module(filtered_state_dict), strict=False)
-            )
+            printer.info(model.load_state_dict(strip_module(filtered_state_dict), strict=False))
         else:
-            printer.info(
-                model.load_state_dict(strip_module(ckpt["model"]), strict=False)
-            )
+            printer.info(model.load_state_dict(strip_module(ckpt["model"]), strict=False))
         del ckpt  # in case it occupies memory
 
     # # following timm: set wd as 0 for bias and norm layers
@@ -284,22 +256,23 @@ def train(args):
     loss_scaler = NativeScaler(accelerator=accelerator)
 
     accelerator.even_batches = False
-    optimizer, model, data_loader_train = accelerator.prepare(
-        optimizer, model, data_loader_train
-    )
+    optimizer, model, data_loader_train = accelerator.prepare(optimizer, model, data_loader_train)
     # Add MVU to CUT3R
     base_model = accelerator.unwrap_model(model)
     base_model.views_per_step = int(getattr(args, "views_per_step", 1))
-    base_model.debug_grouped_updates = bool(
-        getattr(args, "debug_grouped_updates", False)
-    ) and accelerator.is_main_process
-    base_model.debug_grouped_updates_once = bool(
-        getattr(args, "debug_grouped_updates_once", True)
+    # Closed-loop ray conditioning: at step x, build a ray map from the pose the
+    # model predicted at step x-1 and add it to view x's encoder tokens (see
+    # _forward_decoder_group_step). Dataset-side ray flags must be off.
+    base_model.feed_prev_pred = bool(getattr(args, "feed_prev_pred", False))
+    if base_model.feed_prev_pred:
+        assert base_model.views_per_step == 1, "feed_prev_pred requires views_per_step=1"
+        printer.info("feed_prev_pred=True: conditioning on previous predicted pose")
+    base_model.debug_grouped_updates = (
+        bool(getattr(args, "debug_grouped_updates", False)) and accelerator.is_main_process
     )
+    base_model.debug_grouped_updates_once = bool(getattr(args, "debug_grouped_updates_once", True))
     base_model._debug_grouped_updates_emitted = 0
-    printer.info(
-        f"Configured grouped recurrence with views_per_step={base_model.views_per_step}"
-    )
+    printer.info(f"Configured grouped recurrence with views_per_step={base_model.views_per_step}")
     if base_model.debug_grouped_updates:
         printer.info(
             "Grouped-update debug prints enabled"
@@ -311,9 +284,7 @@ def train(args):
             if log_writer is not None:
                 log_writer.flush()
 
-            log_stats = dict(
-                epoch=epoch, **{f"train_{k}": v for k, v in train_stats.items()}
-            )
+            log_stats = dict(epoch=epoch, **{f"train_{k}": v for k, v in train_stats.items()})
             for test_name in data_loader_test:
                 if test_name not in test_stats:
                     continue
@@ -321,9 +292,7 @@ def train(args):
                     {test_name + "_" + k: v for k, v in test_stats[test_name].items()}
                 )
 
-            with open(
-                os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8"
-            ) as f:
+            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     def save_model(epoch, fname, best_so_far):
@@ -431,7 +400,7 @@ def train(args):
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    printer.info("Training time {}".format(total_time_str))
+    printer.info(f"Training time {total_time_str}")
 
     save_final_model(accelerator, args, args.epochs, model, best_so_far=best_so_far)
 
@@ -472,7 +441,7 @@ def build_dataset(dataset, batch_size, num_workers, accelerator, test=False, fix
         shuffle=not (test),
         drop_last=not (test),
         accelerator=accelerator,
-        fixed_length=fixed_length
+        fixed_length=fixed_length,
     )
     return loader
 
@@ -493,7 +462,7 @@ def train_one_epoch(
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", misc.SmoothedValue(window_size=1, fmt="{value:.6f}"))
-    header = "Epoch: [{}]".format(epoch)
+    header = f"Epoch: [{epoch}]"
     accum_iter = args.accum_iter
 
     def save_model(epoch, fname, best_so_far):
@@ -509,7 +478,7 @@ def train_one_epoch(
         )
 
     if log_writer is not None:
-        printer.info("log_dir: {}".format(log_writer.log_dir))
+        printer.info(f"log_dir: {log_writer.log_dir}")
 
     if hasattr(data_loader, "dataset") and hasattr(data_loader.dataset, "set_epoch"):
         data_loader.dataset.set_epoch(epoch)
@@ -557,9 +526,7 @@ def train_one_epoch(
             loss_value = float(loss)
 
             if not math.isfinite(loss_value):
-                print(
-                    f"Loss is {loss_value}, stopping training, loss details: {loss_details}"
-                )
+                print(f"Loss is {loss_value}, stopping training, loss details: {loss_details}")
                 sys.exit(1)
             if not result.get("already_backprop", False):
                 loss_scaler(
@@ -625,18 +592,10 @@ def train_one_epoch(
                         batch, result["pred"], self_view=False
                     )
                     for k in range(len(batch)):
-                        loss_details[f"self_pred_depth_{k+1}"] = (
-                            depths_self[k].detach().cpu()
-                        )
-                        loss_details[f"self_gt_depth_{k+1}"] = (
-                            gt_depths_self[k].detach().cpu()
-                        )
-                        loss_details[f"pred_depth_{k+1}"] = (
-                            depths_cross[k].detach().cpu()
-                        )
-                        loss_details[f"gt_depth_{k+1}"] = (
-                            gt_depths_cross[k].detach().cpu()
-                        )
+                        loss_details[f"self_pred_depth_{k+1}"] = depths_self[k].detach().cpu()
+                        loss_details[f"self_gt_depth_{k+1}"] = gt_depths_self[k].detach().cpu()
+                        loss_details[f"pred_depth_{k+1}"] = depths_cross[k].detach().cpu()
+                        loss_details[f"gt_depth_{k+1}"] = gt_depths_cross[k].detach().cpu()
 
                 imgs_stacked_dict = get_vis_imgs_new(
                     loss_details, args.num_imgs_vis, curr_num_view, is_metric=is_metric
@@ -686,10 +645,10 @@ def test_one_epoch(
     model = accelerator.unwrap_model(model)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.meters = defaultdict(lambda: misc.SmoothedValue(window_size=9**9))
-    header = "Test Epoch: [{}]".format(epoch)
+    header = f"Test Epoch: [{epoch}]"
 
     if log_writer is not None:
-        printer.info("log_dir: {}".format(log_writer.log_dir))
+        printer.info(f"log_dir: {log_writer.log_dir}")
 
     if hasattr(data_loader, "dataset") and hasattr(data_loader.dataset, "set_epoch"):
         data_loader.dataset.set_epoch(0)
@@ -706,9 +665,7 @@ def test_one_epoch(
         for gt, pred in zip(gts, preds):
             gt_depth = geotrf(inv(gt["camera_pose"]), gt["pts3d"])[..., -1]
             pr_depth = pred["pts3d_in_self_view"][..., -1]
-            valid = gt.get(
-                "valid_mask", torch.ones_like(gt_depth, dtype=torch.bool)
-            ).bool()
+            valid = gt.get("valid_mask", torch.ones_like(gt_depth, dtype=torch.bool)).bool()
             valid = valid & torch.isfinite(gt_depth) & torch.isfinite(pr_depth)
             valid = valid & (gt_depth > 0)
 
@@ -721,9 +678,7 @@ def test_one_epoch(
                 scale = torch.median(g) / (torch.median(p) + eps)
                 p_aligned = p * scale
                 abs_rel = torch.mean(torch.abs(g - p_aligned) / (g + eps))
-                ratio = torch.maximum(
-                    g / (p_aligned + eps), p_aligned / (g + eps)
-                )
+                ratio = torch.maximum(g / (p_aligned + eps), p_aligned / (g + eps))
                 a1 = torch.mean((ratio < 1.25).double())
                 absrels.append(float(abs_rel))
                 a1s.append(float(a1))
@@ -777,9 +732,7 @@ def test_one_epoch(
                 continue
             valid_ids = torch.where(view_mask)[0].tolist()
 
-            gt_seq = torch.stack(
-                [gts[i]["camera_pose"][b] for i in valid_ids], dim=0
-            ).double()
+            gt_seq = torch.stack([gts[i]["camera_pose"][b] for i in valid_ids], dim=0).double()
             pr_seq = torch.stack([pr_cams[i][b] for i in valid_ids], dim=0).double()
 
             gt_seq = torch.linalg.inv(gt_seq[:1]) @ gt_seq
@@ -792,9 +745,7 @@ def test_one_epoch(
 
             pr_aligned = pr_seq.clone()
             pr_aligned[:, :3, :3] = R_align @ pr_seq[:, :3, :3]
-            pr_aligned[:, :3, 3] = (
-                scale * (R_align @ pr_seq[:, :3, 3].T)
-            ).T + t_align
+            pr_aligned[:, :3, 3] = (scale * (R_align @ pr_seq[:, :3, 3].T)).T + t_align
 
             ate = torch.sqrt(
                 torch.mean(torch.sum((pr_aligned[:, :3, 3] - gt_seq[:, :3, 3]) ** 2, dim=-1))
@@ -840,9 +791,7 @@ def test_one_epoch(
                 for cname, crit in extra_criteria.items():
                     extra_loss, extra_details = crit(result["views"], result["pred"])
                     extra_kwargs = {f"{cname}/loss": float(extra_loss)}
-                    extra_kwargs.update(
-                        {f"{cname}/{k}": v for k, v in extra_details.items()}
-                    )
+                    extra_kwargs.update({f"{cname}/{k}": v for k, v in extra_details.items()})
                     metric_logger.update(**extra_kwargs)
 
         depth_metrics = _compute_depth_absrel_a1(batch, result["pred"])
@@ -1102,40 +1051,23 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
     for i in range(0, num_views, stride):
         gt_imgs = 0.5 * (loss_details[f"gt_img{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
         width = gt_imgs.shape[2]
-        pred_imgs = (
-            0.5 * (loss_details[f"pred_rgb_{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
-        )
+        pred_imgs = 0.5 * (loss_details[f"pred_rgb_{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
         gt_img_list = batch_append(gt_img_list, gt_imgs.unbind(dim=0))
         pred_img_list = batch_append(pred_img_list, pred_imgs.unbind(dim=0))
 
-        cross_pred_depths = (
-            loss_details[f"pred_depth_{i+1}"][:num_imgs_vis].detach().cpu()
-        )
+        cross_pred_depths = loss_details[f"pred_depth_{i+1}"][:num_imgs_vis].detach().cpu()
         cross_gt_depths = (
-            loss_details[f"gt_depth_{i+1}"]
-            .to(gt_imgs.device)[:num_imgs_vis]
-            .detach()
-            .cpu()
+            loss_details[f"gt_depth_{i+1}"].to(gt_imgs.device)[:num_imgs_vis].detach().cpu()
         )
         cross_pred_depth_list = batch_append(
             cross_pred_depth_list, cross_pred_depths.unbind(dim=0)
         )
-        cross_gt_depth_list = batch_append(
-            cross_gt_depth_list, cross_gt_depths.unbind(dim=0)
-        )
+        cross_gt_depth_list = batch_append(cross_gt_depth_list, cross_gt_depths.unbind(dim=0))
 
-        self_gt_depths = (
-            loss_details[f"self_gt_depth_{i+1}"][:num_imgs_vis].detach().cpu()
-        )
-        self_pred_depths = (
-            loss_details[f"self_pred_depth_{i+1}"][:num_imgs_vis].detach().cpu()
-        )
-        self_gt_depth_list = batch_append(
-            self_gt_depth_list, self_gt_depths.unbind(dim=0)
-        )
-        self_pred_depth_list = batch_append(
-            self_pred_depth_list, self_pred_depths.unbind(dim=0)
-        )
+        self_gt_depths = loss_details[f"self_gt_depth_{i+1}"][:num_imgs_vis].detach().cpu()
+        self_pred_depths = loss_details[f"self_pred_depth_{i+1}"][:num_imgs_vis].detach().cpu()
+        self_gt_depth_list = batch_append(self_gt_depth_list, self_gt_depths.unbind(dim=0))
+        self_pred_depth_list = batch_append(self_pred_depth_list, self_pred_depths.unbind(dim=0))
 
         if f"conf_{i+1}" in loss_details:
             cross_view_conf = loss_details[f"conf_{i+1}"][:num_imgs_vis].detach().cpu()
@@ -1145,12 +1077,8 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
             cross_view_conf_exits = True
 
         if f"self_conf_{i+1}" in loss_details:
-            self_view_conf = (
-                loss_details[f"self_conf_{i+1}"][:num_imgs_vis].detach().cpu()
-            )
-            self_view_conf_list = batch_append(
-                self_view_conf_list, self_view_conf.unbind(dim=0)
-            )
+            self_view_conf = loss_details[f"self_conf_{i+1}"][:num_imgs_vis].detach().cpu()
+            self_view_conf_list = batch_append(self_view_conf_list, self_view_conf.unbind(dim=0))
             self_view_conf_exits = True
 
         img_mask_list = batch_append(
@@ -1165,14 +1093,10 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
     # each element in the list is [H, num_views * W, (3)], the size of the list is num_imgs_vis
     gt_img_list = [torch.cat(sublist, dim=1) for sublist in gt_img_list]
     pred_img_list = [torch.cat(sublist, dim=1) for sublist in pred_img_list]
-    cross_pred_depth_list = [
-        torch.cat(sublist, dim=1) for sublist in cross_pred_depth_list
-    ]
+    cross_pred_depth_list = [torch.cat(sublist, dim=1) for sublist in cross_pred_depth_list]
     cross_gt_depth_list = [torch.cat(sublist, dim=1) for sublist in cross_gt_depth_list]
     self_gt_depth_list = [torch.cat(sublist, dim=1) for sublist in self_gt_depth_list]
-    self_pred_depth_list = [
-        torch.cat(sublist, dim=1) for sublist in self_pred_depth_list
-    ]
+    self_pred_depth_list = [torch.cat(sublist, dim=1) for sublist in self_pred_depth_list]
     cross_view_conf_list = (
         [torch.cat(sublist, dim=1) for sublist in cross_view_conf_list]
         if cross_view_conf_exits

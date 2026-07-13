@@ -16,25 +16,41 @@ view: its relative pose is identity, so it stays image-only (ray_mask=False),
 also exactly as in training. Intrinsics are adjusted to the load_images_cover
 resize+crop so the ray maps live at the model's input resolution.
 
+--conditioning selects which variant to reproduce at inference:
+  gt        (default) view x carries its own GT ray map — feed_gt_ray_map
+            training (config captain_ray).
+  prev_gt   view x carries view x-1's GT ray map (one-step lag) —
+            feed_prev_gt_ray_map training (config captain_ray_prev_gt).
+  prev_pred no ray maps are fed from data; the model builds view x's ray map
+            from its own pose prediction at step x-1 (model.feed_prev_pred) —
+            config captain_ray_prev_pred. Poses are still loaded for the
+            intrinsics the ray-map builder needs.
+  none      no ray conditioning at all — byte-for-byte demo.py behavior
+            (images via load_images_cover, ray_mask=False everywhere, no pose
+            files needed / --pose_path ignored). Use for regular CUT3R
+            checkpoints, or as the unconditioned control for any checkpoint.
+
 Usage:
     python demo_ray.py --model_path MODEL_PATH --seq_path RGB_DIR
-                       [--pose_path CAM_DIR] [--size 320] [--device cuda]
+                       [--pose_path CAM_DIR]
+                       [--conditioning gt|prev_gt|prev_pred|none]
+                       [--size 320] [--device cuda]
                        [--output_dir OUT_DIR] [--disable_viewer]
 
 If --pose_path is omitted and --seq_path ends in ``.../rgb``, the sibling
 ``.../cam`` directory is used.
 """
 
-import os
-import numpy as np
-import torch
-import time
-import glob
-import random
 import argparse
-from add_ckpt_path import add_path_to_dust3r
+import glob
+import os
+import random
+import time
 import imageio.v2 as iio
+import numpy as np
 import PIL.Image
+import torch
+from add_ckpt_path import add_path_to_dust3r
 
 # Set random seed for reproducibility.
 random.seed(42)
@@ -66,6 +82,18 @@ def parse_args():
         help="Directory of per-frame cam .npz files ('pose' c2w + 'intrinsic'), "
         "paired with images by basename. Defaults to the 'cam' directory "
         "next to an 'rgb' --seq_path.",
+    )
+    parser.add_argument(
+        "--conditioning",
+        type=str,
+        default="gt",
+        choices=["gt", "prev_gt", "prev_pred", "none"],
+        help="Ray conditioning variant: 'gt' = each view its own GT ray map "
+        "(feed_gt_ray_map), 'prev_gt' = view x gets view x-1's GT ray map "
+        "(feed_prev_gt_ray_map), 'prev_pred' = the model builds view x's ray "
+        "map from its own step-(x-1) pose prediction (feed_prev_pred), "
+        "'none' = no ray conditioning, exactly demo.py (regular CUT3R "
+        "checkpoints; needs no pose files).",
     )
     parser.add_argument(
         "--device",
@@ -123,9 +151,7 @@ def crop_resize_training_style(image, K, resolution):
     r, b = cx + min_margin_x, cy + min_margin_y
     image, depthmap, K = cropping.crop_image_depthmap(image, depthmap, K, (l, t, r, b))
 
-    image, depthmap, K = cropping.rescale_image_depthmap(
-        image, depthmap, K, np.array(resolution)
-    )
+    image, depthmap, K = cropping.rescale_image_depthmap(image, depthmap, K, np.array(resolution))
 
     K2 = cropping.camera_matrix_of_crop(K, image.size, resolution, offset_factor=0.5)
     crop_bbox = cropping.bbox_from_intrinsics_in_out(K, K2, resolution)
@@ -154,13 +180,12 @@ def load_frames_training_style(img_paths, pose_path, size):
     ref_pose = None
     images = []
     ray_maps = []
+    intrinsics_list = []
     for i, img_path in enumerate(img_paths):
         base = os.path.splitext(os.path.basename(img_path))[0]
         npz_path = os.path.join(pose_path, base + ".npz")
         if not os.path.isfile(npz_path):
-            raise FileNotFoundError(
-                f"No pose file for frame '{base}': expected {npz_path}"
-            )
+            raise FileNotFoundError(f"No pose file for frame '{base}': expected {npz_path}")
         cam = np.load(npz_path)
         if "pose" not in cam or "intrinsic" not in cam:
             raise KeyError(
@@ -179,6 +204,7 @@ def load_frames_training_style(img_paths, pose_path, size):
             ref_pose = pose
         ray_map = get_ray_map(ref_pose, pose, K, th, tw).astype(np.float32)
         ray_maps.append(torch.from_numpy(ray_map).unsqueeze(0))  # (1, H, W, 6)
+        intrinsics_list.append(torch.from_numpy(K).unsqueeze(0))  # (1, 3, 3)
         images.append(
             dict(
                 img=ImgNorm(img)[None],
@@ -187,42 +213,100 @@ def load_frames_training_style(img_paths, pose_path, size):
                 instance=str(i),
             )
         )
-    return images, ray_maps
+    return images, ray_maps, intrinsics_list
 
 
-def prepare_input(images, ray_maps):
+def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
     """
-    Prepare input views for inference: every view carries its image, and every
-    view after the first additionally carries its GT ray map (ray_mask=True),
-    matching training with feed_gt_ray_map=True.
+    Prepare input views for inference. Every view carries its image; the ray
+    conditioning depends on the mode:
+
+    - "gt": every view after the first carries its own GT ray map
+      (ray_mask=True), matching training with feed_gt_ray_map=True.
+    - "prev_gt": every view after the first carries the PREVIOUS view's GT ray
+      map (ray_mask=True), matching feed_prev_gt_ray_map=True (the loader's
+      one-step shift).
+    - "prev_pred": no data-side rays (ray_mask=False everywhere); the model
+      builds view x's ray map from its own step-(x-1) pose prediction
+      (model.feed_prev_pred must be set). Views must carry camera_intrinsics.
 
     Args:
         images (list): load_images-style dicts from load_frames_training_style.
         ray_maps (list): Per-frame (1, H, W, 6) GT ray maps, same order.
+        intrinsics_list (list): Per-frame (1, 3, 3) intrinsics, same order.
+        conditioning (str): "gt", "prev_gt", or "prev_pred".
 
     Returns:
         list: A list of view dictionaries.
     """
-    assert len(images) == len(ray_maps), (
-        f"{len(images)} images vs {len(ray_maps)} ray maps — streams out of sync"
+    assert len(images) == len(ray_maps) == len(intrinsics_list), (
+        f"{len(images)} images vs {len(ray_maps)} ray maps vs "
+        f"{len(intrinsics_list)} intrinsics — streams out of sync"
     )
+    assert conditioning in ("gt", "prev_gt", "prev_pred"), conditioning
     views = []
     for i in range(len(images)):
         h, w = images[i]["img"].shape[-2:]
-        assert ray_maps[i].shape == (1, h, w, 6), (
-            f"frame {i}: ray map {tuple(ray_maps[i].shape)} vs image {h}x{w}"
-        )
+        # prev_gt: view i is conditioned on view i-1's camera — its entire GT
+        # ray map, exactly like the training loader's one-step shift. View 0
+        # keeps its own map but is masked off below.
+        map_idx = max(i - 1, 0) if conditioning == "prev_gt" else i
+        assert ray_maps[map_idx].shape == (
+            1,
+            h,
+            w,
+            6,
+        ), f"frame {i}: ray map {tuple(ray_maps[map_idx].shape)} vs image {h}x{w}"
         view = {
             "img": images[i]["img"],
-            "ray_map": ray_maps[i],
+            "ray_map": ray_maps[map_idx],
+            "true_shape": torch.from_numpy(images[i]["true_shape"]),
+            "idx": i,
+            "instance": str(i),
+            "camera_pose": torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(0),
+            # Needed by feed_prev_pred's in-loop ray-map builder; harmless
+            # (unused by the model) in the other modes.
+            "camera_intrinsics": intrinsics_list[i],
+            "img_mask": torch.tensor(True).unsqueeze(0),
+            # View 0 is the reference frame: image-only, exactly as in training
+            # (gt: its relative pose is identity; prev_gt: it has no
+            # predecessor). For prev_pred no data-side rays are fed at all.
+            "ray_mask": torch.tensor(i > 0 and conditioning != "prev_pred").unsqueeze(0),
+            "update": torch.tensor(True).unsqueeze(0),
+            "reset": torch.tensor(False).unsqueeze(0),
+        }
+        views.append(view)
+    return views
+
+
+def prepare_input_none(img_paths, size):
+    """Build views with NO ray conditioning — a verbatim replica of demo.py's
+    images-only ``prepare_input`` branch (load_images_cover, NaN placeholder
+    ray_map, ray_mask=False everywhere). No pose files are read, so this works
+    for regular CUT3R checkpoints exactly like demo.py does.
+    """
+    from src.dust3r.utils.image import load_images_cover
+
+    images = load_images_cover(img_paths, size=size, square_ok=True)
+    views = []
+    for i in range(len(images)):
+        view = {
+            "img": images[i]["img"],
+            "ray_map": torch.full(
+                (
+                    images[i]["img"].shape[0],
+                    6,
+                    images[i]["img"].shape[-2],
+                    images[i]["img"].shape[-1],
+                ),
+                torch.nan,
+            ),
             "true_shape": torch.from_numpy(images[i]["true_shape"]),
             "idx": i,
             "instance": str(i),
             "camera_pose": torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(0),
             "img_mask": torch.tensor(True).unsqueeze(0),
-            # View 0 is the reference frame (identity relative pose): image-only,
-            # exactly as in training. All later views are ray-conditioned.
-            "ray_mask": torch.tensor(i > 0).unsqueeze(0),
+            "ray_mask": torch.tensor(False).unsqueeze(0),
             "update": torch.tensor(True).unsqueeze(0),
             "reset": torch.tensor(False).unsqueeze(0),
         }
@@ -242,8 +326,8 @@ def prepare_output(outputs, outdir, revisit=1, use_pose=True):
     Returns:
         tuple: (points, colors, confidence, camera parameters dictionary)
     """
-    from src.dust3r.utils.camera import pose_encoding_to_camera
     from src.dust3r.post_process import estimate_focal_knowing_depth
+    from src.dust3r.utils.camera import pose_encoding_to_camera
     from src.dust3r.utils.geometry import geotrf
 
     # Only keep the outputs corresponding to one full pass.
@@ -259,8 +343,7 @@ def prepare_output(outputs, outdir, revisit=1, use_pose=True):
 
     # Recover camera poses.
     pr_poses = [
-        pose_encoding_to_camera(pred["camera_pose"].clone()).cpu()
-        for pred in outputs["pred"]
+        pose_encoding_to_camera(pred["camera_pose"].clone()).cpu() for pred in outputs["pred"]
     ]
     R_c2w = torch.cat([pr_pose[:, :3, :3] for pr_pose in pr_poses], 0)
     t_c2w = torch.cat([pr_pose[:, :3, 3] for pr_pose in pr_poses], 0)
@@ -277,9 +360,7 @@ def prepare_output(outputs, outdir, revisit=1, use_pose=True):
     pp = torch.tensor([W // 2, H // 2], device=pts3ds_self.device).float().repeat(B, 1)
     focal = estimate_focal_knowing_depth(pts3ds_self, pp, focal_mode="weiszfeld")
 
-    colors = [
-        0.5 * (output["img"].permute(0, 2, 3, 1) + 1.0) for output in outputs["views"]
-    ]
+    colors = [0.5 * (output["img"].permute(0, 2, 3, 1) + 1.0) for output in outputs["views"]]
 
     cam_dict = {
         "focal": focal.cpu().numpy(),
@@ -294,10 +375,7 @@ def prepare_output(outputs, outdir, revisit=1, use_pose=True):
     conf_self_tosave = torch.cat(conf_self)  # B, H, W
     conf_other_tosave = torch.cat(conf_other)  # B, H, W
     colors_tosave = torch.cat(
-        [
-            0.5 * (output["img"].permute(0, 2, 3, 1).cpu() + 1.0)
-            for output in outputs["views"]
-        ]
+        [0.5 * (output["img"].permute(0, 2, 3, 1).cpu() + 1.0) for output in outputs["views"]]
     )  # [B, H, W, 3]
     cam2world_tosave = torch.cat(pr_poses)  # B, 4, 4
     intrinsics_tosave = (
@@ -341,9 +419,7 @@ def parse_seq_path(p):
             f"--seq_path must be a directory of frames (got {p}); "
             "video input has no matching pose stream."
         )
-    img_paths = sorted(
-        f for f in glob.glob(f"{p}/*") if f.lower().endswith(IMAGE_EXTENSIONS)
-    )
+    img_paths = sorted(f for f in glob.glob(f"{p}/*") if f.lower().endswith(IMAGE_EXTENSIONS))
     return img_paths
 
 
@@ -372,7 +448,7 @@ def run_inference(args):
     add_path_to_dust3r(args.model_path)
 
     # Import model and inference functions after adding the ckpt path.
-    from src.dust3r.inference import inference, inference_recurrent
+    from src.dust3r.inference import inference
     from src.dust3r.model import ARCroco3DStereo
     from viser_utils import PointCloudViewer
 
@@ -382,30 +458,66 @@ def run_inference(args):
         print(f"No images found in {args.seq_path}. Please verify the path.")
         return
 
-    # Resolve and load the paired pose stream.
-    pose_path = args.pose_path or default_pose_path(args.seq_path)
-    if pose_path is None or not os.path.isdir(pose_path):
+    if args.conditioning == "none":
+        # Backwards-compatible unconditioned path: exactly demo.py. No pose
+        # stream is needed (or read); images go through load_images_cover.
+        print(f"Found {len(img_paths)} images in {args.seq_path}.")
+        print("Preparing input views (no ray conditioning — demo.py-equivalent)...")
+        views = prepare_input_none(img_paths, args.size)
         print(
-            f"No pose directory found (got {pose_path!r}). Pass --pose_path "
-            "explicitly, or point --seq_path at a '.../dense/rgb' directory."
+            f"Ray conditioning: NONE — all {len(views)} views image-only "
+            "(ray_mask=False), identical to demo.py."
         )
-        return
+    else:
+        # Resolve and load the paired pose stream.
+        pose_path = args.pose_path or default_pose_path(args.seq_path)
+        if pose_path is None or not os.path.isdir(pose_path):
+            print(
+                f"No pose directory found (got {pose_path!r}). Pass --pose_path "
+                "explicitly, point --seq_path at a '.../dense/rgb' directory, "
+                "or use --conditioning none (no poses needed)."
+            )
+            return
 
-    print(f"Found {len(img_paths)} images in {args.seq_path}.")
-    print(f"Loading frames + GT poses from {pose_path} (training-style crop)...")
-    images, ray_maps = load_frames_training_style(img_paths, pose_path, args.size)
+        print(f"Found {len(img_paths)} images in {args.seq_path}.")
+        print(f"Loading frames + GT poses from {pose_path} (training-style crop)...")
+        images, ray_maps, intrinsics_list = load_frames_training_style(
+            img_paths, pose_path, args.size
+        )
 
-    # Prepare input views.
-    print("Preparing input views...")
-    views = prepare_input(images=images, ray_maps=ray_maps)
-    print(
-        f"Ray conditioning: view 0 image-only (reference frame), "
-        f"views 1..{len(views) - 1} image + GT ray map."
-    )
+        # Prepare input views.
+        print("Preparing input views...")
+        views = prepare_input(
+            images=images,
+            ray_maps=ray_maps,
+            intrinsics_list=intrinsics_list,
+            conditioning=args.conditioning,
+        )
+        if args.conditioning == "gt":
+            print(
+                f"Ray conditioning: view 0 image-only (reference frame), "
+                f"views 1..{len(views) - 1} image + own GT ray map."
+            )
+        elif args.conditioning == "prev_gt":
+            print(
+                f"Ray conditioning: view 0 image-only (no predecessor), "
+                f"views 1..{len(views) - 1} image + PREVIOUS view's GT ray map."
+            )
+        else:
+            print(
+                f"Ray conditioning: no data-side rays; the model builds view x's "
+                f"ray map from its own step-(x-1) pose prediction "
+                f"(views 1..{len(views) - 1})."
+            )
 
     # Load and prepare the model.
     print(f"Loading model from {args.model_path}...")
     model = ARCroco3DStereo.from_pretrained(args.model_path).to(device)
+    if args.conditioning == "prev_pred":
+        # Closed-loop conditioning happens inside _forward_decoder_group_step;
+        # this model-side flag turns it on (same flag training sets from the
+        # captain_ray_prev_pred config).
+        model.feed_prev_pred = True
     model.eval()
 
     # Run inference.
@@ -420,9 +532,7 @@ def run_inference(args):
 
     # Process outputs for visualization.
     print("Preparing output for visualization...")
-    pts3ds_other, colors, conf, cam_dict = prepare_output(
-        outputs, args.output_dir, 1, True
-    )
+    pts3ds_other, colors, conf, cam_dict = prepare_output(outputs, args.output_dir, 1, True)
 
     # Convert tensors to numpy arrays for visualization.
     pts3ds_to_vis = [p.cpu().numpy() for p in pts3ds_other]

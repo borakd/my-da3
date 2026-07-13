@@ -1,9 +1,8 @@
-import os.path as osp
-import os
-import sys
-import itertools
 import hashlib
+import os
+import os.path as osp
 import pickle
+import sys
 
 try:
     import fcntl  # POSIX advisory file locking (Linux/Mac)
@@ -13,21 +12,32 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 sys.path.append(osp.join(osp.dirname(__file__), "..", ".."))
 import cv2
 import numpy as np
-
 from dust3r.datasets.base.base_multiview_dataset import BaseMultiViewDataset
 from dust3r.utils.image import imread_cv2
 
 
 class DL3DV_Multi(BaseMultiViewDataset):
     def __init__(
-        self, *args, split, ROOT, is_metric=False, feed_gt_ray_map=False, **kwargs
+        self,
+        *args,
+        split,
+        ROOT,
+        is_metric=False,
+        feed_gt_ray_map=False,
+        feed_prev_gt_ray_map=False,
+        **kwargs,
     ):
+        assert not (feed_gt_ray_map and feed_prev_gt_ray_map), (
+            "feed_gt_ray_map and feed_prev_gt_ray_map are mutually exclusive: "
+            "a view is conditioned either on its own GT camera or its predecessor's"
+        )
         self.ROOT = ROOT
         self.video = True
         self.max_interval = 20
         # self.max_interval = 1
         self.is_metric = is_metric
         self.feed_gt_ray_map = feed_gt_ray_map
+        self.feed_prev_gt_ray_map = feed_prev_gt_ray_map
         super().__init__(*args, **kwargs)
 
         self.loaded_data = self._load_data()
@@ -160,9 +170,7 @@ class DL3DV_Multi(BaseMultiViewDataset):
                         raw_scan = self._build_raw_scan()
                         self._save_cache(scan_path, signature, raw_scan)
                     else:
-                        print(
-                            f"[DL3DV_Multi] scan built by another process: {scan_path}"
-                        )
+                        print(f"[DL3DV_Multi] scan built by another process: {scan_path}")
                 finally:
                     fcntl.flock(lock_f, fcntl.LOCK_UN)
         else:
@@ -209,16 +217,10 @@ class DL3DV_Multi(BaseMultiViewDataset):
                     subscenes.append(osp.join(scene, f))
 
         scans = []  # list of (scene, rgb_paths) for every non-empty subscene
-        for scene in self._progress(
-            subscenes, total=len(subscenes), desc="Scanning scenes"
-        ):
+        for scene in self._progress(subscenes, total=len(subscenes), desc="Scanning scenes"):
             scene_dir = osp.join(self.ROOT, scene, "dense")
             rgb_paths = sorted(
-                [
-                    f
-                    for f in os.listdir(os.path.join(scene_dir, "rgb"))
-                    if f.endswith(".png")
-                ]
+                [f for f in os.listdir(os.path.join(scene_dir, "rgb")) if f.endswith(".png")]
             )
             assert len(rgb_paths) > 0, f"{scene_dir} is empty."
             scans.append((scene, rgb_paths))
@@ -238,9 +240,7 @@ class DL3DV_Multi(BaseMultiViewDataset):
         start_img_ids = []
         j = 0
 
-        cut_off = (
-            self.num_views if not self.allow_repeat else max(self.num_views // 3, 3)
-        )
+        cut_off = self.num_views if not self.allow_repeat else max(self.num_views // 3, 3)
 
         for scene, rgb_paths in raw_scan["scans"]:
             num_imgs = len(rgb_paths)
@@ -296,19 +296,12 @@ class DL3DV_Multi(BaseMultiViewDataset):
             rgb_path = self.images[view_idx]
             basename = rgb_path[:-4]
 
-            rgb_image = imread_cv2(
-                osp.join(scene_dir, "rgb", rgb_path), cv2.IMREAD_COLOR
-            )
-            depthmap = np.load(osp.join(scene_dir, "depth", basename + ".npy")).astype(
-                np.float32
-            )
+            rgb_image = imread_cv2(osp.join(scene_dir, "rgb", rgb_path), cv2.IMREAD_COLOR)
+            depthmap = np.load(osp.join(scene_dir, "depth", basename + ".npy")).astype(np.float32)
             depthmap[~np.isfinite(depthmap)] = 0  # invalid
             cam_file = np.load(osp.join(scene_dir, "cam", basename + ".npz"))
             sky_mask = (
-                cv2.imread(
-                    osp.join(scene_dir, "sky_mask", rgb_path), cv2.IMREAD_UNCHANGED
-                )
-                >= 127
+                cv2.imread(osp.join(scene_dir, "sky_mask", rgb_path), cv2.IMREAD_UNCHANGED) >= 127
             )
             outlier_mask = cv2.imread(
                 osp.join(scene_dir, "outlier_mask", rgb_path), cv2.IMREAD_UNCHANGED
@@ -350,12 +343,15 @@ class DL3DV_Multi(BaseMultiViewDataset):
                     reset=False,
                 )
             )
-        if self.feed_gt_ray_map:
-            # GT-pose oracle: expose each view's ground-truth camera to the model
-            # through the pretrained ray-map encoder branch (img_mask stays True,
-            # so the image is fed alongside the rays). View 0 keeps ray_mask=False:
-            # it defines the reference frame, so its relative pose is identity and
-            # its ray map carries no pose information.
+        if self.feed_gt_ray_map or self.feed_prev_gt_ray_map:
+            # GT-pose oracle: expose a ground-truth camera to the model through
+            # the pretrained ray-map encoder branch (img_mask stays True, so the
+            # image is fed alongside the rays). With feed_gt_ray_map each view
+            # carries its own camera; with feed_prev_gt_ray_map the ray maps are
+            # shifted one step back in BaseMultiViewDataset.__getitem__ so view v
+            # carries view v-1's camera. View 0 keeps ray_mask=False: it defines
+            # the reference frame (feed_gt_ray_map: its relative pose is identity;
+            # feed_prev_gt_ray_map: it has no predecessor).
             for v in range(1, len(views)):
                 views[v]["ray_mask"] = True
         return views
