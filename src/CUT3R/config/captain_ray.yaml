@@ -37,16 +37,32 @@ force_consecutive_frame_sampling: True
 # must degrade vs. the correct-ray run, else the model is ignoring the rays.
 feed_gt_ray_map: True
 
-train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map})'
-test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map})'
+# One-step-lagged variant: view x is conditioned on view x-1's GT camera instead
+# of its own (view x-1's entire ray map, shifted in the loader). Mutually
+# exclusive with feed_gt_ray_map. See config captain_ray_prev_gt.
+feed_prev_gt_ray_map: False
+
+# Closed-loop variant: view x is conditioned on the pose the model PREDICTED at
+# step x-1, built into a ray map inside the decode loop (model-side flag, not a
+# dataset flag — both dataset ray flags must be False). Falsifier: env
+# PREV_PRED_RAY_SHUFFLE=1. See config captain_ray_prev_pred.
+feed_prev_pred: False
+
+# ONE TEST SCENE
+# train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+# test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+
+# FULL DATASET
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
 
 # 38633 4292
-train_dataset: 672 @ ${train_data}
-test_dataset: 672 @ ${test_data}
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
 
 seed: 0
 batch_size: 4
-accum_iter: 4
+accum_iter: 1
 gradient_checkpointing: True
 epochs: 50
 start_epoch: 0
@@ -75,8 +91,8 @@ keep_freq: 10
 print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
-save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_overfit'
-exp_name: 'captain_ray'
+save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_multinode'
+exp_name: 'captain_ray_finetune_aug_full'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/
