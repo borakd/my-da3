@@ -53,12 +53,12 @@ feed_prev_pred: False
 # test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
 
 # FULL DATASET
-train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
-test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/scratch/bdursun25/cuteanything/scenes/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
 
 # 38633 4292
-train_dataset: 38633 @ ${train_data}
-test_dataset: 4292 @ ${test_data}
+train_dataset: 672 @ ${train_data}
+test_dataset: 672 @ ${test_data}
 
 seed: 0
 batch_size: 4
@@ -91,8 +91,8 @@ keep_freq: 10
 print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
-save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_multinode'
-exp_name: 'captain_ray_finetune_aug_full'
+save_dir: '/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse'
+exp_name: 'captain_ray_current_gt'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/
