@@ -34,11 +34,12 @@ src/debug_main.py
 temp*.png
 /outputs
 .venv/
+/eval_pipeline
+/traj_plots
+*.sh
 
 # Ignore streaming version, takes unnecessary space
 da3_streaming/
-
-
 
 # Ignore CUT3R logs, checkpoints, and old configs
 logs/
