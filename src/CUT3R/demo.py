@@ -48,7 +48,8 @@ def parse_args():
     parser.add_argument(
         "--seq_path",
         type=str,
-        default="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist/dl3dv_multi/AUTOLab+0d4edc83+2023-10-21-19h-06m-10s/18026681+wrist/dense/rgb",
+        # default="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist/dl3dv_multi/AUTOLab+0d4edc83+2023-10-21-19h-06m-10s/18026681+wrist/dense/rgb",
+        default="/scratch/bdursun25/cuteanything/captain_ray/src/CUT3R/examples/001",
         help="Path to the directory containing the image sequence.",
     )
     parser.add_argument(
