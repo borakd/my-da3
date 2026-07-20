@@ -141,7 +141,7 @@ def train(args):
     use_wandb = bool(getattr(args, "use_wandb", True))
     if accelerator.is_main_process and wandb is not None and wandb.run is None and use_wandb:
         # Added a default project name so it doesn't silently fail to log
-        wandb_project = os.environ.get("WANDB_PROJECT", "pointworld-droid-v1")
+        wandb_project = os.environ.get("WANDB_PROJECT", "pointworld-droid-v2")
         wandb_id_path = os.path.join(args.output_dir, "wandb_run_id.txt")
         tb_dir = os.path.join(args.output_dir, "tb")
         os.makedirs(tb_dir, exist_ok=True)
