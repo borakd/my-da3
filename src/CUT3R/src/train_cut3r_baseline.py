@@ -752,12 +752,22 @@ def test_one_epoch(
             )
             ate_list.append(float(ate))
 
+            # Per-sequence RPE aggregated as RMSE over this sequence's consecutive
+            # pairs, then averaged across sequences below -- matching CUT3R's
+            # eval/relpose/evo_utils.eval_metrics (evo rpe .stats["rmse"]) and
+            # eval_depth_poses.py's --pose_reduce rmse. Previously all pairs from
+            # every sequence were pooled into one arithmetic mean.
+            seq_rpe_trans = []
+            seq_rpe_rot = []
             for i in range(pr_aligned.shape[0] - 1):
                 gt_rel = torch.linalg.inv(gt_seq[i]) @ gt_seq[i + 1]
                 pr_rel = torch.linalg.inv(pr_aligned[i]) @ pr_aligned[i + 1]
                 err = torch.linalg.inv(gt_rel) @ pr_rel
-                rpe_trans_list.append(float(torch.linalg.norm(err[:3, 3])))
-                rpe_rot_list.append(float(_pose_rot_err_deg(err[:3, :3])))
+                seq_rpe_trans.append(float(torch.linalg.norm(err[:3, 3])))
+                seq_rpe_rot.append(float(_pose_rot_err_deg(err[:3, :3])))
+            if seq_rpe_trans:
+                rpe_trans_list.append(float(np.sqrt(np.mean(np.square(seq_rpe_trans)))))
+                rpe_rot_list.append(float(np.sqrt(np.mean(np.square(seq_rpe_rot)))))
 
         if len(ate_list) == 0:
             return {}
