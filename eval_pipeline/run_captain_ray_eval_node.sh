@@ -34,7 +34,7 @@ source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
 conda activate cuteanything
 
 ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_ray
+CRAY=$ROOT/captain_gru
 CUT3R_DIR=$CRAY/src/CUT3R
 EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
 SCENES_ROOT=$ROOT/scenes/pointworld_droid_splits/test/dl3dv_multi/wrist

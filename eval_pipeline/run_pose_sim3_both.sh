@@ -24,7 +24,7 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_TH
 LABELS=${LABELS:-"regular final augfull_last augfull_last_ep14 infinitevggt augfull_final"}
 
 echo "Node: $(hostname)  CPUs: ${SLURM_CPUS_PER_TASK}  Labels: $LABELS  Start: $(date)"
-python "$ROOT/captain_ray/eval_pipeline/pose_sim3_both.py" \
+python "$ROOT/captain_gru/eval_pipeline/pose_sim3_both.py" \
   --out_root "$OUT" --scenes_root "$SCENES_ROOT" \
   --scene_list "$OUT/scene_list.txt" \
   --labels $LABELS \
