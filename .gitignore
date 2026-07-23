@@ -34,9 +34,9 @@ src/debug_main.py
 temp*.png
 /outputs
 .venv/
-/eval_pipeline
 /traj_plots
 *.sh
+!eval_pipeline/*.sh
 
 # Ignore streaming version, takes unnecessary space
 da3_streaming/
