@@ -659,33 +659,97 @@ def test_one_epoch(
     ):
         data_loader.batch_sampler.batch_sampler.set_epoch(0)
 
-    def _compute_depth_absrel_a1(gts, preds, eps=1e-8):
-        absrels = []
-        a1s = []
+    # CUT3R's OWN depth_evaluation, imported so the mono/video math is byte-identical
+    # to eval/monodepth/tools.py and eval/video_depth/tools.py (the two functions are
+    # identical). Lazy import: a missing optional dep must never abort a test epoch.
+    try:
+        from eval.monodepth.tools import depth_evaluation as _mono_depth_eval
+        from eval.video_depth.tools import depth_evaluation as _video_depth_eval
+    except Exception as _imp_err:  # pragma: no cover - optional-dep guard
+        _mono_depth_eval = _video_depth_eval = None
+        printer.info(
+            f"[test] CUT3R depth_evaluation import failed ({_imp_err}); "
+            "depth metrics disabled this run"
+        )
+
+    def _masked_gt_pred_depths(gts, preds):
+        """Per view: (gt_depth, pred_depth) as (B,H,W) with invalid GT pixels zeroed.
+
+        Invalid = ~valid_mask | non-finite | gt<=0. Zeroing GT there makes CUT3R's
+        internal (gt>0) mask select exactly the valid pixels for BOTH the alignment
+        and the metric. Detached: eval/logging only, no graph.
+        """
+        out = []
         for gt, pred in zip(gts, preds):
             gt_depth = geotrf(inv(gt["camera_pose"]), gt["pts3d"])[..., -1]
             pr_depth = pred["pts3d_in_self_view"][..., -1]
             valid = gt.get("valid_mask", torch.ones_like(gt_depth, dtype=torch.bool)).bool()
-            valid = valid & torch.isfinite(gt_depth) & torch.isfinite(pr_depth)
-            valid = valid & (gt_depth > 0)
+            valid = valid & torch.isfinite(gt_depth) & torch.isfinite(pr_depth) & (gt_depth > 0)
+            gt_masked = torch.where(valid, gt_depth, torch.zeros_like(gt_depth))
+            out.append((gt_masked.detach(), pr_depth.detach()))
+        return out
 
-            for b in range(gt_depth.shape[0]):
-                mask = valid[b]
-                if mask.sum() == 0:
-                    continue
-                g = gt_depth[b][mask].double()
-                p = pr_depth[b][mask].double()
-                scale = torch.median(g) / (torch.median(p) + eps)
-                p_aligned = p * scale
-                abs_rel = torch.mean(torch.abs(g - p_aligned) / (g + eps))
-                ratio = torch.maximum(g / (p_aligned + eps), p_aligned / (g + eps))
-                a1 = torch.mean((ratio < 1.25).double())
-                absrels.append(float(abs_rel))
-                a1s.append(float(a1))
+    def _pixelweighted_avg(vals, weights):
+        vals = np.asarray(vals, dtype=np.float64)
+        weights = np.asarray(weights, dtype=np.float64)
+        keep = np.isfinite(vals) & np.isfinite(weights) & (weights > 0)
+        if not keep.any():
+            return None
+        return float(np.average(vals[keep], weights=weights[keep]))
 
-        if len(absrels) == 0:
+    def _compute_depth_metrics(gts, preds):
+        """MONO and VIDEO depth metrics, each identical to CUT3R's own protocol.
+
+        MONO  (eval/monodepth/eval_metrics.py): each frame aligned INDEPENDENTLY by
+               median(gt)/median(pred), abs_rel / (delta<1.25) per frame, then
+               valid-pixel-weighted mean over frames.
+        VIDEO (eval/video_depth/eval_depth.py --align scale): all num_views frames of
+               one clip (= one batch element) aligned by ONE Weiszfeld scale
+               (align_with_scale) over pooled pixels, metrics pooled, then
+               valid-pixel-weighted mean over clips.
+        Both call CUT3R's depth_evaluation verbatim, so the per-frame / per-clip math
+        is identical. Logged as absrel/a1 (mono) and video_absrel/video_a1 (video).
+        Per-batch values are reduced across batches by the MetricLogger the same
+        (mean-of-batch-means) way as loss/pose. Eval/logging only.
+        """
+        if _mono_depth_eval is None:
             return {}
-        return {"absrel": float(np.mean(absrels)), "a1": float(np.mean(a1s))}
+        views = _masked_gt_pred_depths(gts, preds)
+        if not views:
+            return {}
+        batch_size = views[0][0].shape[0]
+
+        # MONO: per-frame median alignment (default branch of depth_evaluation).
+        m_absrel, m_a1, m_w = [], [], []
+        for gt_v, pr_v in views:
+            for b in range(gt_v.shape[0]):
+                res, _, _, _ = _mono_depth_eval(pr_v[b], gt_v[b], max_depth=None)
+                m_absrel.append(res["Abs Rel"])
+                m_a1.append(res["δ < 1.25"])
+                m_w.append(res["valid_pixels"])
+
+        # VIDEO: one Weiszfeld scale per clip over its stacked (T,H,W) frames.
+        v_absrel, v_a1, v_w = [], [], []
+        for b in range(batch_size):
+            gt_stack = torch.stack([gt_v[b] for gt_v, _ in views], dim=0)
+            pr_stack = torch.stack([pr_v[b] for _, pr_v in views], dim=0)
+            res, _, _, _ = _video_depth_eval(
+                pr_stack, gt_stack, max_depth=None, align_with_scale=True
+            )
+            v_absrel.append(res["Abs Rel"])
+            v_a1.append(res["δ < 1.25"])
+            v_w.append(res["valid_pixels"])
+
+        out = {}
+        mono_absrel = _pixelweighted_avg(m_absrel, m_w)
+        if mono_absrel is not None:
+            out["absrel"] = mono_absrel
+            out["a1"] = _pixelweighted_avg(m_a1, m_w)
+        video_absrel = _pixelweighted_avg(v_absrel, v_w)
+        if video_absrel is not None:
+            out["video_absrel"] = video_absrel
+            out["video_a1"] = _pixelweighted_avg(v_a1, v_w)
+        return out
 
     def _align_points_similarity(pr_pts, gt_pts, eps=1e-8):
         pr = pr_pts.double()
@@ -804,7 +868,7 @@ def test_one_epoch(
                     extra_kwargs.update({f"{cname}/{k}": v for k, v in extra_details.items()})
                     metric_logger.update(**extra_kwargs)
 
-        depth_metrics = _compute_depth_absrel_a1(batch, result["pred"])
+        depth_metrics = _compute_depth_metrics(batch, result["pred"])
         if depth_metrics:
             metric_logger.update(**depth_metrics)
         pose_metrics = _compute_pose_metrics(batch, result["pred"])
