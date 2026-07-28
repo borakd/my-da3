@@ -12,7 +12,7 @@
 #   COMPLETE            -> done; caller should aggregate, present table, and ping
 set -o pipefail
 OUT=/scratch/bdursun25/cuteanything/outputs/cut3r_eval
-MYDA3=/scratch/bdursun25/cuteanything/captain_gru
+MYDA3=/scratch/bdursun25/cuteanything/captain_gru_v2
 JOBID=$(cat "$OUT/logs/jobid.txt" 2>/dev/null)
 RJOB=$(cat "$OUT/logs/regular_jobid.txt" 2>/dev/null)
 echo "main_jobid=$JOBID regular_jobid=$RJOB"
@@ -22,7 +22,7 @@ echo "main_jobid=$JOBID regular_jobid=$RJOB"
 # main job's worker_g*_ logs and the parallel job's worker_NEWg*_ logs). When a
 # checkpoint finishes, snapshot its averages to averages_after_<label>.{txt,md}
 # (eval CSVs already exist from inline per-scene eval), plus a cumulative table.
-AGG="conda run -n cuteanything python /scratch/bdursun25/cuteanything/captain_gru/eval_pipeline/aggregate_results.py"
+AGG="conda run -n cuteanything python /scratch/bdursun25/cuteanything/captain_gru_v2/eval_pipeline/aggregate_results.py"
 SL="$OUT/scene_list.txt"
 done_labels=""
 for lbl in best final regular; do
