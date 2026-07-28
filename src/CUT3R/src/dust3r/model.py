@@ -88,6 +88,24 @@ def load_model(model_path, device, verbose=True):
     if verbose:
         print(f"instantiating : {args}")
     net = eval(args)
+    # The PoseGRU refiner is enabled by the trainer AFTER construction (it is
+    # not part of the args.model string), so checkpoints that carry pose_gru
+    # weights need the module materialized before load_state_dict (which
+    # otherwise refuses them). mode/hidden_dim come from the training config
+    # saved inside the checkpoint — the authoritative source (mode is not
+    # inferable from the weights).
+    if any(k.startswith(("pose_gru.", "module.pose_gru.")) for k in ckpt["model"]):
+        train_args = ckpt["args"]
+        mode = getattr(train_args, "pose_gru_mode", "residual")
+        hidden_dim = getattr(train_args, "pose_gru_hidden_dim", 128)
+        w_hh = ckpt["model"].get(
+            "pose_gru.cell.weight_hh", ckpt["model"].get("module.pose_gru.cell.weight_hh")
+        )
+        if w_hh is not None:
+            hidden_dim = w_hh.shape[1]
+        net.enable_pose_gru(hidden_dim=hidden_dim, mode=mode)
+        if verbose:
+            print(f"... pose_gru enabled from ckpt: mode={mode}, hidden_dim={hidden_dim}")
     s = net.load_state_dict(ckpt["model"], strict=False)
     if verbose:
         print(s)

@@ -1,10 +1,11 @@
 # ============================================================================
-# captain_gru_v2 — PoseGRU overfit, RESIDUAL mode
+# captain_gru_v2_direct — PoseGRU overfit, DIRECT mode
 # ----------------------------------------------------------------------------
-# GRU output = fed-back pose + learned correction (zero-init head, so at init
-# this run is EXACTLY plain feed_prev_pred). Direct-regression twin:
-# captain_gru_v2_direct.yaml — identical except pose_gru_mode + exp_name.
-# Everything else matches the captain_ray_prev_pred overfit recipe.
+# GRU head regresses the refined pose outright (no residual shortcut), so at
+# init the conditioning ray channel carries an UNTRAINED pose — expect worse
+# early epochs than the residual twin until the GRU learns; the aux loss is
+# its only teacher. Residual twin: captain_gru_v2.yaml — identical except
+# pose_gru_mode + exp_name. Everything else matches captain_ray_prev_pred.
 # ============================================================================
 model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
@@ -67,7 +68,7 @@ feed_prev_pred: True
 #                  (base lr 1e-6 would leave it effectively dead).
 # Falsifier: env POSE_GRU_HIDDEN_SHUFFLE=1 batch-rolls the hidden state.
 pose_gru: True
-pose_gru_mode: residual
+pose_gru_mode: direct
 pose_gru_hidden_dim: 128
 pose_gru_lr_scale: 100.0
 
@@ -115,7 +116,7 @@ print_freq: 10
 print_img_freq: 50
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse'
-exp_name: 'captain_gru_v2'
+exp_name: 'captain_gru_v2_direct'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/

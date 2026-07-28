@@ -90,8 +90,10 @@ def main():
     ap.add_argument(
         "--conditioning",
         default="gt",
-        choices=["gt", "prev_gt", "prev_pred", "none"],
-        help="Ray conditioning variant, forwarded to demo_ray's input builders.",
+        choices=["gt", "prev_gt", "prev_pred", "prev_pred_gru", "none"],
+        help="Ray conditioning variant, forwarded to demo_ray's input builders. "
+        "prev_pred_gru = closed loop with the PoseGRU refiner active (module and "
+        "mode/hidden_dim are restored from the checkpoint automatically).",
     )
     ap.add_argument("--scenes_root", required=True, help=".../test/dl3dv_multi/wrist")
     ap.add_argument("--scene_list", required=True, help="txt of scene names (one per line)")
@@ -168,10 +170,28 @@ def main():
     print(f"{tag} loading model from {args.ckpt} ...", flush=True)
     t0 = time.time()
     model = ARCroco3DStereo.from_pretrained(args.ckpt).to(device)
-    if args.conditioning == "prev_pred":
+    if args.conditioning in ("prev_pred", "prev_pred_gru"):
         # Closed-loop conditioning happens inside the decoder step; same flag
         # demo_ray.py / the captain_ray_prev_pred training config set.
         model.feed_prev_pred = True
+    if args.conditioning == "prev_pred_gru":
+        # The GRU module + mode/hidden_dim are auto-restored from the ckpt by
+        # load_model. A ckpt without pose_gru weights gets an identity-init
+        # residual GRU so smoke tests still run — but that is NOT a trained
+        # refiner, so say so loudly.
+        if getattr(model, "pose_gru", None) is None:
+            print(f"{tag} NOTE: ckpt has no pose_gru weights — enabling an "
+                  "identity-init residual GRU (== plain prev_pred). Smoke-test "
+                  "only; results are not a trained-GRU arm.", flush=True)
+            model.enable_pose_gru()
+            model.pose_gru.to(device)
+    elif getattr(model, "pose_gru", None) is not None:
+        # v2 runs the GRU whenever the module exists and feed_prev_pred is on.
+        # For every non-GRU arm, strip it so a GRU checkpoint evaluated under
+        # plain prev_pred really is the raw closed loop (GRU-less ablation).
+        print(f"{tag} ckpt carries pose_gru but conditioning={args.conditioning} "
+              "— disabling the GRU for this arm.", flush=True)
+        model.pose_gru = None
     model.eval()
     print(f"{tag} model loaded in {time.time()-t0:.1f}s", flush=True)
 
@@ -233,7 +253,14 @@ def main():
                                 images=images,
                                 ray_maps=ray_maps,
                                 intrinsics_list=intrinsics_list,
-                                conditioning=args.conditioning,
+                                # prev_pred_gru builds views exactly like
+                                # prev_pred (no data-side rays); the GRU acts
+                                # inside the decoder step, not in the inputs.
+                                conditioning=(
+                                    "prev_pred"
+                                    if args.conditioning == "prev_pred_gru"
+                                    else args.conditioning
+                                ),
                             )
                         with torch.no_grad():
                             outputs, state_args = inference(views, model, device)
