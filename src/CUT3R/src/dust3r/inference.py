@@ -142,6 +142,15 @@ def loss_of_one_batch_tbptt(
             state_feat = state_feat.detach()
             state_pos = state_pos.detach()
             mem = mem.detach()
+            # PoseGRU within-chunk BPTT (pose_gru_bptt): the hidden's tape may
+            # span the steps of ONE chunk only — truncate at the boundary,
+            # exactly like state/mem above. Each of the last chunks runs its
+            # own backward and frees its graph, so an undetached hidden
+            # crossing here would crash the next chunk's backward. No-op under
+            # the per-step detach (grad_fn already None) or without a GRU.
+            _gru_hidden = getattr(base_model, "_pose_gru_hidden", None)
+            if _gru_hidden is not None:
+                base_model._pose_gru_hidden = _gru_hidden.detach()
             start_group = chunk_id * chunk_groups
             end_group = min(start_group + chunk_groups, len(group_ranges))
             active_groups = group_ranges[start_group:end_group]

@@ -250,11 +250,14 @@ def train(args):
         model.enable_pose_gru(
             hidden_dim=int(getattr(args, "pose_gru_hidden_dim", 128)),
             mode=str(getattr(args, "pose_gru_mode", "residual")),
+            input_mode=str(getattr(args, "pose_gru_input", "pose")),
         )
         printer.info(
-            "pose_gru enabled: mode=%s, hidden_dim=%d, params=%d"
+            "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, params=%d"
             % (
                 model.pose_gru.mode,
+                model.pose_gru.input_mode,
+                model.pose_gru.input_dim,
                 model.pose_gru.hidden_dim,
                 sum(p.numel() for p in model.pose_gru.parameters()),
             )
@@ -319,6 +322,21 @@ def train(args):
     if base_model.feed_prev_pred:
         assert base_model.views_per_step == 1, "feed_prev_pred requires views_per_step=1"
         printer.info("feed_prev_pred=True: conditioning on previous predicted pose")
+    # PoseGRU gradient-flow levers (read inside _forward_decoder_group_step /
+    # loss_of_one_batch_tbptt; both change ONLY where gradients flow, never the
+    # forward math — eval/inference is identical across settings):
+    #   pose_gru_bptt (G1): keep the hidden's tape across the steps of one TBPTT
+    #     chunk (detached at chunk boundaries) instead of every step.
+    #   pose_gru_e2e (G2): don't detach the GRU output entering the ray build,
+    #     so the main reconstruction loss also reaches the GRU.
+    base_model.pose_gru_bptt = bool(getattr(args, "pose_gru_bptt", False))
+    base_model.pose_gru_e2e = bool(getattr(args, "pose_gru_e2e", False))
+    if base_model.pose_gru_bptt or base_model.pose_gru_e2e:
+        assert use_pose_gru, "pose_gru_bptt / pose_gru_e2e require pose_gru=True"
+        printer.info(
+            f"pose_gru gradient levers: bptt={base_model.pose_gru_bptt} "
+            f"(within-chunk BPTT), e2e={base_model.pose_gru_e2e} (main-loss grad)"
+        )
     base_model.debug_grouped_updates = (
         bool(getattr(args, "debug_grouped_updates", False)) and accelerator.is_main_process
     )

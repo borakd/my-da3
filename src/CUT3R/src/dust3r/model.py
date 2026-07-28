@@ -24,7 +24,12 @@ from dust3r.patch_embed import get_patch_embed
 # own repo, which prepends THAT repo's src/ to sys.path — a plain
 # `dust3r.utils.camera` would then resolve to the other tree, which may lack
 # get_ray_map_torch. `.utils.camera` always binds to the tree this file lives in.
-from .utils.camera import get_ray_map_torch, pose_encoding_to_camera
+from .utils.camera import (
+    get_ray_map_torch,
+    matrix_to_quaternion,
+    pose_encoding_to_camera,
+    quaternion_to_matrix,
+)
 from dust3r.utils.misc import (
     fill_default_args,
     freeze_all_params,
@@ -98,14 +103,25 @@ def load_model(model_path, device, verbose=True):
         train_args = ckpt["args"]
         mode = getattr(train_args, "pose_gru_mode", "residual")
         hidden_dim = getattr(train_args, "pose_gru_hidden_dim", 128)
+        input_mode = getattr(train_args, "pose_gru_input", "pose")
         w_hh = ckpt["model"].get(
             "pose_gru.cell.weight_hh", ckpt["model"].get("module.pose_gru.cell.weight_hh")
         )
         if w_hh is not None:
             hidden_dim = w_hh.shape[1]
-        net.enable_pose_gru(hidden_dim=hidden_dim, mode=mode)
+        # The weights are authoritative for the input width (7 = pose,
+        # 14 = pose+delta); the saved config only breaks ties.
+        w_ih = ckpt["model"].get(
+            "pose_gru.cell.weight_ih", ckpt["model"].get("module.pose_gru.cell.weight_ih")
+        )
+        if w_ih is not None:
+            input_mode = "pose_delta" if w_ih.shape[1] == 14 else "pose"
+        net.enable_pose_gru(hidden_dim=hidden_dim, mode=mode, input_mode=input_mode)
         if verbose:
-            print(f"... pose_gru enabled from ckpt: mode={mode}, hidden_dim={hidden_dim}")
+            print(
+                f"... pose_gru enabled from ckpt: mode={mode}, "
+                f"hidden_dim={hidden_dim}, input={input_mode}"
+            )
     s = net.load_state_dict(ckpt["model"], strict=False)
     if verbose:
         print(s)
@@ -238,41 +254,77 @@ class LocalMemory(nn.Module):
         return x[..., -self.v_dim :]
 
 
+def pose_delta_encoding(prev_enc, cur_enc):
+    """Relative-motion (velocity) encoding between two absT_quaR poses.
+
+    Returns the 7-d encoding of inv(P_prev) @ P_cur — the frame-to-frame
+    transform expressed in P_prev's frame. Computed as a relative rigid
+    transform (NOT a componentwise encoding difference): quaternion
+    subtraction is meaningless under the double cover, whereas the relative
+    transform is frame-consistent and sign-stable. When prev_enc is None
+    (first step with no earlier pose) returns the identity-motion encoding
+    [0,0,0, 1,0,0,0]. Inputs are detached stashes — no gradient flows here.
+    """
+    if prev_enc is None:
+        out = cur_enc.new_zeros(cur_enc.shape[0], 7)
+        out[:, 3] = 1.0  # identity quaternion, real part first
+        return out
+    prev_enc = prev_enc.float()
+    cur_enc = cur_enc.float()
+    # quaternion_to_matrix normalizes internally, so raw head quats are fine.
+    R1 = quaternion_to_matrix(prev_enc[:, 3:7])
+    R2 = quaternion_to_matrix(cur_enc[:, 3:7])
+    R1t = R1.transpose(1, 2)
+    rel_R = R1t @ R2
+    rel_t = (R1t @ (cur_enc[:, :3] - prev_enc[:, :3]).unsqueeze(-1)).squeeze(-1)
+    return torch.cat([rel_t, matrix_to_quaternion(rel_R)], dim=-1)
+
+
 class PoseGRU(nn.Module):
     """Recurrent filter for the feed_prev_pred pose loop.
 
     Each step consumes the (detached) 7-d absT_quaR pose encoding stashed at
     the previous step and emits a refined encoding for the current step, which
-    is then rendered into the conditioning ray map. Trained ONLY by an
-    auxiliary loss against the current step's GT pose — the copy that feeds
-    the ray build is detached, so the main loss never reaches this module.
+    is then rendered into the conditioning ray map. Trained by an auxiliary
+    loss against the current step's GT pose; whether the main reconstruction
+    loss ALSO reaches it is the model-level pose_gru_e2e switch (the copy that
+    feeds the ray build is detached unless that flag is on).
 
     mode="residual": zero-init head adds a correction to the input pose, so an
     untrained module reproduces plain feed_prev_pred (init-equivalence check).
     mode="direct": the head regresses the pose from the hidden state alone.
+
+    input_mode="pose": input is the 7-d fed-back pose P(x-1).
+    input_mode="pose_delta": input is 14-d — P(x-1) concatenated with the
+    relative motion pose_delta_encoding(P(x-2), P(x-1)), handing the module
+    the loop's velocity explicitly (identity motion at the first step). In
+    residual mode the correction is anchored on the POSE part (first 7 dims).
     """
 
-    def __init__(self, pose_dim=7, hidden_dim=128, mode="residual"):
+    def __init__(self, pose_dim=7, hidden_dim=128, mode="residual", input_mode="pose"):
         super().__init__()
         assert mode in ("residual", "direct"), f"unknown pose_gru mode {mode!r}"
+        assert input_mode in ("pose", "pose_delta"), f"unknown pose_gru input {input_mode!r}"
         self.mode = mode
+        self.input_mode = input_mode
         self.hidden_dim = hidden_dim
-        self.cell = nn.GRUCell(pose_dim, hidden_dim)
+        self.input_dim = pose_dim if input_mode == "pose" else 2 * pose_dim
+        self.cell = nn.GRUCell(self.input_dim, hidden_dim)
         self.head = nn.Linear(hidden_dim, pose_dim)
         if mode == "residual":
             nn.init.zeros_(self.head.weight)
             nn.init.zeros_(self.head.bias)
 
-    def forward(self, pose_enc, hidden):
-        """pose_enc: (B, 7) detached prev-step pose; hidden: (B, H) or None
-        at sequence start. Returns (refined_pose_enc, new_hidden)."""
+    def forward(self, gru_in, hidden):
+        """gru_in: (B, 7) or (B, 14) detached prev-step pose (+delta); hidden:
+        (B, H) or None at sequence start. Returns (refined_pose_enc, new_hidden)."""
         if hidden is None:
-            hidden = pose_enc.new_zeros(pose_enc.shape[0], self.hidden_dim)
-        hidden = self.cell(pose_enc, hidden)
+            hidden = gru_in.new_zeros(gru_in.shape[0], self.hidden_dim)
+        hidden = self.cell(gru_in, hidden)
         raw = self.head(hidden)
         if self.mode == "residual":
-            t = pose_enc[:, :3] + raw[:, :3]
-            q = pose_enc[:, 3:7] + raw[:, 3:7]
+            t = gru_in[:, :3] + raw[:, :3]
+            q = gru_in[:, 3:7] + raw[:, 3:7]
         else:
             t = raw[:, :3]
             q = raw[:, 3:7]
@@ -477,7 +529,7 @@ class ARCroco3DStereo(CroCoNet):
                         printer.info(f"Skipping '{key}': not found in model")
                 return super().load_state_dict(new_new_ckpt, **kw)
 
-    def enable_pose_gru(self, hidden_dim=128, mode="residual"):
+    def enable_pose_gru(self, hidden_dim=128, mode="residual", input_mode="pose"):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
         Call BEFORE load_state_dict when the checkpoint carries pose_gru
@@ -485,7 +537,7 @@ class ARCroco3DStereo(CroCoNet):
         param group / lr). Created on CPU — move with .to(device) afterwards
         if the model already lives on GPU.
         """
-        self.pose_gru = PoseGRU(hidden_dim=hidden_dim, mode=mode)
+        self.pose_gru = PoseGRU(hidden_dim=hidden_dim, mode=mode, input_mode=input_mode)
         self._pose_gru_hidden = None
         return self.pose_gru
 
@@ -864,6 +916,7 @@ class ARCroco3DStereo(CroCoNet):
         group_size = len(view_indices)
         feed_prev_pred = bool(getattr(self, "feed_prev_pred", False))
         gru_pose_pred = None
+        pose_gru_e2e = False  # set True inside the GRU block when lever G2 is live
         if feed_prev_pred:
             # Condition view x on the pose the model itself predicted at step
             # x-1, fed through the pretrained ray-map encoder — the closed-loop
@@ -879,9 +932,11 @@ class ARCroco3DStereo(CroCoNet):
                 # the masked_ray_map_token from _encode_views. Resetting here
                 # also prevents leakage across batches/sequences.
                 self._prev_pred_pose_enc = None
+                self._prev_prev_pred_pose_enc = None
                 self._pose_gru_hidden = None
             else:
                 prev_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
+                prev_prev_pose_enc = getattr(self, "_prev_prev_pred_pose_enc", None)
                 assert prev_pose_enc is not None, (
                     "feed_prev_pred: no stashed pose from the previous step — "
                     "views must be processed sequentially starting at view 0"
@@ -889,8 +944,12 @@ class ARCroco3DStereo(CroCoNet):
                 if os.environ.get("PREV_PRED_RAY_SHUFFLE") == "1" and prev_pose_enc.shape[0] > 1:
                     # Falsifier: batch-roll the fed-back pose so every sample is
                     # conditioned on another sample's prediction (same masks,
-                    # wrong content). Supervision is untouched.
+                    # wrong content). Supervision is untouched. BOTH stashes get
+                    # the same shift so the (pose, delta) pair the GRU sees
+                    # stays coherent per (wrong) source sample.
                     prev_pose_enc = torch.roll(prev_pose_enc, shifts=1, dims=0)
+                    if prev_prev_pose_enc is not None:
+                        prev_prev_pose_enc = torch.roll(prev_prev_pose_enc, shifts=1, dims=0)
                 pose_gru = getattr(self, "pose_gru", None)
                 if pose_gru is not None:
                     # Refine the fed-back pose with the recurrent filter before
@@ -913,23 +972,51 @@ class ARCroco3DStereo(CroCoNet):
                         # what the recurrent memory contributes. Works at
                         # batch size 1 (unlike the batch-roll shuffle).
                         hidden = None
+                    gru_in = prev_pose_enc
+                    if pose_gru.input_mode == "pose_delta":
+                        # Hand the loop's velocity to the GRU explicitly: the
+                        # relative motion between the last two RAW head poses
+                        # (identity at view 1, where no P(x-2) exists yet).
+                        delta = pose_delta_encoding(prev_prev_pose_enc, prev_pose_enc)
+                        gru_in = torch.cat(
+                            [prev_pose_enc, delta.to(prev_pose_enc.dtype)], dim=-1
+                        )
                     with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
-                        gru_pose_pred, new_hidden = pose_gru(prev_pose_enc.float(), hidden)
-                    # Per-step truncation (the simple variant): the hidden
-                    # crosses steps as data only. A within-chunk BPTT variant
-                    # can later gate this detach behind a config flag.
-                    self._pose_gru_hidden = new_hidden.detach()
+                        gru_pose_pred, new_hidden = pose_gru(gru_in.float(), hidden)
+                    if bool(getattr(self, "pose_gru_bptt", False)):
+                        # Within-chunk BPTT (lever G1): keep the tape so the aux
+                        # loss at a later view reaches the GRU calls of earlier
+                        # views IN THE SAME TBPTT CHUNK. The chunk-boundary
+                        # detach lives in loss_of_one_batch_tbptt, next to the
+                        # state/mem detaches — without it the next chunk's
+                        # backward would cross this chunk's freed graph.
+                        self._pose_gru_hidden = new_hidden
+                    else:
+                        # Per-step truncation (G0, the simple variant): the
+                        # hidden crosses steps as data only.
+                        self._pose_gru_hidden = new_hidden.detach()
                     # The refined pose replaces the raw prediction for the ray
-                    # build below; detached — aux-loss-only training.
-                    prev_pose_enc = gru_pose_pred.detach()
+                    # build below. Detached by default (aux-loss-only training);
+                    # pose_gru_e2e (lever G2) keeps the tape so the main
+                    # reconstruction loss also reaches the GRU through the
+                    # pose -> ray map -> frozen ray encoder chain (frozen only
+                    # pins the encoder's params; gradient passes through).
+                    pose_gru_e2e = bool(getattr(self, "pose_gru_e2e", False)) and (
+                        torch.is_grad_enabled() and gru_pose_pred.requires_grad
+                    )
+                    prev_pose_enc = gru_pose_pred if pose_gru_e2e else gru_pose_pred.detach()
                 prev_view = views[view_indices[0] - 1]
                 assert "camera_intrinsics" in prev_view, (
                     "feed_prev_pred needs per-view camera_intrinsics "
                     "to build ray maps from predicted poses"
                 )
-                # The ray encoder is frozen (freeze='encoder') and the pose is
-                # detached by design, so nothing here needs gradients.
-                with torch.no_grad():
+                # The ray encoder is frozen (freeze='encoder') and, by default,
+                # the pose entering here is detached — nothing needs gradients
+                # (grad disabled, exactly the old no_grad). Under pose_gru_e2e
+                # (lever G2) the pose carries the GRU's tape, so grad stays
+                # enabled and the main loss reaches the GRU through this build
+                # (the frozen encoder's params still get no gradient).
+                with torch.set_grad_enabled(pose_gru_e2e):
                     # Build the map in fp32 even under an ambient autocast: the
                     # GT path gets loader-built fp32 maps, only the encoder runs
                     # autocast'd — mirror that split exactly.
@@ -1035,7 +1122,10 @@ class ARCroco3DStereo(CroCoNet):
             # detach(): the fed-back pose is an INPUT at step x+1, not a second
             # gradient path into step x's pose head — and under TBPTT the
             # previous chunk's graph is already freed, so backprop through a
-            # non-detached pose would crash at the chunk boundary.
+            # non-detached pose would crash at the chunk boundary. The old
+            # stash shifts to P(x-2) first — the pose_delta GRU input needs
+            # the last TWO raw head poses to compute the loop's velocity.
+            self._prev_prev_pred_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
             self._prev_pred_pose_enc = res_group[-1]["camera_pose"].detach()
             if gru_pose_pred is not None:
                 # Grad-carrying refined pose for the aux criterion. The loss

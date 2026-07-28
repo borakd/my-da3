@@ -1,0 +1,141 @@
+# ============================================================================
+# captain_gru_v2_a4_g0 — PoseGRU lever grid arm A4 x G0
+# ----------------------------------------------------------------------------
+# A lever: input pose+delta -> pose RESIDUAL
+# G lever: G0 sealed: aux loss reaches ONE GRUCell call per step
+# Same overfit recipe as captain_gru_v2.yaml in every other respect; the
+# levers differ ONLY in pose_gru_mode / pose_gru_input / pose_gru_bptt /
+# pose_gru_e2e (+ exp_name). Grid map: A1=pose->direct, A2=pose->residual,
+# A3=pose+delta->direct, A4=pose+delta->residual; G0=per-step seal,
+# G1=within-chunk BPTT, G2=e2e main-loss grad. See captain_gru_v2_grid_README.md.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
+pose_gru_loss_weight: 1.0
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+# Kept equal to train_criterion to watch overfitting (train vs test on the same loss).
+# NOTE: the gru term is part of the test loss too, so best-ckpt selection sees it
+# (it is 0 whenever no view carries gru_pose, e.g. if pose_gru is toggled off).
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B. Add more entries to
+# track several criteria at once.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Model-side flag read by train_cut3r_baseline; both
+# dataset ray flags MUST stay False (the model asserts this). View 0 gets the
+# masked_ray_map_token, exactly like the GT-conditioned runs. The fed-back pose
+# is detached (it is an input, not a gradient path; required under TBPTT).
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode:  'residual' (zero-init head; untrained == plain prev_pred)
+#                   'direct'   (head regresses the pose; early epochs worse
+#                              until it learns identity from scratch).
+#   pose_gru_input: 'pose'       7-d fed-back head pose P(x-1)
+#                   'pose_delta' 14-d: P(x-1) + relative motion
+#                              inv(P(x-2)) @ P(x-1) (identity at view 1) —
+#                              hands the loop's velocity to the GRU explicitly.
+#   pose_gru_bptt:  G1 lever. False = per-step hidden detach (G0). True =
+#                   hidden tape spans one 4-view TBPTT chunk (detached at
+#                   chunk boundaries, like state/mem) so the aux loss rewards
+#                   what earlier steps WROTE into the hidden.
+#   pose_gru_e2e:   G2 lever. True = the GRU output entering the ray build is
+#                   NOT detached, so the main reconstruction loss also trains
+#                   the GRU (through the frozen-but-differentiable ray encoder).
+#                   The fed-back head pose stays detached always.
+#   pose_gru_lr_scale: lr multiplier for the from-scratch GRU param groups.
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1 (rolls BOTH pose stashes coherently),
+# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless).
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0
+pose_gru_bptt: False
+pose_gru_e2e: False
+
+# ONE TEST SCENE
+# train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+# test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+
+# FULL DATASET
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+
+# 38633 4292
+train_dataset: 672 @ ${train_data}
+test_dataset: 672 @ ${test_data}
+
+seed: 0
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-6
+min_lr: 1e-7
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 50
+num_imgs_vis: 4
+save_dir: '/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse'
+exp_name: 'captain_gru_v2_a4_g0'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}
