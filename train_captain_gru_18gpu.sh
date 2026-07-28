@@ -49,7 +49,10 @@ srun --ntasks="$NNODES" --ntasks-per-node=1 bash -c '
   cd /scratch/bdursun25/cuteanything/captain_gru_v2/src/CUT3R/src
 
   export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
-  export PYTHONPATH=/scratch/bdursun25/cuteanything/captain_gru_v2:${PYTHONPATH:-}
+  # Full three-tree path: src/CUT3R is required for the optional eval.monodepth
+  # import (absrel/a1 depth metrics) — silently skipped without it.
+  WT=/scratch/bdursun25/cuteanything/captain_gru_v2
+  export PYTHONPATH=$WT:$WT/src:$WT/src/CUT3R:${PYTHONPATH:-}
   export HYDRA_FULL_ERROR=1
   # PCIe P2P is broken on some avg nodes (ai15 confirmed, kernel 4.18) — without this,
   # DDP init hangs with all GPUs pinned at 100% util.

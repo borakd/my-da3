@@ -27,7 +27,11 @@ conda activate cuteanything
 cd /scratch/bdursun25/cuteanything/captain_gru_v2/src/CUT3R/src
 
 export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
-export PYTHONPATH=/scratch/bdursun25/cuteanything/captain_gru_v2:${PYTHONPATH:-}
+# Full three-tree path (worktree root + src + src/CUT3R): src/CUT3R is REQUIRED for
+# the optional `eval.monodepth`/`eval.video_depth` import in the test loop — without
+# it, absrel/a1 depth metrics are silently skipped ("No module named 'eval'").
+WT=/scratch/bdursun25/cuteanything/captain_gru_v2
+export PYTHONPATH=$WT:$WT/src:$WT/src/CUT3R:${PYTHONPATH:-}
 export HYDRA_FULL_ERROR=1
 # PCIe P2P is broken on some avg nodes — without this, DDP init can hang with
 # all GPUs pinned at 100% util.
