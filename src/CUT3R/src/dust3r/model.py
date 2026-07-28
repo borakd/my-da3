@@ -907,6 +907,12 @@ class ARCroco3DStereo(CroCoNet):
                         # Falsifier: every sample gets another sample's memory.
                         # If metrics don't degrade, the recurrence is unused.
                         hidden = torch.roll(hidden, shifts=1, dims=0)
+                    if os.environ.get("POSE_GRU_HIDDEN_ZERO") == "1":
+                        # Falsifier: stateless control — every step runs from a
+                        # zero hidden, so any gap vs the normal arm is exactly
+                        # what the recurrent memory contributes. Works at
+                        # batch size 1 (unlike the batch-roll shuffle).
+                        hidden = None
                     with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
                         gru_pose_pred, new_hidden = pose_gru(prev_pose_enc.float(), hidden)
                     # Per-step truncation (the simple variant): the hidden
