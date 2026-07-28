@@ -37,7 +37,12 @@ export HYDRA_FULL_ERROR=1
 # all GPUs pinned at 100% util.
 export NCCL_P2P_DISABLE=1
 
+# Unique rendezvous port per job (default 29500 collides when two jobs share
+# a node — e.g. two 2-GPU runs packed onto one 4-GPU node).
+MAIN_PORT=$((29000 + SLURM_JOB_ID % 1000))
+
 accelerate launch \
   --multi_gpu \
   --num_processes 2 \
+  --main_process_port "$MAIN_PORT" \
   train_cut3r_baseline.py --config-name "$CONFIG_NAME"
