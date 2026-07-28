@@ -220,6 +220,48 @@ class LocalMemory(nn.Module):
         return x[..., -self.v_dim :]
 
 
+class PoseGRU(nn.Module):
+    """Recurrent filter for the feed_prev_pred pose loop.
+
+    Each step consumes the (detached) 7-d absT_quaR pose encoding stashed at
+    the previous step and emits a refined encoding for the current step, which
+    is then rendered into the conditioning ray map. Trained ONLY by an
+    auxiliary loss against the current step's GT pose — the copy that feeds
+    the ray build is detached, so the main loss never reaches this module.
+
+    mode="residual": zero-init head adds a correction to the input pose, so an
+    untrained module reproduces plain feed_prev_pred (init-equivalence check).
+    mode="direct": the head regresses the pose from the hidden state alone.
+    """
+
+    def __init__(self, pose_dim=7, hidden_dim=128, mode="residual"):
+        super().__init__()
+        assert mode in ("residual", "direct"), f"unknown pose_gru mode {mode!r}"
+        self.mode = mode
+        self.hidden_dim = hidden_dim
+        self.cell = nn.GRUCell(pose_dim, hidden_dim)
+        self.head = nn.Linear(hidden_dim, pose_dim)
+        if mode == "residual":
+            nn.init.zeros_(self.head.weight)
+            nn.init.zeros_(self.head.bias)
+
+    def forward(self, pose_enc, hidden):
+        """pose_enc: (B, 7) detached prev-step pose; hidden: (B, H) or None
+        at sequence start. Returns (refined_pose_enc, new_hidden)."""
+        if hidden is None:
+            hidden = pose_enc.new_zeros(pose_enc.shape[0], self.hidden_dim)
+        hidden = self.cell(pose_enc, hidden)
+        raw = self.head(hidden)
+        if self.mode == "residual":
+            t = pose_enc[:, :3] + raw[:, :3]
+            q = pose_enc[:, 3:7] + raw[:, 3:7]
+        else:
+            t = raw[:, :3]
+            q = raw[:, 3:7]
+        q = torch.nn.functional.normalize(q, dim=-1)
+        return torch.cat([t, q], dim=-1), hidden
+
+
 class ARCroco3DStereo(CroCoNet):
     config_class = ARCroco3DStereoConfig
     base_model_prefix = "arcroco3dstereo"
@@ -381,6 +423,11 @@ class ARCroco3DStereo(CroCoNet):
     def load_state_dict(self, ckpt, **kw):
         if all(k.startswith("module") for k in ckpt):
             ckpt = strip_module(ckpt)
+        if any(k.startswith("pose_gru.") for k in ckpt) and getattr(self, "pose_gru", None) is None:
+            raise RuntimeError(
+                "checkpoint contains pose_gru weights but the module is absent — "
+                "call enable_pose_gru(hidden_dim, mode) from the config BEFORE load_state_dict"
+            )
         new_ckpt = dict(ckpt)
         if not any(k.startswith("dec_blocks_state") for k in ckpt):
             for key, value in ckpt.items():
@@ -411,6 +458,18 @@ class ARCroco3DStereo(CroCoNet):
                     else:
                         printer.info(f"Skipping '{key}': not found in model")
                 return super().load_state_dict(new_new_ckpt, **kw)
+
+    def enable_pose_gru(self, hidden_dim=128, mode="residual"):
+        """Materialize the PoseGRU refiner for the feed_prev_pred loop.
+
+        Call BEFORE load_state_dict when the checkpoint carries pose_gru
+        weights, and BEFORE the optimizer is built (the module needs its own
+        param group / lr). Created on CPU — move with .to(device) afterwards
+        if the model already lives on GPU.
+        """
+        self.pose_gru = PoseGRU(hidden_dim=hidden_dim, mode=mode)
+        self._pose_gru_hidden = None
+        return self.pose_gru
 
     def set_freeze(self, freeze):  # this is for use by downstream models
         self.freeze = freeze
@@ -786,6 +845,7 @@ class ARCroco3DStereo(CroCoNet):
     ):
         group_size = len(view_indices)
         feed_prev_pred = bool(getattr(self, "feed_prev_pred", False))
+        gru_pose_pred = None
         if feed_prev_pred:
             # Condition view x on the pose the model itself predicted at step
             # x-1, fed through the pretrained ray-map encoder — the closed-loop
@@ -801,6 +861,7 @@ class ARCroco3DStereo(CroCoNet):
                 # the masked_ray_map_token from _encode_views. Resetting here
                 # also prevents leakage across batches/sequences.
                 self._prev_pred_pose_enc = None
+                self._pose_gru_hidden = None
             else:
                 prev_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
                 assert prev_pose_enc is not None, (
@@ -812,6 +873,31 @@ class ARCroco3DStereo(CroCoNet):
                     # conditioned on another sample's prediction (same masks,
                     # wrong content). Supervision is untouched.
                     prev_pose_enc = torch.roll(prev_pose_enc, shifts=1, dims=0)
+                pose_gru = getattr(self, "pose_gru", None)
+                if pose_gru is not None:
+                    # Refine the fed-back pose with the recurrent filter before
+                    # it is rendered into the conditioning ray map. Runs in fp32
+                    # outside autocast (a pose correction is a handful of
+                    # precision-sensitive scalars) and OUTSIDE no_grad — the aux
+                    # criterion on res["gru_pose"] is its only training signal.
+                    hidden = getattr(self, "_pose_gru_hidden", None)
+                    if (
+                        os.environ.get("POSE_GRU_HIDDEN_SHUFFLE") == "1"
+                        and hidden is not None
+                        and hidden.shape[0] > 1
+                    ):
+                        # Falsifier: every sample gets another sample's memory.
+                        # If metrics don't degrade, the recurrence is unused.
+                        hidden = torch.roll(hidden, shifts=1, dims=0)
+                    with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
+                        gru_pose_pred, new_hidden = pose_gru(prev_pose_enc.float(), hidden)
+                    # Per-step truncation (the simple variant): the hidden
+                    # crosses steps as data only. A within-chunk BPTT variant
+                    # can later gate this detach behind a config flag.
+                    self._pose_gru_hidden = new_hidden.detach()
+                    # The refined pose replaces the raw prediction for the ray
+                    # build below; detached — aux-loss-only training.
+                    prev_pose_enc = gru_pose_pred.detach()
                 prev_view = views[view_indices[0] - 1]
                 assert "camera_intrinsics" in prev_view, (
                     "feed_prev_pred needs per-view camera_intrinsics "
@@ -927,6 +1013,11 @@ class ARCroco3DStereo(CroCoNet):
             # previous chunk's graph is already freed, so backprop through a
             # non-detached pose would crash at the chunk boundary.
             self._prev_pred_pose_enc = res_group[-1]["camera_pose"].detach()
+            if gru_pose_pred is not None:
+                # Grad-carrying refined pose for the aux criterion. The loss
+                # builds its own GT target from the views — same construction
+                # as the main pose loss: camera_to_pose_encoding(inv(cam1)@gt).
+                res_group[-1]["gru_pose"] = gru_pose_pred
 
         img_mask_group = torch.stack([views[i]["img_mask"] for i in view_indices], dim=0).any(
             dim=0

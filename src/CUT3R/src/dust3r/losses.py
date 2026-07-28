@@ -1074,6 +1074,98 @@ class Regr3DPoseBatchList(Regr3DPose):
         return Sum(*list(zip(ls, masks))), (details | monitoring)
 
 
+class PoseGRULoss(MultiLoss):
+    """Auxiliary supervision for the PoseGRU refiner (feed_prev_pred loop).
+
+    Compares pred["gru_pose"] (the refined fed-back pose, view-0-relative
+    absT_quaR) against the GT pose in the same frame, with translations
+    normalized per side exactly like the main pose loss's camera-only path
+    (get_norm_factor_poses): GT by the GT scale, the GRU output by the scale
+    of the head's own predicted poses — i.e. the GRU is taught the true pose
+    expressed in the model's current scene scale, which is the scale the
+    ray-map build consumes.
+
+    Gradient isolation: every tensor read here is detached except
+    pred["gru_pose"], whose graph contains only pose_gru parameters — this
+    loss trains the GRU and nothing else, and nothing else trains the GRU.
+    Views without a "gru_pose" key (view 0, non-GRU runs) are skipped; with
+    no such views at all the loss is 0 (safe to keep in a baseline config).
+    """
+
+    def __init__(self, norm_mode="?avg_dis"):
+        super().__init__()
+        # Same '?' convention as Regr3DPose: '?' = don't rescale metric-scale
+        # samples (their pred factor := gt factor -> true-scale supervision).
+        if norm_mode.startswith("?"):
+            self.norm_all = False
+            self.norm_mode = norm_mode[1:]
+        else:
+            self.norm_all = True
+            self.norm_mode = norm_mode
+        self.gt_scale = False
+
+    # Reuse the main pose loss's normalization verbatim (it reads only
+    # self.norm_mode / self.gt_scale off self).
+    get_norm_factor_poses = Regr3DPose.get_norm_factor_poses
+
+    def get_name(self):
+        return "PoseGRULoss()"
+
+    def compute_loss(self, gts, preds, camera1=None, eps=1e-3, **kw):
+        gru_idx = [i for i, pred in enumerate(preds) if "gru_pose" in pred]
+        if not gru_idx:
+            device = preds[0]["camera_pose"].device if preds else "cpu"
+            return torch.tensor(0.0, device=device), {}
+        cam1 = gts[0]["camera_pose"] if camera1 is None else camera1
+        in_camera1 = inv(cam1.float()).detach()
+        gt_poses = [
+            camera_to_pose_encoding(in_camera1 @ gt["camera_pose"].float()).detach()
+            for gt in gts
+        ]
+        pr_poses = [pred["camera_pose"].float().detach() for pred in preds]
+        if not self.norm_all:
+            not_metric_mask = ~gts[0]["is_metric"]
+        else:
+            not_metric_mask = torch.ones_like(gts[0]["is_metric"])
+        # Factors over ALL chunk views (mirrors the main loss); the pred-side
+        # factor comes from the head's poses so the GRU stays pinned to the
+        # closed loop's scale rather than drifting to one of its own.
+        factor_gt, factor_pr = self.get_norm_factor_poses(
+            [gt[:, :3] for gt in gt_poses],
+            [pr[:, :3] for pr in pr_poses],
+            not_metric_mask,
+        )
+        base_mask = (factor_gt.reshape(-1) > eps) & (factor_pr.reshape(-1) > eps)
+        t_terms, q_terms = [], []
+        for i in gru_idx:
+            gru_pose = preds[i]["gru_pose"].float()
+            t_err = torch.norm(
+                gru_pose[:, :3] / factor_pr.clip(eps)
+                - gt_poses[i][:, :3] / factor_gt.clip(eps),
+                dim=-1,
+            )
+            q_err = torch.norm(gru_pose[:, 3:] - gt_poses[i][:, 3:], dim=-1)
+            # A NaN GT pose (pose-less view) also NaNs its sample's factor,
+            # so base_mask already drops the sample; the isfinite term guards
+            # the per-view target on samples whose factor stayed clean.
+            valid = base_mask & torch.isfinite(gt_poses[i]).all(dim=-1)
+            t_terms.append(t_err[valid])
+            q_terms.append(q_err[valid])
+        t_all = torch.cat(t_terms)
+        q_all = torch.cat(q_terms)
+        if t_all.numel() == 0:
+            return torch.tensor(0.0, device=t_all.device), {}
+        t_loss = t_all.mean()
+        q_loss = q_all.mean()
+        loss = t_loss + q_loss
+        details = {
+            "gru_pose_loss": float(loss.detach()),
+            "gru_trans_loss": float(t_loss.detach()),
+            "gru_quat_loss": float(q_loss.detach()),
+        }
+        return loss, details
+
+
 class ConfLoss(MultiLoss):
     """Weighted regression by learned confidence.
         Assuming the input pixel_loss is a pixel-level regression loss.

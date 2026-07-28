@@ -107,6 +107,29 @@ def save_current_code(outdir):
     return dst_dir
 
 
+def split_pose_gru_param_groups(param_groups, pose_gru, lr_scale):
+    """Give the from-scratch PoseGRU its own optimizer param groups with an
+    lr multiplier (adjust_learning_rate multiplies each group's lr by its
+    lr_scale) — at the finetune's tiny base lr a from-scratch module would
+    stay effectively dead. Weight-decay assignment is inherited from the
+    group each parameter came from (biases keep wd=0)."""
+    gru_param_ids = {id(p) for p in pose_gru.parameters()}
+    split = []
+    for group in param_groups:
+        gru_params = [p for p in group["params"] if id(p) in gru_param_ids]
+        rest = [p for p in group["params"] if id(p) not in gru_param_ids]
+        if rest:
+            rest_group = dict(group)
+            rest_group["params"] = rest
+            split.append(rest_group)
+        if gru_params:
+            gru_group = {k: v for k, v in group.items() if k != "params"}
+            gru_group["params"] = gru_params
+            gru_group["lr_scale"] = float(group.get("lr_scale", 1.0)) * float(lr_scale)
+            split.append(gru_group)
+    return split
+
+
 def train(args):
 
     accelerator = Accelerator(
@@ -214,6 +237,29 @@ def train(args):
     printer.info(f"Encoder parameters: {sum(p.numel() for p in model.enc_blocks.parameters())}")
     printer.info(f"Decoder parameters: {sum(p.numel() for p in model.dec_blocks.parameters())}")
 
+    # PoseGRU refiner for the feed_prev_pred loop. Enabled BEFORE the
+    # pretrained/resume loads (the load_state_dict guard requires the module
+    # to exist when a checkpoint carries pose_gru weights), BEFORE .to(device)
+    # (moves with the rest of the model), and BEFORE the optimizer is built
+    # (its params need their own group — see split_pose_gru_param_groups).
+    use_pose_gru = bool(getattr(args, "pose_gru", False))
+    if use_pose_gru:
+        assert bool(
+            getattr(args, "feed_prev_pred", False)
+        ), "pose_gru refines the fed-back pose — it requires feed_prev_pred=True"
+        model.enable_pose_gru(
+            hidden_dim=int(getattr(args, "pose_gru_hidden_dim", 128)),
+            mode=str(getattr(args, "pose_gru_mode", "residual")),
+        )
+        printer.info(
+            "pose_gru enabled: mode=%s, hidden_dim=%d, params=%d"
+            % (
+                model.pose_gru.mode,
+                model.pose_gru.hidden_dim,
+                sum(p.numel() for p in model.pose_gru.parameters()),
+            )
+        )
+
     printer.info(f">> Creating train criterion = {args.train_criterion}")
     train_criterion = eval(args.train_criterion).to(device)
     printer.info(f">> Creating test criterion = {args.test_criterion or args.train_criterion}")
@@ -251,6 +297,12 @@ def train(args):
 
     # # following timm: set wd as 0 for bias and norm layers
     param_groups = misc.get_parameter_groups(model, args.weight_decay)
+    if use_pose_gru:
+        pose_gru_lr_scale = float(getattr(args, "pose_gru_lr_scale", 100.0))
+        param_groups = split_pose_gru_param_groups(
+            param_groups, model.pose_gru, pose_gru_lr_scale
+        )
+        printer.info(f"pose_gru param groups split out with lr_scale x{pose_gru_lr_scale:g}")
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     # print(optimizer)
     loss_scaler = NativeScaler(accelerator=accelerator)
