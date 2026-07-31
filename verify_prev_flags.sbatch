@@ -15,7 +15,7 @@
 set -eo pipefail
 source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
 conda activate cuteanything
-cd /scratch/bdursun25/cuteanything/captain_gru_v2
+cd /scratch/bdursun25/cuteanything/captain_gru_v3
 export PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH"
 export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
 python verify_prev_flags.py

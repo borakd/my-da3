@@ -101,26 +101,75 @@ def load_model(model_path, device, verbose=True):
     # inferable from the weights).
     if any(k.startswith(("pose_gru.", "module.pose_gru.")) for k in ckpt["model"]):
         train_args = ckpt["args"]
-        mode = getattr(train_args, "pose_gru_mode", "residual")
+        # residual / direct / split_anchor all share ONE head of identical
+        # shape, so the mode is invisible in the weights and ckpt["args"] is
+        # the only source. A missing key used to fall back to "residual",
+        # which builds the WRONG algebra with matching shapes and zero errors
+        # — i.e. a silently mislabelled evaluation. Hard-fail instead.
+        mode = getattr(train_args, "pose_gru_mode", None)
+        if mode is None:
+            raise RuntimeError(
+                f"{model_path}: checkpoint carries pose_gru weights but its "
+                "ckpt['args'] has no 'pose_gru_mode'. The mode cannot be "
+                "recovered from weight shapes — refusing to guess."
+            )
         hidden_dim = getattr(train_args, "pose_gru_hidden_dim", 128)
         input_mode = getattr(train_args, "pose_gru_input", "pose")
+        # R lever: the iteration count is INVISIBLE in weight shapes (shared-
+        # weight iteration) — ckpt args are the only source, like mode.
+        iters = int(getattr(train_args, "pose_gru_iters", 1))
         w_hh = ckpt["model"].get(
             "pose_gru.cell.weight_hh", ckpt["model"].get("module.pose_gru.cell.weight_hh")
         )
         if w_hh is not None:
             hidden_dim = w_hh.shape[1]
-        # The weights are authoritative for the input width (7 = pose,
-        # 14 = pose+delta); the saved config only breaks ties.
+        # F lever: projector presence + shapes are authoritative — D from
+        # img_proj.weight rows, frame count from its columns / enc width.
+        w_proj = ckpt["model"].get(
+            "pose_gru.img_proj.weight", ckpt["model"].get("module.pose_gru.img_proj.weight")
+        )
+        img_feat = "none" if w_proj is None else "input"
+        img_feat_dim = 32
+        img_feat_frames = 2
+        if w_proj is not None:
+            img_feat_dim = w_proj.shape[0]
+            src_dim = net.enc_embed_dim
+            assert w_proj.shape[1] % src_dim == 0, (
+                f"pose_gru.img_proj input width {w_proj.shape[1]} is not a "
+                f"multiple of the encoder width {src_dim}"
+            )
+            img_feat_frames = w_proj.shape[1] // src_dim
+        # The weights are authoritative for the input width: base (7 = pose,
+        # 14 = pose+delta) plus the projector dim; the saved config only
+        # breaks ties. Hard-fail on anything unexplained — a mis-sniffed
+        # width would otherwise rebuild the wrong cell and (before the
+        # load_state_dict hardening) silently evaluate a random GRU.
         w_ih = ckpt["model"].get(
             "pose_gru.cell.weight_ih", ckpt["model"].get("module.pose_gru.cell.weight_ih")
         )
         if w_ih is not None:
-            input_mode = "pose_delta" if w_ih.shape[1] == 14 else "pose"
-        net.enable_pose_gru(hidden_dim=hidden_dim, mode=mode, input_mode=input_mode)
+            base_width = w_ih.shape[1] - (img_feat_dim if img_feat == "input" else 0)
+            assert base_width in (7, 14), (
+                f"pose_gru cell input width {w_ih.shape[1]} minus projector dim "
+                f"{img_feat_dim if img_feat == 'input' else 0} = {base_width}; "
+                f"expected 7 (pose) or 14 (pose_delta)"
+            )
+            input_mode = "pose_delta" if base_width == 14 else "pose"
+        net.enable_pose_gru(
+            hidden_dim=hidden_dim,
+            mode=mode,
+            input_mode=input_mode,
+            img_feat=img_feat,
+            img_feat_dim=img_feat_dim,
+            img_feat_frames=img_feat_frames,
+            iters=iters,
+        )
         if verbose:
             print(
                 f"... pose_gru enabled from ckpt: mode={mode}, "
-                f"hidden_dim={hidden_dim}, input={input_mode}"
+                f"hidden_dim={hidden_dim}, input={input_mode}, "
+                f"img_feat={img_feat} (dim={img_feat_dim}, frames={img_feat_frames}), "
+                f"iters={iters}"
             )
     s = net.load_state_dict(ckpt["model"], strict=False)
     if verbose:
@@ -293,41 +342,144 @@ class PoseGRU(nn.Module):
     mode="residual": zero-init head adds a correction to the input pose, so an
     untrained module reproduces plain feed_prev_pred (init-equivalence check).
     mode="direct": the head regresses the pose from the hidden state alone.
+    mode="split_anchor" (A5, "anchored A3"): translation is regressed DIRECTLY
+    (as mode="direct") while rotation is ANCHORED on the fed-back quaternion
+    (as mode="residual"). Motivated by the epoch-50 component split of the A3
+    and A4 grid arms, each as a multiple of that arm's own lag baseline
+    (= reuse P(x-1) unchanged; 1.00 means the module learned nothing):
+        A3 direct   : translation 0.80-0.81   rotation 0.99-1.08
+        A4 residual : translation 0.85-0.86   rotation 0.89-0.90
+    i.e. the direct head WINS translation and is worthless on rotation, and the
+    anchored head is the mirror image. Frame-to-frame rotation is near-identity,
+    so q(x-1) is an excellent prior that a zero-init correction exploits and a
+    from-scratch regression cannot match — and rotation is only 3-4% of the
+    unweighted PoseGRULoss (t_loss + q_loss), so the aux gradient can never
+    teach it. Anchoring rotation is therefore STRUCTURAL, not learned.
+    Only the ROTATION rows (3:7) of the shared head are zero-init; the
+    translation rows (0:3) keep the default nn.Linear init, exactly as in
+    mode="direct". The parameter SET is byte-identical to residual/direct
+    (one shared head), so an A5 checkpoint stays state_dict-compatible with
+    A3/A4 and the mode — like residual-vs-direct already — is recoverable only
+    from ckpt["args"], never from weight shapes.
+    HONEST LIMIT: this anchors rotation only. Translation stays a free
+    regression off the hidden state, so A5 inherits A3's translation tail —
+    with the hidden zeroed, 98% of A3's degradation is translation. A5 is a
+    fix for the measured ROTATION deficit, not a fallback mechanism.
 
     input_mode="pose": input is the 7-d fed-back pose P(x-1).
     input_mode="pose_delta": input is 14-d — P(x-1) concatenated with the
     relative motion pose_delta_encoding(P(x-2), P(x-1)), handing the module
     the loop's velocity explicitly (identity motion at the first step). In
     residual mode the correction is anchored on the POSE part (first 7 dims).
+
+    img_feat="input" (F lever): the cell input is additionally conditioned on
+    pooled PRE-ray image-encoder features of the current view (and, with
+    img_feat_frames=2, the previous view): per-frame LayerNorm (shared
+    affine) then a ZERO-INIT Linear(src_dim*frames -> img_feat_dim) appended
+    AFTER the pose block — so gru_in keeps its pose-first 7/14-d layout, the
+    residual anchor is untouched, and an untrained module is output-identical
+    to img_feat="none" (the feature term is exactly zero at init, while the
+    cell's default-init input columns keep the gradient to img_proj alive).
+
+    iters (R lever): number of back-to-back cell iterations per view. The
+    CALL SITE owns the loop (this module stays a pure single-step cell — the
+    probe/spy surface); the count lives here so it rides enable_pose_gru and
+    the checkpoint sniff (it is invisible in weight shapes). In residual mode
+    the zero-init head makes any number of untrained iterations an identity
+    chain (up to repeated-quat-normalize fp noise; bit-exact at iters=1).
     """
 
-    def __init__(self, pose_dim=7, hidden_dim=128, mode="residual", input_mode="pose"):
+    def __init__(
+        self,
+        pose_dim=7,
+        hidden_dim=128,
+        mode="residual",
+        input_mode="pose",
+        img_feat="none",
+        img_feat_dim=32,
+        img_feat_frames=2,
+        img_feat_src_dim=1024,
+        iters=1,
+    ):
         super().__init__()
-        assert mode in ("residual", "direct"), f"unknown pose_gru mode {mode!r}"
+        assert mode in ("residual", "direct", "split_anchor"), (
+            f"unknown pose_gru mode {mode!r}"
+        )
         assert input_mode in ("pose", "pose_delta"), f"unknown pose_gru input {input_mode!r}"
+        assert img_feat in ("none", "input"), f"unknown pose_gru img_feat {img_feat!r}"
+        assert int(iters) >= 1, f"pose_gru iters must be >= 1, got {iters!r}"
         self.mode = mode
         self.input_mode = input_mode
         self.hidden_dim = hidden_dim
+        self.img_feat = img_feat
+        self.img_feat_src_dim = int(img_feat_src_dim)
+        self.iters = int(iters)
         self.input_dim = pose_dim if input_mode == "pose" else 2 * pose_dim
+        if img_feat == "input":
+            assert int(img_feat_frames) in (1, 2), (
+                f"img_feat_frames must be 1 (current view) or 2 (current + previous), "
+                f"got {img_feat_frames!r}"
+            )
+            assert int(img_feat_dim) > 0, "img_feat_dim must be positive when img_feat='input'"
+            self.img_feat_dim = int(img_feat_dim)
+            self.img_feat_frames = int(img_feat_frames)
+            self.img_norm = nn.LayerNorm(self.img_feat_src_dim)
+            self.img_proj = nn.Linear(
+                self.img_feat_src_dim * self.img_feat_frames, self.img_feat_dim
+            )
+            nn.init.zeros_(self.img_proj.weight)
+            nn.init.zeros_(self.img_proj.bias)
+            self.input_dim += self.img_feat_dim
+        else:
+            self.img_feat_dim = 0
+            self.img_feat_frames = 0
         self.cell = nn.GRUCell(self.input_dim, hidden_dim)
         self.head = nn.Linear(hidden_dim, pose_dim)
         if mode == "residual":
             nn.init.zeros_(self.head.weight)
             nn.init.zeros_(self.head.bias)
+        elif mode == "split_anchor":
+            # A5: zero ONLY the rotation rows, so q starts exactly at the
+            # anchor q(x-1) (A4's winning path) while t keeps the default
+            # init and is regressed from scratch (A3's winning path). Same
+            # tensor, same shapes -- no new parameters, no new state_dict keys.
+            with torch.no_grad():
+                self.head.weight[3:pose_dim].zero_()
+                self.head.bias[3:pose_dim].zero_()
 
-    def forward(self, gru_in, hidden):
+    def forward(self, gru_in, hidden, img_feat=None):
         """gru_in: (B, 7) or (B, 14) detached prev-step pose (+delta); hidden:
-        (B, H) or None at sequence start. Returns (refined_pose_enc, new_hidden)."""
+        (B, H) or None at sequence start; img_feat: (B, frames*src_dim) pooled
+        pre-ray image features (current view first, then previous) when
+        img_feat="input", else None. Returns (refined_pose_enc, new_hidden)."""
         if hidden is None:
             hidden = gru_in.new_zeros(gru_in.shape[0], self.hidden_dim)
-        hidden = self.cell(gru_in, hidden)
+        cell_in = gru_in
+        if self.img_feat == "input":
+            assert img_feat is not None, "img_feat='input' needs the pooled image features"
+            f = img_feat.reshape(
+                img_feat.shape[0], self.img_feat_frames, self.img_feat_src_dim
+            )
+            f = self.img_norm(f).reshape(img_feat.shape[0], -1)
+            cell_in = torch.cat([gru_in, self.img_proj(f)], dim=-1)
+        hidden = self.cell(cell_in, hidden)
         raw = self.head(hidden)
+        # Explicit per-mode branches with a terminal raise: the old catch-all
+        # `else` silently executed the DIRECT algebra for ANY unrecognised
+        # mode string (e.g. a post-hoc `gru.mode = ...` assignment or an
+        # unpickled module), which would mislabel a run with no error.
         if self.mode == "residual":
             t = gru_in[:, :3] + raw[:, :3]
             q = gru_in[:, 3:7] + raw[:, 3:7]
-        else:
+        elif self.mode == "direct":
             t = raw[:, :3]
             q = raw[:, 3:7]
+        elif self.mode == "split_anchor":
+            # A5: direct translation, anchored rotation. See the class docstring.
+            t = raw[:, :3]
+            q = gru_in[:, 3:7] + raw[:, 3:7]
+        else:
+            raise ValueError(f"unknown pose_gru mode {self.mode!r}")
         q = torch.nn.functional.normalize(q, dim=-1)
         return torch.cat([t, q], dim=-1), hidden
 
@@ -521,24 +673,70 @@ class ARCroco3DStereo(CroCoNet):
                     if key in self.state_dict():
                         if new_ckpt[key].size() == self.state_dict()[key].size():
                             new_new_ckpt[key] = new_ckpt[key]
+                        elif key.startswith("pose_gru."):
+                            # NEVER silently drop a trained GRU: a skipped
+                            # pose_gru tensor means the module was rebuilt
+                            # with the wrong hyperparameters and would
+                            # evaluate as random init with no error.
+                            raise RuntimeError(
+                                f"pose_gru weight '{key}' size mismatch "
+                                f"(ckpt: {new_ckpt[key].size()}, model: "
+                                f"{self.state_dict()[key].size()}) — rebuild the "
+                                f"module with the checkpoint's hyperparameters "
+                                f"(enable_pose_gru / load_model sniff) or use the "
+                                f"pose_gru_expand_ckpt.py surgery script"
+                            )
                         else:
                             printer.info(
                                 f"Skipping '{key}': size mismatch (ckpt: {new_ckpt[key].size()}, model: {self.state_dict()[key].size()})"
                             )
+                    elif key.startswith("pose_gru."):
+                        raise RuntimeError(
+                            f"pose_gru weight '{key}' not present in the model — "
+                            f"call enable_pose_gru with the checkpoint's "
+                            f"configuration (img_feat/iters included) before loading"
+                        )
                     else:
                         printer.info(f"Skipping '{key}': not found in model")
                 return super().load_state_dict(new_new_ckpt, **kw)
 
-    def enable_pose_gru(self, hidden_dim=128, mode="residual", input_mode="pose"):
+    def enable_pose_gru(
+        self,
+        hidden_dim=128,
+        mode="residual",
+        input_mode="pose",
+        img_feat="none",
+        img_feat_dim=32,
+        img_feat_frames=2,
+        iters=1,
+    ):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
         Call BEFORE load_state_dict when the checkpoint carries pose_gru
         weights, and BEFORE the optimizer is built (the module needs its own
         param group / lr). Created on CPU — move with .to(device) afterwards
-        if the model already lives on GPU.
+        if the model already lives on GPU. New kwargs are defaulted so every
+        legacy caller keeps constructing the exact v2 module.
         """
-        self.pose_gru = PoseGRU(hidden_dim=hidden_dim, mode=mode, input_mode=input_mode)
+        if mode in ("direct", "split_anchor") and int(iters) > 1:
+            what = "the pose" if mode == "direct" else "the TRANSLATION"
+            printer.info(
+                f"WARNING: pose_gru mode={mode!r} with iters>1 — nothing anchors "
+                f"{what} of iterate k on iterate k-1, so the loop can collapse to "
+                "a 1-step fixed point. The R lever is designed for residual mode."
+            )
+        self.pose_gru = PoseGRU(
+            hidden_dim=hidden_dim,
+            mode=mode,
+            input_mode=input_mode,
+            img_feat=img_feat,
+            img_feat_dim=img_feat_dim,
+            img_feat_frames=img_feat_frames,
+            img_feat_src_dim=self.enc_embed_dim,
+            iters=iters,
+        )
         self._pose_gru_hidden = None
+        self._prev_img_feat = None
         return self.pose_gru
 
     def set_freeze(self, freeze):  # this is for use by downstream models
@@ -916,6 +1114,7 @@ class ARCroco3DStereo(CroCoNet):
         group_size = len(view_indices)
         feed_prev_pred = bool(getattr(self, "feed_prev_pred", False))
         gru_pose_pred = None
+        gru_iterates = []  # all R-lever iterates of this view (last == gru_pose_pred)
         pose_gru_e2e = False  # set True inside the GRU block when lever G2 is live
         if feed_prev_pred:
             # Condition view x on the pose the model itself predicted at step
@@ -934,6 +1133,20 @@ class ARCroco3DStereo(CroCoNet):
                 self._prev_pred_pose_enc = None
                 self._prev_prev_pred_pose_enc = None
                 self._pose_gru_hidden = None
+                self._prev_img_feat = None
+                pose_gru = getattr(self, "pose_gru", None)
+                if pose_gru is not None and pose_gru.img_feat == "input":
+                    # Stash view 0's pooled PRE-ray appearance for the next
+                    # step's (current, previous) feature pair. View 0's tokens
+                    # carry the constant, pose-free masked_ray_map_token added
+                    # in _encode_views — subtract it so the stash is the same
+                    # pure-image statistic every other view provides.
+                    self._prev_img_feat = (
+                        (feat_group[0] - self.masked_ray_map_token.to(feat_group[0].dtype))
+                        .detach()
+                        .mean(dim=1)
+                        .float()
+                    )
             else:
                 prev_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
                 prev_prev_pose_enc = getattr(self, "_prev_prev_pred_pose_enc", None)
@@ -972,17 +1185,81 @@ class ARCroco3DStereo(CroCoNet):
                         # what the recurrent memory contributes. Works at
                         # batch size 1 (unlike the batch-roll shuffle).
                         hidden = None
-                    gru_in = prev_pose_enc
+                    img_feat_vec = None
+                    cur_img_feat = None
+                    if pose_gru.img_feat == "input":
+                        # F lever: pooled PRE-ray appearance of the current
+                        # view (the ray add below happens later), plus the
+                        # previous view's stash for the two-frame pair. The
+                        # detach is structural: the encoder is frozen and
+                        # (under TBPTT) already detached — the feature is
+                        # data, never a gradient path.
+                        cur_img_feat = feat_group[0].detach().mean(dim=1).float()
+                        if pose_gru.img_feat_frames == 2:
+                            prev_img_feat = getattr(self, "_prev_img_feat", None)
+                            assert prev_img_feat is not None, (
+                                "pose_gru img_feat: no stashed view x-1 feature — "
+                                "views must be processed sequentially from view 0"
+                            )
+                            img_feat_vec = torch.cat([cur_img_feat, prev_img_feat], dim=-1)
+                        else:
+                            img_feat_vec = cur_img_feat
+                        if (
+                            os.environ.get("POSE_GRU_IMG_FEAT_SHUFFLE") == "1"
+                            and img_feat_vec.shape[0] > 1
+                        ):
+                            # Falsifier: every sample sees another sample's
+                            # image pair (rolled coherently, mirroring
+                            # PREV_PRED_RAY_SHUFFLE); pose feedback and
+                            # supervision stay honest. If metrics don't
+                            # degrade, the GRU ignores image evidence.
+                            img_feat_vec = torch.roll(img_feat_vec, shifts=1, dims=0)
+                        if os.environ.get("POSE_GRU_IMG_FEAT_ZERO") == "1":
+                            # Falsifier: featureless control (works at B=1).
+                            img_feat_vec = torch.zeros_like(img_feat_vec)
+                    # R lever: n_iters back-to-back cell iterations, RAFT
+                    # style. The pose slice of the input is the RUNNING
+                    # estimate (detached between iterations per
+                    # pose_gru_iter_detach — RAFT's coords1.detach()); the
+                    # delta and image features are STATIC per-view context
+                    # re-injected every iteration; the hidden is NEVER
+                    # detached inside a view (only at the view boundary, per
+                    # the G lever below). POSE_GRU_FORCE_ITERS=<n> overrides
+                    # the count at eval — the anytime-inference probe.
+                    n_iters = int(getattr(pose_gru, "iters", 1))
+                    if os.environ.get("POSE_GRU_FORCE_ITERS"):
+                        n_iters = max(1, int(os.environ["POSE_GRU_FORCE_ITERS"]))
+                    iter_detach = bool(getattr(self, "pose_gru_iter_detach", True))
+                    delta_static = None
                     if pose_gru.input_mode == "pose_delta":
                         # Hand the loop's velocity to the GRU explicitly: the
                         # relative motion between the last two RAW head poses
                         # (identity at view 1, where no P(x-2) exists yet).
                         delta = pose_delta_encoding(prev_prev_pose_enc, prev_pose_enc)
-                        gru_in = torch.cat(
-                            [prev_pose_enc, delta.to(prev_pose_enc.dtype)], dim=-1
-                        )
+                        delta_static = delta.to(prev_pose_enc.dtype)
+                    est = prev_pose_enc
                     with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
-                        gru_pose_pred, new_hidden = pose_gru(gru_in.float(), hidden)
+                        for _it in range(n_iters):
+                            gru_in = (
+                                est
+                                if delta_static is None
+                                else torch.cat([est, delta_static], dim=-1)
+                            )
+                            gru_pose_pred, hidden = pose_gru(
+                                gru_in.float(), hidden, img_feat=img_feat_vec
+                            )
+                            gru_iterates.append(gru_pose_pred)
+                            if _it + 1 < n_iters:
+                                est = (
+                                    gru_pose_pred.detach() if iter_detach else gru_pose_pred
+                                )
+                    new_hidden = hidden
+                    if pose_gru.img_feat == "input":
+                        # Stash the current view's (honest, unfalsified)
+                        # pooled pre-ray appearance for the next step's pair.
+                        # Pure detached data — crosses TBPTT chunks like the
+                        # pose stashes, no boundary handling needed.
+                        self._prev_img_feat = cur_img_feat
                     if bool(getattr(self, "pose_gru_bptt", False)):
                         # Within-chunk BPTT (lever G1): keep the tape so the aux
                         # loss at a later view reaches the GRU calls of earlier
@@ -1132,6 +1409,12 @@ class ARCroco3DStereo(CroCoNet):
                 # builds its own GT target from the views — same construction
                 # as the main pose loss: camera_to_pose_encoding(inv(cam1)@gt).
                 res_group[-1]["gru_pose"] = gru_pose_pred
+                if len(gru_iterates) > 1:
+                    # R lever: all iterates (final == gru_pose) for the
+                    # gamma-weighted sequence loss. ONE stacked (N, B, 7)
+                    # tensor, not a list — the TBPTT all_preds collection
+                    # blanket-detaches tensor values and passes it through.
+                    res_group[-1]["gru_pose_iters"] = torch.stack(gru_iterates, dim=0)
 
         img_mask_group = torch.stack([views[i]["img_mask"] for i in view_indices], dim=0).any(
             dim=0

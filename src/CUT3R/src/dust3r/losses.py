@@ -1092,7 +1092,7 @@ class PoseGRULoss(MultiLoss):
     no such views at all the loss is 0 (safe to keep in a baseline config).
     """
 
-    def __init__(self, norm_mode="?avg_dis"):
+    def __init__(self, norm_mode="?avg_dis", iter_gamma=0.0):
         super().__init__()
         # Same '?' convention as Regr3DPose: '?' = don't rescale metric-scale
         # samples (their pred factor := gt factor -> true-scale supervision).
@@ -1103,12 +1103,21 @@ class PoseGRULoss(MultiLoss):
             self.norm_all = True
             self.norm_mode = norm_mode
         self.gt_scale = False
+        # R lever: gamma-weighted RAFT sequence loss over pred["gru_pose_iters"]
+        # ((N, B, 7), final iterate == gru_pose). Gated on the VALUE, not key
+        # presence: iter_gamma=0.0 runs the exact final-only code path even
+        # when the iterates tensor is attached. Intermediate iterates get
+        # weight gamma**(N-1-k); the final iterate keeps its existing
+        # weight-1.0 term, so its gradient scale matches an iters=1 run.
+        self.iter_gamma = float(iter_gamma)
 
     # Reuse the main pose loss's normalization verbatim (it reads only
     # self.norm_mode / self.gt_scale off self).
     get_norm_factor_poses = Regr3DPose.get_norm_factor_poses
 
     def get_name(self):
+        if self.iter_gamma > 0.0:
+            return f"PoseGRULoss(iter_gamma={self.iter_gamma:g})"
         return "PoseGRULoss()"
 
     def compute_loss(self, gts, preds, camera1=None, eps=1e-3, **kw):
@@ -1159,10 +1168,44 @@ class PoseGRULoss(MultiLoss):
         q_loss = q_all.mean()
         loss = t_loss + q_loss
         details = {
-            "gru_pose_loss": float(loss.detach()),
             "gru_trans_loss": float(t_loss.detach()),
             "gru_quat_loss": float(q_loss.detach()),
         }
+        if self.iter_gamma > 0.0:
+            # Intermediate iterates 0..N-2 only (the final iterate IS
+            # gru_pose, already counted above at weight 1.0). Same norm
+            # factors and validity masks as the final term — every iterate
+            # lives in the head's scene scale.
+            iter_t_terms, iter_q_terms = {}, {}
+            for i in gru_idx:
+                seq = preds[i].get("gru_pose_iters")
+                if seq is None:
+                    continue
+                seq = seq.float()
+                n_it = seq.shape[0]
+                valid = base_mask & torch.isfinite(gt_poses[i]).all(dim=-1)
+                for k in range(n_it - 1):
+                    t_err_k = torch.norm(
+                        seq[k][:, :3] / factor_pr.clip(eps)
+                        - gt_poses[i][:, :3] / factor_gt.clip(eps),
+                        dim=-1,
+                    )
+                    q_err_k = torch.norm(seq[k][:, 3:] - gt_poses[i][:, 3:], dim=-1)
+                    iter_t_terms.setdefault((n_it, k), []).append(t_err_k[valid])
+                    iter_q_terms.setdefault((n_it, k), []).append(q_err_k[valid])
+            iters_loss = None
+            for (n_it, k), terms in iter_t_terms.items():
+                t_k = torch.cat(terms)
+                q_k = torch.cat(iter_q_terms[(n_it, k)])
+                if t_k.numel() == 0:
+                    continue
+                w_k = self.iter_gamma ** (n_it - 1 - k)
+                term = w_k * (t_k.mean() + q_k.mean())
+                iters_loss = term if iters_loss is None else iters_loss + term
+            if iters_loss is not None:
+                loss = loss + iters_loss
+                details["gru_pose_loss_iters"] = float(iters_loss.detach())
+        details["gru_pose_loss"] = float(loss.detach())
         return loss, details
 
 

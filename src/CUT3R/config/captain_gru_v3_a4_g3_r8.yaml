@@ -1,13 +1,19 @@
 # ============================================================================
-# captain_gru_v2_a4_g2 — PoseGRU lever grid arm A4 x G2
+# captain_gru_v3_a4_g3_r8 — v3 lever grid: A4 x G3 x R8 (no image features)
 # ----------------------------------------------------------------------------
-# A lever: input pose+delta -> pose RESIDUAL
-# G lever: G2 e2e: main reconstruction loss also reaches the GRU via the ray build
-# Same overfit recipe as captain_gru_v2.yaml in every other respect; the
-# levers differ ONLY in pose_gru_mode / pose_gru_input / pose_gru_bptt /
-# pose_gru_e2e (+ exp_name). Grid map: A1=pose->direct, A2=pose->residual,
-# A3=pose+delta->direct, A4=pose+delta->residual; G0=per-step seal,
-# G1=within-chunk BPTT, G2=e2e main-loss grad. See captain_gru_v2_grid_README.md.
+# A4 (fixed for all v3 arms): input pose+delta -> pose RESIDUAL
+# G lever: G3 = G1 + G2, the SUPERSET arm: within-chunk BPTT AND the main
+#   reconstruction loss reaching the GRU via the ray build.
+# R lever: R8 — 8 back-to-back GRUCell iterations per view (RAFT-style:
+#   running estimate re-fed, static delta re-injected, estimate detached
+#   between iterates, hidden never detached inside a view). gamma=0.8
+#   sequence loss over the iterates in the TRAIN criterion only — the test
+#   criterion stays final-iterate so best-ckpt selection and loss curves are
+#   comparable across R arms.
+# F lever: OFF (pose_gru_img_feat: none).
+# Same overfit recipe as captain_gru_v2_a4_g3.yaml in every other respect
+# (identical data, schedule, batch, save_dir); the v2 run is the R1 control.
+# See captain_gru_v3_grid_README.md.
 # ============================================================================
 model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
@@ -25,10 +31,15 @@ n_corres_test: 0
 # Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
 pose_gru_loss_weight: 1.0
 
-train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
-# Kept equal to train_criterion to watch overfitting (train vs test on the same loss).
-# NOTE: the gru term is part of the test loss too, so best-ckpt selection sees it
-# (it is 0 whenever no view carries gru_pose, e.g. if pose_gru is toggled off).
+# R lever supervision: gamma-weighted RAFT sequence loss over the 8 iterates,
+# TRAIN ONLY (w_k = gamma^(N-1-k), final iterate keeps weight exactly 1.0, so
+# its gradient scale matches an R1 run). The test criterion below deliberately
+# uses PoseGRULoss() (final-iterate only) — best-ckpt values stay comparable
+# across R arms. This breaks the v2 train==test string symmetry BY DESIGN.
+pose_gru_iter_gamma: 0.8
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Final-iterate-only on the test side (see pose_gru_iter_gamma note above).
 test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
 
 # Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
@@ -61,31 +72,34 @@ feed_prev_pred: True
 # PoseGRU: recurrent filter between the fed-back pose and the ray-map build
 # (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
 # the current view's GT pose; hidden resets at view 0.
-#   pose_gru_mode:  'residual' (zero-init head; untrained == plain prev_pred)
-#                   'direct'   (head regresses the pose; early epochs worse
-#                              until it learns identity from scratch).
-#   pose_gru_input: 'pose'       7-d fed-back head pose P(x-1)
-#                   'pose_delta' 14-d: P(x-1) + relative motion
-#                              inv(P(x-2)) @ P(x-1) (identity at view 1) —
-#                              hands the loop's velocity to the GRU explicitly.
-#   pose_gru_bptt:  G1 lever. False = per-step hidden detach (G0). True =
-#                   hidden tape spans one 4-view TBPTT chunk (detached at
-#                   chunk boundaries, like state/mem) so the aux loss rewards
-#                   what earlier steps WROTE into the hidden.
-#   pose_gru_e2e:   G2 lever. True = the GRU output entering the ray build is
-#                   NOT detached, so the main reconstruction loss also trains
-#                   the GRU (through the frozen-but-differentiable ray encoder).
-#                   The fed-back head pose stays detached always.
-#   pose_gru_lr_scale: lr multiplier for the from-scratch GRU param groups.
+#   pose_gru_mode / pose_gru_input: A4 fixed — pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): gradient levers, unchanged from v2.
+#     BOTH True = G3, the intended superset: the main loss reaches the GRU AND
+#     credit crosses the steps of a chunk, so the reconstruction loss trains
+#     earlier steps' cell calls through the hidden too. The retired G2 arms ran
+#     bptt=False, i.e. G0+e2e — NOT a superset of G1; they became these G3 configs.
+#   pose_gru_iters (R lever): back-to-back cell iterations per view. The count
+#                   is persisted in ckpt args and restored by load_model (it is
+#                   invisible in weight shapes). Eval-time override:
+#                   POSE_GRU_FORCE_ITERS=<n> (anytime-N probe).
+#   pose_gru_iter_detach: RAFT discipline — detach the running estimate between
+#                   iterates (hidden never detached inside a view). Train-only.
+#   pose_gru_img_feat (F lever): 'input' feeds pooled PRE-ray image-encoder
+#                   features of views t and t-1 into the cell via a zero-init
+#                   projector; 'none' disables (this arm).
 # Falsifiers: PREV_PRED_RAY_SHUFFLE=1 (rolls BOTH pose stashes coherently),
-# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless).
+# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless),
+# POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 (F-lever falsifiers).
 pose_gru: True
 pose_gru_mode: residual
 pose_gru_input: pose_delta
 pose_gru_hidden_dim: 128
 pose_gru_lr_scale: 100.0
-pose_gru_bptt: False
+pose_gru_bptt: True
 pose_gru_e2e: True
+pose_gru_iters: 8
+pose_gru_iter_detach: True
+pose_gru_img_feat: none
 
 # ONE TEST SCENE
 # train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
@@ -128,10 +142,10 @@ eval_freq: 1
 save_freq: 1
 keep_freq: 10
 print_freq: 10
-print_img_freq: 50
+print_img_freq: 200
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse'
-exp_name: 'captain_gru_v2_a4_g2'
+exp_name: 'captain_gru_v3_a4_g3_r8'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/

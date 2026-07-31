@@ -19,7 +19,7 @@ with a PASS/FAIL table and a non-zero exit code if anything failed.
 
 Run (from anywhere; conda env `cuteanything`):
 
-  cd /scratch/bdursun25/cuteanything/captain_gru_v2
+  cd /scratch/bdursun25/cuteanything/captain_gru_v3
   export PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH"
   export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
   python verify_prev_flags.py
@@ -29,7 +29,7 @@ import hashlib
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),

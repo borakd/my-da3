@@ -46,12 +46,12 @@ srun --ntasks="$NNODES" --ntasks-per-node=1 bash -c '
   # returns 127, which under set -e aborts the task before training starts).
   source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
   conda activate '"$CONDA_ENV"'
-  cd /scratch/bdursun25/cuteanything/captain_gru_v2/src/CUT3R/src
+  cd /scratch/bdursun25/cuteanything/captain_gru_v3/src/CUT3R/src
 
   export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
   # Full three-tree path: src/CUT3R is required for the optional eval.monodepth
   # import (absrel/a1 depth metrics) — silently skipped without it.
-  WT=/scratch/bdursun25/cuteanything/captain_gru_v2
+  WT=/scratch/bdursun25/cuteanything/captain_gru_v3
   export PYTHONPATH=$WT:$WT/src:$WT/src/CUT3R:${PYTHONPATH:-}
   export HYDRA_FULL_ERROR=1
   # PCIe P2P is broken on some avg nodes (ai15 confirmed, kernel 4.18) — without this,

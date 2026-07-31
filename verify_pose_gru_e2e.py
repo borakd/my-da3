@@ -22,7 +22,7 @@ Submit via:  sbatch verify_pose_gru_e2e.sbatch   (1x L40S)
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),

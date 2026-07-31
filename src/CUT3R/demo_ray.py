@@ -24,7 +24,16 @@ resize+crop so the ray maps live at the model's input resolution.
   prev_pred no ray maps are fed from data; the model builds view x's ray map
             from its own pose prediction at step x-1 (model.feed_prev_pred) —
             config captain_ray_prev_pred. Poses are still loaded for the
-            intrinsics the ray-map builder needs.
+            intrinsics the ray-map builder needs. A PoseGRU carried by the
+            checkpoint is STRIPPED here, so this is the raw closed loop (the
+            GRU-less ablation of a GRU checkpoint).
+  prev_pred_gru
+            same closed loop as prev_pred, but the PoseGRU refiner stays
+            active: it filters the fed-back pose before it is rendered into
+            the conditioning ray map. The module and all of its
+            hyperparameters (mode / input / hidden_dim / img_feat / iters) are
+            restored from the checkpoint by load_model — nothing to pass.
+            Use this for every captain_gru_v2 / captain_gru_v3 checkpoint.
   none      no ray conditioning at all — byte-for-byte demo.py behavior
             (images via load_images_cover, ray_mask=False everywhere, no pose
             files needed / --pose_path ignored). Use for regular CUT3R
@@ -33,12 +42,30 @@ resize+crop so the ray maps live at the model's input resolution.
 Usage:
     python demo_ray.py --model_path MODEL_PATH --seq_path RGB_DIR
                        [--pose_path CAM_DIR]
-                       [--conditioning gt|prev_gt|prev_pred|none]
+                       [--conditioning gt|prev_gt|prev_pred|prev_pred_gru|none]
                        [--size 320] [--device cuda]
                        [--output_dir OUT_DIR] [--disable_viewer]
 
 If --pose_path is omitted and --seq_path ends in ``.../rgb``, the sibling
 ``.../cam`` directory is used.
+
+PoseGRU checkpoints (checkpoints/captain_gru_overfit/*): the run-name levers are
+all recorded inside the checkpoint, so the ONLY argument that varies is nothing —
+every arm runs with ``--conditioning prev_pred_gru``. The naming convention maps
+to ckpt["args"] entries that load_model reads back automatically:
+
+    captain_gru_v2_a{1,2,3,4}_g{0,1,2}      captain_gru_v3_a4_g{1,2}[_f1]_r8
+    ------------------------------------    --------------------------------
+    a1  pose_gru_mode=direct    input=pose        f1  pose_gru_img_feat=input
+    a2  pose_gru_mode=residual  input=pose            (dim 32, frames 2)
+    a3  pose_gru_mode=direct    input=pose_delta  r8  pose_gru_iters=8
+    a4  pose_gru_mode=residual  input=pose_delta      (iter_gamma 0.8)
+    g0  bptt=False e2e=False    g1  bptt=True e2e=False    g2  bptt=False e2e=True
+
+A/F levers are also cross-checked against the weight shapes (weight_ih width
+7 vs 14, plus img_proj), and load_state_dict hard-fails on any pose_gru
+mismatch — a mis-sniffed GRU can never evaluate as random init. The G levers
+only route training-time gradients and are inert under inference.
 """
 
 import argparse
@@ -87,13 +114,15 @@ def parse_args():
         "--conditioning",
         type=str,
         default="gt",
-        choices=["gt", "prev_gt", "prev_pred", "none"],
+        choices=["gt", "prev_gt", "prev_pred", "prev_pred_gru", "none"],
         help="Ray conditioning variant: 'gt' = each view its own GT ray map "
         "(feed_gt_ray_map), 'prev_gt' = view x gets view x-1's GT ray map "
         "(feed_prev_gt_ray_map), 'prev_pred' = the model builds view x's ray "
-        "map from its own step-(x-1) pose prediction (feed_prev_pred), "
-        "'none' = no ray conditioning, exactly demo.py (regular CUT3R "
-        "checkpoints; needs no pose files).",
+        "map from its own step-(x-1) pose prediction (feed_prev_pred), with any "
+        "checkpoint PoseGRU stripped, 'prev_pred_gru' = same closed loop with "
+        "the checkpoint's PoseGRU refiner active (all its hyperparameters are "
+        "restored from the ckpt), 'none' = no ray conditioning, exactly demo.py "
+        "(regular CUT3R checkpoints; needs no pose files).",
     )
     parser.add_argument(
         "--device",
@@ -226,15 +255,18 @@ def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
     - "prev_gt": every view after the first carries the PREVIOUS view's GT ray
       map (ray_mask=True), matching feed_prev_gt_ray_map=True (the loader's
       one-step shift).
-    - "prev_pred": no data-side rays (ray_mask=False everywhere); the model
-      builds view x's ray map from its own step-(x-1) pose prediction
-      (model.feed_prev_pred must be set). Views must carry camera_intrinsics.
+    - "prev_pred" / "prev_pred_gru": no data-side rays (ray_mask=False
+      everywhere); the model builds view x's ray map from its own step-(x-1)
+      pose prediction (model.feed_prev_pred must be set). Views must carry
+      camera_intrinsics. The two modes build IDENTICAL views — the PoseGRU
+      acts inside the decoder step, not in the inputs — so they differ only in
+      whether run_inference keeps the checkpoint's refiner.
 
     Args:
         images (list): load_images-style dicts from load_frames_training_style.
         ray_maps (list): Per-frame (1, H, W, 6) GT ray maps, same order.
         intrinsics_list (list): Per-frame (1, 3, 3) intrinsics, same order.
-        conditioning (str): "gt", "prev_gt", or "prev_pred".
+        conditioning (str): "gt", "prev_gt", "prev_pred" or "prev_pred_gru".
 
     Returns:
         list: A list of view dictionaries.
@@ -243,7 +275,11 @@ def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
         f"{len(images)} images vs {len(ray_maps)} ray maps vs "
         f"{len(intrinsics_list)} intrinsics — streams out of sync"
     )
-    assert conditioning in ("gt", "prev_gt", "prev_pred"), conditioning
+    assert conditioning in ("gt", "prev_gt", "prev_pred", "prev_pred_gru"), conditioning
+    # The GRU changes nothing on the input side; collapse it so the ray_mask /
+    # map-index logic below stays single-branch.
+    if conditioning == "prev_pred_gru":
+        conditioning = "prev_pred"
     views = []
     for i in range(len(images)):
         h, w = images[i]["img"].shape[-2:]
@@ -513,11 +549,48 @@ def run_inference(args):
     # Load and prepare the model.
     print(f"Loading model from {args.model_path}...")
     model = ARCroco3DStereo.from_pretrained(args.model_path).to(device)
-    if args.conditioning == "prev_pred":
+    if args.conditioning in ("prev_pred", "prev_pred_gru"):
         # Closed-loop conditioning happens inside _forward_decoder_group_step;
         # this model-side flag turns it on (same flag training sets from the
         # captain_ray_prev_pred config).
         model.feed_prev_pred = True
+    # PoseGRU handling. load_model already materialized the refiner and restored
+    # every hyperparameter from ckpt["args"] + the weight shapes, so the module
+    # is present iff the checkpoint was trained with one. All that is left is to
+    # honor the requested arm — kept identical to
+    # eval_pipeline/infer_and_eval_worker_ray.py so demo_ray and the batch worker
+    # never diverge on the same --conditioning string.
+    if args.conditioning == "prev_pred_gru":
+        if getattr(model, "pose_gru", None) is None:
+            # A ckpt with no pose_gru weights still runs, but as an
+            # identity-init refiner it is NOT a trained arm — say so loudly.
+            print(
+                "NOTE: checkpoint has no pose_gru weights — enabling an "
+                "identity-init residual GRU (== plain prev_pred). Smoke-test "
+                "only; results are not a trained-GRU arm."
+            )
+            model.enable_pose_gru()
+            model.pose_gru.to(device)
+        gru = model.pose_gru
+        print(
+            f"PoseGRU active (from ckpt): mode={gru.mode}, input={gru.input_mode}, "
+            f"hidden_dim={gru.hidden_dim}, img_feat={gru.img_feat}"
+            + (
+                f" (dim={gru.img_feat_dim}, frames={gru.img_feat_frames})"
+                if gru.img_feat == "input"
+                else ""
+            )
+            + f", iters={gru.iters}."
+        )
+    elif getattr(model, "pose_gru", None) is not None:
+        # The GRU runs whenever the module exists and feed_prev_pred is on, so a
+        # GRU checkpoint evaluated under any other arm must have it removed —
+        # otherwise "prev_pred" would silently still be the refined closed loop.
+        print(
+            f"Checkpoint carries pose_gru but --conditioning {args.conditioning} "
+            "— disabling the GRU for this run (GRU-less ablation)."
+        )
+        model.pose_gru = None
     model.eval()
 
     # Run inference.

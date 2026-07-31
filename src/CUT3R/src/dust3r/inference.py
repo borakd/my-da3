@@ -148,6 +148,11 @@ def loss_of_one_batch_tbptt(
             # own backward and frees its graph, so an undetached hidden
             # crossing here would crash the next chunk's backward. No-op under
             # the per-step detach (grad_fn already None) or without a GRU.
+            # v3 levers add NO new boundary state: with iters>1 (R lever) the
+            # stashed hidden is the view's LAST iterate — this detach is
+            # N-agnostic; the _prev_img_feat stash (F lever) is always
+            # detached data; gru_pose_iters is a plain res tensor that the
+            # all_preds collection below blanket-detaches like everything else.
             _gru_hidden = getattr(base_model, "_pose_gru_hidden", None)
             if _gru_hidden is not None:
                 base_model._pose_gru_hidden = _gru_hidden.detach()

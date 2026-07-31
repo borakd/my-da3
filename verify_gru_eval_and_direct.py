@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 
-WT = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+WT = "/scratch/bdursun25/cuteanything/captain_gru_v3"
 # A keep_freq snapshot, NOT checkpoint-last/best: those are rewritten every
 # epoch by the live training job and torch.load races the writer.
 CKPT = (

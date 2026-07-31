@@ -25,7 +25,7 @@ Submit: sbatch probe_gru_hidden.sbatch [ckpt]
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),

@@ -47,7 +47,7 @@ eval_freq: 1
 save_freq: 1
 keep_freq: 10
 print_freq: 10
-print_img_freq: 50
+print_img_freq: 200
 num_imgs_vis: 4
 save_dir: '/scratch/bdursun25/cuteanything/checkpoints/distributed'
 exp_name: 'cut3r_streamvggt_finetune_dynamic_debug'

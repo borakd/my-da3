@@ -1,8 +1,13 @@
 #!/usr/bin/env python
 """
-verify_gru_grid.py — GPU verification of the A1-A4 x G0-G2 lever grid
+verify_gru_grid.py — GPU verification of the A1-A4 x G0-G3 lever grid
 (pose_delta input, pose_gru_bptt, pose_gru_e2e) on the REAL pretrained
 checkpoint, REAL wrist_test data, and the REAL loss_of_one_batch_tbptt path.
+
+G arms: G0 = (bptt False, e2e False), G1 = (True, False), G2 = (False, True),
+G3 = (True, True) — the SUPERSET arm, everything G1 does plus the main
+reconstruction loss reaching the GRU. Note G2 is NOT a superset of G1: it is
+G0 + e2e. A3/A4's G2 configs were converted in place to G3.
 
 Stages:
   CFG   the 12 grid configs compose; lever keys per arm; twins differ only in levers
@@ -10,7 +15,8 @@ Stages:
   ROLL  integration rollouts: delta wiring (captured GRU inputs vs recomputed),
         A4 zero-init parity, coherent PREV_PRED_RAY_SHUFFLE, direct+delta sanity
   GRAD  real tbptt: G0 seal, G1 within-chunk tape + boundary detach + no
-        freed-graph crash + grad difference, G2 main-loss-only grads reach GRU
+        freed-graph crash + grad difference, G2 main-loss-only grads reach GRU,
+        G3 superset: G1's tape AND G2's main-loss path in one pass
   EQ    forward equivalence: G flags never change forward math
   LOAD  load_model auto-enable of input_mode from weights; param-group split
 
@@ -19,7 +25,7 @@ Submit via:  sbatch verify_gru_grid.sbatch   (1x L40S)
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),
@@ -30,6 +36,15 @@ for p in [
 
 import numpy as np
 import torch
+
+# The GRAD stage compares gradient tensors between arms, so run-to-run
+# nondeterminism in the backward (atomics in cuBLAS/cuDNN reductions) is the
+# noise floor every differential check is measured against. Pin it down rather
+# than raising thresholds to accommodate it. warn_only: a few ops in the DPT
+# heads have no deterministic kernel — those stay nondeterministic and are
+# absorbed by the max-over-repeats floor in the GRAD stage.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 import dust3r.heads  # noqa: F401  MUST precede dust3r.utils.camera (circular import)
 from dust3r.datasets.dl3dv import DL3DV_Multi
@@ -86,10 +101,12 @@ GRID = {  # arm -> (mode, input, bptt, e2e)
     "a2_g2": ("residual", "pose", False, True),
     "a3_g0": ("direct", "pose_delta", False, False),
     "a3_g1": ("direct", "pose_delta", True, False),
-    "a3_g2": ("direct", "pose_delta", False, True),
+    # A3/A4's G2 arms were converted in place to G3 = G1 + G2 (bptt AND e2e),
+    # the superset arm; A1/A2 keep the original G2 (G0 + e2e) for the record.
+    "a3_g3": ("direct", "pose_delta", True, True),
     "a4_g0": ("residual", "pose_delta", False, False),
     "a4_g1": ("residual", "pose_delta", True, False),
-    "a4_g2": ("residual", "pose_delta", False, True),
+    "a4_g3": ("residual", "pose_delta", True, True),
 }
 LEVER_KEYS = ("pose_gru_mode", "pose_gru_input", "pose_gru_bptt", "pose_gru_e2e")
 
@@ -228,7 +245,12 @@ model.feed_prev_pred = True
 
 
 class GRUSpy:
-    """Wrap pose_gru.forward: record (gru_in, hidden_arg, raw stashes) per call."""
+    """Wrap pose_gru.forward: record (gru_in, hidden_arg, raw stashes) per call.
+
+    v3 note: the call site now always passes img_feat= (None for the F0 arms
+    this file exercises); with iters>1 (R lever) there are N calls per view —
+    every check below assumes the default N=1, which all v2 grid arms use.
+    The v3 levers have their own verifier: verify_gru_v3_levers.py."""
 
     def __init__(self, model):
         self.model, self.calls = model, []
@@ -237,10 +259,18 @@ class GRUSpy:
     def __enter__(self):
         m = self.model
 
-        def spy(gru_in, hidden):
-            self.calls.append(
-                dict(
+        def spy(gru_in, hidden, img_feat=None):
+            # Exact cross-view credit probe. The hidden ARGUMENT is the only
+            # tensor that carries credit from this call back into the previous
+            # view's call (the returned hidden is also consumed by this view's
+            # own head, so hooking that cannot separate the two sources).
+            # Under a per-step detach the argument is tape-free and no hook can
+            # fire; under BPTT it has a tape and a gradient physically arrives
+            # during backward. Binary, so nondeterminism cannot blur it.
+            rec = dict(
+                    hidden_grad_absum=None,
                     gru_in=gru_in.detach().clone(),
+                    img_feat=(None if img_feat is None else img_feat.detach().clone()),
                     hidden_has_tape=(hidden is not None and hidden.grad_fn is not None),
                     hidden_requires_grad=(hidden is not None and hidden.requires_grad),
                     stash_prev=(
@@ -251,9 +281,15 @@ class GRUSpy:
                         None if getattr(m, "_prev_prev_pred_pose_enc", None) is None
                         else m._prev_prev_pred_pose_enc.detach().clone()
                     ),
-                )
             )
-            return self.orig(gru_in, hidden)
+            if hidden is not None and hidden.requires_grad and hidden.grad_fn is not None:
+                hidden.register_hook(
+                    lambda g, _r=rec: _r.__setitem__(
+                        "hidden_grad_absum", float(g.detach().abs().sum())
+                    )
+                )
+            self.calls.append(rec)
+            return self.orig(gru_in, hidden, img_feat=img_feat)
 
         m.pose_gru.forward = spy
         return self
@@ -428,15 +464,35 @@ check("T1", "G0 tbptt completes; aux grads reach head AND cell",
 check("T2", "G0: hidden entering every GRU call is tape-free (per-step seal)",
       not any(tape_flags), f"tape flags: {tape_flags}")
 
-s_g0b, _, _ = run_tbptt(full_crit, bptt=False, e2e=False)
+# Nondeterminism floor. EVERY differential check below is measured against
+# this, so a single noisy sample makes the whole GRAD stage flaky: run
+# 1409920 drew floor 5.89e-07 and run 1428021 drew 1.25e-06 while the signals
+# they gate were bit-stable across both (T6 was 1.51e-05 in each). Two fixes:
+# deterministic kernels at import time (see the torch setup near the top) to
+# shrink the noise, and a max over REPEATS here so the estimate is an upper
+# bound rather than one draw.
+G0_REPEATS = 3
+s_g0_reps = [s_g0] + [
+    run_tbptt(full_crit, bptt=False, e2e=False)[0] for _ in range(G0_REPEATS - 1)
+]
+
+
+def pair_floor(a, b):
+    return max(
+        (maxdiff(a[i][n], b[i][n])
+         for i in range(len(a)) for n in a[i]
+         if a[i][n] is not None and b[i][n] is not None),
+        default=0.0,
+    )
+
+
 floor = max(
-    (maxdiff(s_g0[i][n], s_g0b[i][n])
-     for i in range(len(s_g0)) for n in s_g0[i]
-     if s_g0[i][n] is not None and s_g0b[i][n] is not None),
-    default=0.0,
+    pair_floor(s_g0_reps[i], s_g0_reps[j])
+    for i in range(len(s_g0_reps)) for j in range(i + 1, len(s_g0_reps))
 )
-check("T3", "grad determinism baseline (G0 twice -> near-identical grads)", floor < 1e-6,
-      f"floor {floor:.2e}")
+s_g0b = s_g0_reps[1]
+check("T3", f"grad determinism baseline (G0 x{G0_REPEATS} -> near-identical grads)",
+      floor < 1e-6, f"floor {floor:.2e} (max over {G0_REPEATS} repeats)")
 
 # --- G1: within-chunk tape, boundary detach, grads actually differ
 s_g1, calls_g1, err = run_tbptt(full_crit, bptt=True, e2e=False)
@@ -455,7 +511,7 @@ check("T6", "G1 vs G0: cell.weight_hh grads differ (multi-step credit is real)",
 
 # --- G2: main loss alone reaches the GRU; sealed under G0
 s_seal, _, err0 = run_tbptt(main_crit, bptt=False, e2e=False)
-s_e2e, _, err2 = run_tbptt(main_crit, bptt=False, e2e=True)
+s_e2e, s_e2e_calls, err2 = run_tbptt(main_crit, bptt=False, e2e=True)
 check("T7", "main-only criterion under G0: pose_gru grads exactly zero (seal intact)",
       err0 is None and gsum(s_seal) == 0.0, err0 or f"|grads| {gsum(s_seal):.2e}")
 check("T8", "main-only criterion under G2: pose_gru head AND cell get grads via ray build",
@@ -470,6 +526,80 @@ check("T9", "G2 with the full criterion completes; ray-encoder freeze intact "
       "(requires_grad=False, so e2e grads pass THROUGH it, never INTO it)",
       errf is None and not frozen_live, errf or f"unfrozen: {frozen_live[:3]}")
 
+# --- G3 = G1 + G2: the superset arm. Everything G1 does (within-chunk hidden
+# tape, boundary-detached) PLUS everything G2 does (main loss reaching the GRU
+# through the ray build). The two levers are independent booleans, so this
+# combination was never exercised before the G3 arms were created — these
+# checks are what license spending GPU time on them.
+s_g3, calls_g3, err3 = run_tbptt(full_crit, bptt=True, e2e=True)
+check("T10", "G3 (bptt+e2e) tbptt completes — no freed-graph crash when the "
+      "hidden tape and the ray-build tape coexist in one chunk backward",
+      err3 is None, err3 or "")
+tape3 = {v: calls_g3[v - 1]["hidden_has_tape"] for v in range(2, NV)}
+check("T11", "G3 inherits G1's tape topology exactly (in-chunk tape, cut at the "
+      "chunk boundary)", err3 is None and tape3 == expect, f"got {tape3}, expected {expect}")
+# The main loss must reach the GRU under G3 just as it does under G2: run the
+# main-only criterion so the aux term cannot mask a dead e2e path.
+s_g3m, calls_g3m, err3m = run_tbptt(main_crit, bptt=True, e2e=True)
+check("T12", "G3 inherits G2's main-loss path (main-only criterion still grads "
+      "head AND cell)",
+      err3m is None and gsum(s_g3m, "head.") > 0 and gsum(s_g3m, "cell.") > 0,
+      err3m or f"|head| {gsum(s_g3m, 'head.'):.2e}, |cell| {gsum(s_g3m, 'cell.'):.2e}")
+# And it must be a STRICT superset. Tested by ORTHOGONALITY, not by
+# differencing gradient tensors: `floor` is measured on G0 under the full
+# criterion, where the GRU's gradient is almost entirely the aux PoseGRULoss
+# -- a tiny, nearly deterministic path (2.9e-07). Every e2e arm instead routes
+# gradient through the ray build, ray encoder, decoder and DPT heads, and THAT
+# backward is ~70x noisier (a G2-vs-G2 repeat differs by 2.1e-05, larger than
+# the G3-vs-G2 difference of 1.9e-05). Gating an e2e comparison on the G0
+# floor silently over-claims, and gating it on the honest paired floor is
+# simply inconclusive. So test the mechanism instead of its magnitude.
+#
+# The e2e half is exactly decidable: with the MAIN-ONLY criterion an arm
+# without e2e must receive EXACTLY zero GRU gradient (T7 shows this for G0).
+# G1 must therefore also be exactly zero, and G3 must not be -- that is G3
+# owning G2's mechanism, with no threshold anywhere. T14 below does the same
+# for the BPTT half. Together they pin the superset from both sides.
+s_g1m, _, err1m = run_tbptt(main_crit, bptt=True, e2e=False)
+g1m_tot, g3m_tot = gsum(s_g1m), gsum(s_g3m)
+d31 = maxdiff(gcat(s_g3, "cell.weight_hh"), gcat(s_g1, "cell.weight_hh"))
+d32 = maxdiff(gcat(s_g3, "cell.weight_hh"), gcat(s_g2f, "cell.weight_hh"))
+check("T13", "G3 owns G2's mechanism exactly: under the main-only criterion G1 "
+      "gets zero GRU gradient (no e2e path) while G3 does not",
+      err1m is None and g1m_tot == 0.0 and g3m_tot > 0.0,
+      err1m or f"G1 |grads| {g1m_tot:.2e} (must be 0), G3 |grads| {g3m_tot:.2e}; "
+      f"FYI noisy tensor diffs vs G1 {d31:.2e}, vs G2 {d32:.2e}")
+# Multi-step credit under e2e: with the main-only criterion, G3 must differ
+# from G2 -- that difference IS the reconstruction loss reaching earlier
+# steps' cell calls through the hidden, which is the whole point of the arm.
+# EXACT, not statistical. Two earlier attempts to settle this by differencing
+# gradient tensors both failed on noise, and the failure is structural rather
+# than fixable by tuning: the term travels the e2e backward, whose own
+# run-to-run spread (2.1e-05) is LARGER than the term itself (7.3e-06). No
+# threshold on that comparison can be both honest and decisive.
+#   - run 1428195 amplified the head x100 to lift the signal: signal +48x but
+#     paired noise +300x, SNR 6x -> 3.8x. Wild poses make ray maps, and hence
+#     the backward's reduction order, far more variable. Do not retry.
+#   - run 1428210 measured at the normal head vs a paired floor: 7.28e-06 vs
+#     2.11e-05. Inconclusive, correctly reported as a FAIL.
+# So ask the question the gradient itself answers. The hidden ARGUMENT of a
+# call is the sole route by which credit leaves this view for the previous
+# one. Under G2 it is detached, so no hook can ever fire on it; under G3 it
+# carries a tape and a gradient physically arrives. With the MAIN-ONLY
+# criterion, a gradient arriving there is proof that the reconstruction loss
+# -- not the aux loss -- reached an earlier step's cell call. Binary.
+in_chunk = [v for v in range(2, NV) if v != 4]  # chunks are views 0-3 / 4-7
+g3_arrivals = {v: calls_g3m[v - 1]["hidden_grad_absum"] for v in in_chunk}
+g2_arrivals = {v: s_e2e_calls[v - 1]["hidden_grad_absum"] for v in in_chunk}
+g3_live = [v for v, a in g3_arrivals.items() if a is not None and a > 0.0]
+g2_live = [v for v, a in g2_arrivals.items() if a is not None and a > 0.0]
+check("T14", "under the main-only criterion the reconstruction loss physically "
+      "reaches EARLIER steps' cell calls through the hidden under G3, and "
+      "cannot under G2",
+      len(g3_live) == len(in_chunk) and not g2_live,
+      f"G3 gradient arrived at views {g3_live} (expected {in_chunk}); "
+      f"G2 arrived at {g2_live} (expected none)")
+
 # =============================================================================
 banner("STAGE EQ — G flags change gradients only, never forward math")
 # =============================================================================
@@ -477,15 +607,16 @@ with torch.no_grad():
     model.pose_gru.load_state_dict(gru_sd0)  # nudged-head state, same for all arms
 model.eval()
 outs = {}
-for name, (bptt, e2e) in {"g0": (False, False), "g1": (True, False), "g2": (False, True)}.items():
+G_ARMS = {"g0": (False, False), "g1": (True, False), "g2": (False, True), "g3": (True, True)}
+for name, (bptt, e2e) in G_ARMS.items():
     model.pose_gru_bptt, model.pose_gru_e2e = bptt, e2e
     outs[name] = rollout(model, batch)
 model.pose_gru_bptt = model.pose_gru_e2e = False
 eq = all(
     torch.equal(outs["g0"][v][k], outs[g][v][k])
-    for g in ("g1", "g2") for v in range(NV) for k in ("camera_pose", "pts3d_in_self_view")
+    for g in ("g1", "g2", "g3") for v in range(NV) for k in ("camera_pose", "pts3d_in_self_view")
 )
-check("E1", "no-grad rollouts bit-identical across G0/G1/G2 (eval-time equivalence)", eq)
+check("E1", "no-grad rollouts bit-identical across G0/G1/G2/G3 (eval-time equivalence)", eq)
 
 # =============================================================================
 banner("STAGE LOAD — load_model auto-enable of input_mode; param-group split")
@@ -495,7 +626,7 @@ mini = {
     "args": cfgs["a4_g0"],  # residual + pose_delta
 }
 mini_path = os.path.join(
-    os.environ.get("SCRATCH_DIR", "/scratch/bdursun25/cuteanything/captain_gru_v2"),
+    os.environ.get("SCRATCH_DIR", "/scratch/bdursun25/cuteanything/captain_gru_v3"),
     "tmp_gru_grid_mini_ckpt.pth",
 )
 torch.save(mini, mini_path)

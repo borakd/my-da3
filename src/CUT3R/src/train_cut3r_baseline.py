@@ -251,14 +251,28 @@ def train(args):
             hidden_dim=int(getattr(args, "pose_gru_hidden_dim", 128)),
             mode=str(getattr(args, "pose_gru_mode", "residual")),
             input_mode=str(getattr(args, "pose_gru_input", "pose")),
+            # F lever: pooled pre-ray image features (current [+ previous]
+            # view) into the cell input via a zero-init projector.
+            img_feat=str(getattr(args, "pose_gru_img_feat", "none")),
+            img_feat_dim=int(getattr(args, "pose_gru_img_feat_dim", 32)),
+            img_feat_frames=int(getattr(args, "pose_gru_img_feat_frames", 2)),
+            # R lever: back-to-back cell iterations per view. Persisted in
+            # ckpt args (invisible in weight shapes — load_model reads it
+            # back exactly like pose_gru_mode).
+            iters=int(getattr(args, "pose_gru_iters", 1)),
         )
         printer.info(
-            "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, params=%d"
+            "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, "
+            "img_feat=%s (dim %d, frames %d), iters=%d, params=%d"
             % (
                 model.pose_gru.mode,
                 model.pose_gru.input_mode,
                 model.pose_gru.input_dim,
                 model.pose_gru.hidden_dim,
+                model.pose_gru.img_feat,
+                model.pose_gru.img_feat_dim,
+                model.pose_gru.img_feat_frames,
+                model.pose_gru.iters,
                 sum(p.numel() for p in model.pose_gru.parameters()),
             )
         )
@@ -331,11 +345,22 @@ def train(args):
     #     so the main reconstruction loss also reaches the GRU.
     base_model.pose_gru_bptt = bool(getattr(args, "pose_gru_bptt", False))
     base_model.pose_gru_e2e = bool(getattr(args, "pose_gru_e2e", False))
+    # R lever inner-iteration discipline (RAFT convention, default True):
+    # detach the running pose estimate between iterations; the hidden is
+    # never detached inside a view. Training-graph-only — inert at eval
+    # (no_grad) and at iters=1.
+    base_model.pose_gru_iter_detach = bool(getattr(args, "pose_gru_iter_detach", True))
     if base_model.pose_gru_bptt or base_model.pose_gru_e2e:
         assert use_pose_gru, "pose_gru_bptt / pose_gru_e2e require pose_gru=True"
         printer.info(
             f"pose_gru gradient levers: bptt={base_model.pose_gru_bptt} "
             f"(within-chunk BPTT), e2e={base_model.pose_gru_e2e} (main-loss grad)"
+        )
+    if use_pose_gru and base_model.pose_gru.iters > 1:
+        printer.info(
+            f"pose_gru R lever: iters={base_model.pose_gru.iters}, "
+            f"iter_detach={base_model.pose_gru_iter_detach}, "
+            f"iter_gamma(train)={float(getattr(args, 'pose_gru_iter_gamma', 0.0)):g}"
         )
     base_model.debug_grouped_updates = (
         bool(getattr(args, "debug_grouped_updates", False)) and accelerator.is_main_process

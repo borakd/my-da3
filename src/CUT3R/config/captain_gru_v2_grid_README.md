@@ -1,4 +1,4 @@
-# captain_gru_v2 lever grid — 12 overfit configs (A1-A4 × G0-G2)
+# captain_gru_v2 lever grid — 12 overfit configs (A1-A4 × G0-G3)
 
 Every config is the exact `captain_gru_v2.yaml` overfit recipe (single wrist_test
 episode, 64 views, batch 4, 50 epochs, TBPTT chunk 4, aux `PoseGRULoss` weight 1.0,
@@ -25,6 +25,20 @@ subtraction is meaningless under the double cover.
 | G0  | False | False | sealed: aux loss reaches exactly one GRUCell call per step |
 | G1  | True  | False | hidden tape spans one 4-view TBPTT chunk (boundary-detached like state/mem) |
 | G2  | False | True  | GRU output into the ray build NOT detached → main reconstruction loss also trains the GRU |
+| G3  | True  | True  | **the superset**: G1's tape AND G2's main-loss path |
+
+**G2 is NOT a superset of G1** — the two keys are independent, and G2 sets
+`bptt=False`, so it is G0 + e2e. Credit under G2 reaches only the current
+view's cell calls; G1 reaches every view in the chunk. G3 is the arm that is
+genuinely "G1 plus the main loss": the reconstruction loss trains earlier
+steps' cell calls through the hidden as well. **A3, A4 and A5's G2 configs were
+converted in place to G3** (`captain_gru_v2_a{3,4}_g3.yaml`,
+`captain_gru_v3_a4_g3_r8.yaml`, `captain_gru_v3_a4_g3_f1_r8.yaml`,
+`captain_gru_v3_a5_g3.yaml`); A1/A2 keep their original G2 configs. The
+already-trained `*_g2` **checkpoints stay on disk under their old names** —
+they are still valid G0+e2e runs, just not what "G2" was meant to mean, so
+every earlier g1-vs-g2 comparison traded multi-step credit away rather than
+adding the main-loss path on top of it.
 
 The fed-back head pose (`_prev_pred_pose_enc`) stays detached under every setting —
 structural, not a lever (the previous step's graph is freed under TBPTT).
