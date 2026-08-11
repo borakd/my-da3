@@ -18,10 +18,17 @@ import re
 import shutil
 import subprocess
 
-ROOT = "/scratch/bdursun25/cuteanything/outputs/cut3r_eval/overfit_test_scene"
+ROOT = os.environ.get(
+    "OVERFIT_EVAL_ROOT",
+    os.path.join(
+        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        "cut3r_eval", "overfit_test_scene",
+    ),
+)
 GRID = os.path.join(ROOT, "gru_grid")
 TEX = os.path.join(ROOT, "tables", "cut3r_droid_single_test_scene_sim3.tex")
-SCENE = "RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist"
+# MN5 drops the trailing camera component; override if evaluating elsewhere.
+SCENE = os.environ.get("OVERFIT_SCENE", "RAIL+eh61f232+2023-10-26-17h-33m-59s")
 OLD_PNG_WIDTH = 1661  # keep the recompiled PNG at the existing render width
 
 # (label_dir, arm text) in required order: A1-A4 under G0, then G1, then G2.
@@ -135,16 +142,18 @@ def main():
         print(out)
         return
 
+    os.makedirs(os.path.dirname(TEX) or ".", exist_ok=True)
     with open(TEX, "w") as f:
         f.write(out)
 
     tables_dir = os.path.dirname(TEX)
     base = os.path.splitext(os.path.basename(TEX))[0]
     compile_cmd = (
-        "source /etc/profile.d/lmod.sh && module load latex/2025 ghostscript && "
-        # The latex/2025 module has a flat bin/ layout that breaks kpathsea
+        "source /etc/profile.d/lmod.sh && module load latex/20240430 && "
+        # MN5 has no ghostscript module; /usr/bin/gs is used for the `gs` step below.
+        # The latex module has a flat bin/ layout that breaks kpathsea
         # self-location ("can't find pdflatex.fmt") — point it at the real root.
-        "export TEXMFROOT=/opt/ohpc/pub/apps/latex/2025 && "
+        "export TEXMFROOT=/apps/GPP/LATEX/20240430 && "
         "export TEXMFCNF=$TEXMFROOT:$TEXMFROOT/texmf-dist/web2c && "
         f"cd {tables_dir} && pdflatex -interaction=nonstopmode {base}.tex >/dev/null && "
         # 300 dpi matches the table's previous PNG renders.

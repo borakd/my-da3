@@ -95,6 +95,16 @@ def main():
         "prev_pred_gru = closed loop with the PoseGRU refiner active (module and "
         "mode/hidden_dim are restored from the checkpoint automatically).",
     )
+    ap.add_argument(
+        "--oracle",
+        default="off",
+        choices=["off", "gt"],
+        help="pose_gru_oracle run mode (DIAGNOSTIC, not an arm; mirrors "
+        "demo_ray.py --oracle): 'gt' feeds the GRU the CURRENT view's GT pose "
+        "(real GT camera_pose is loaded into the views) — requires "
+        "--conditioning prev_pred_gru. Default 'off' = honest closed loop, "
+        "even for oracle-TRAINED checkpoints (loudly flagged either way).",
+    )
     ap.add_argument("--scenes_root", required=True, help=".../test/dl3dv_multi/wrist")
     ap.add_argument("--scene_list", required=True, help="txt of scene names (one per line)")
     ap.add_argument("--pred_base", required=True)
@@ -185,6 +195,23 @@ def main():
                   "only; results are not a trained-GRU arm.", flush=True)
             model.enable_pose_gru()
             model.pose_gru.to(device)
+        gru = model.pose_gru
+        print(
+            f"{tag} PoseGRU active (from ckpt): mode={gru.mode}, "
+            f"input={gru.input_mode}, hidden_dim={gru.hidden_dim}, "
+            f"img_feat={gru.img_feat}"
+            + (
+                # img_feat_dim is the APPENDED cell width: the projector dim
+                # when proj=True, the full src*blocks width when proj=False.
+                # src is the SOURCE sub-lever (pooled/resnet18/dinov2_vits14/
+                # corr) — getattr'd so pickled pre-lever modules still print.
+                f" (src={getattr(gru, 'img_feat_src', 'pooled')}, "
+                f"appended={gru.img_feat_dim}, frames={gru.img_feat_frames}, "
+                f"proj={gru.img_feat_proj})"
+                if gru.img_feat == "input"
+                else ""
+            )
+            + f", iters={gru.iters}.", flush=True)
     elif getattr(model, "pose_gru", None) is not None:
         # v2 runs the GRU whenever the module exists and feed_prev_pred is on.
         # For every non-GRU arm, strip it so a GRU checkpoint evaluated under
@@ -192,6 +219,33 @@ def main():
         print(f"{tag} ckpt carries pose_gru but conditioning={args.conditioning} "
               "— disabling the GRU for this arm.", flush=True)
         model.pose_gru = None
+
+    # Run-mode cross-checks against how the ckpt was TRAINED (stashed on the
+    # net by load_model from ckpt['args']) — kept identical to demo_ray.py so
+    # the demo and the batch worker never diverge. Mismatches are legal
+    # ablation arms, but never silent ones.
+    trained_cond = getattr(model, "trained_conditioning", "none")
+    if trained_cond != args.conditioning:
+        print(f"{tag} WARNING: ckpt was trained with conditioning "
+              f"'{trained_cond}' but this arm runs '{args.conditioning}' — an "
+              "out-of-distribution probe, not the ckpt's honest arm.", flush=True)
+    trained_oracle = getattr(model, "trained_pose_gru_oracle", "off")
+    if args.oracle == "gt":
+        assert args.conditioning == "prev_pred_gru", (
+            "--oracle gt refines the GRU input — it requires "
+            "--conditioning prev_pred_gru"
+        )
+        model.pose_gru_oracle = "gt"
+        print(f"{tag} *** pose_gru_oracle=gt — DIAGNOSTIC RUN, NOT an arm. GT "
+              "pose is injected at the GRU input (views carry real GT "
+              "camera_pose); outputs are GT-derived — never compare against "
+              "honest arms. ***", flush=True)
+    elif trained_oracle != "off":
+        print(f"{tag} WARNING: ckpt was TRAINED with pose_gru_oracle="
+              f"'{trained_oracle}' (GT-injection diagnostic arm) but this run "
+              "keeps the oracle OFF: honest-loop metrics of an oracle-trained "
+              "arm are an out-of-distribution probe (pass --oracle gt to "
+              "reproduce the training-time wiring).", flush=True)
     model.eval()
     print(f"{tag} model loaded in {time.time()-t0:.1f}s", flush=True)
 
@@ -240,19 +294,22 @@ def main():
             last_exc = None
             for attempt in range(2):
                 outputs = state_args = views = None
-                images = ray_maps = intrinsics_list = None
+                images = ray_maps = intrinsics_list = gt_poses = None
                 try:
                     with open(os.devnull, "w") as _dn, contextlib.redirect_stdout(_dn):
                         if args.conditioning == "none":
                             views = demo_ray.prepare_input_none(img_paths, args.size)
                         else:
-                            images, ray_maps, intrinsics_list = (
+                            images, ray_maps, intrinsics_list, gt_poses = (
                                 demo_ray.load_frames_training_style(
                                     img_paths, cam_dir, args.size))
                             views = demo_ray.prepare_input(
                                 images=images,
                                 ray_maps=ray_maps,
                                 intrinsics_list=intrinsics_list,
+                                # Real GT camera_pose in the views: required by
+                                # --oracle gt, inert data for honest arms.
+                                gt_poses=gt_poses,
                                 # prev_pred_gru builds views exactly like
                                 # prev_pred (no data-side rays); the GRU acts
                                 # inside the decoder step, not in the inputs.
@@ -274,7 +331,7 @@ def main():
                     print(f"{tag} OOM on {scene} (frames={len(img_paths)}) "
                           f"attempt {attempt+1}/2", flush=True)
                 finally:
-                    del outputs, state_args, views, images, ray_maps, intrinsics_list
+                    del outputs, state_args, views, images, ray_maps, intrinsics_list, gt_poses
                     gc.collect()
                     if device.startswith("cuda"):
                         torch.cuda.empty_cache()

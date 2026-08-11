@@ -3,29 +3,36 @@
 # scene list on ONE GPU. It skips the 4291 scenes that already have a CSV and
 # only (re)processes the 1 giant scene that OOM'd during best's pre-hardening
 # pass, so best reaches 4292/4292 like final/regular.
-#SBATCH --account=avg
-#SBATCH --partition=avg
-#SBATCH --gres=gpu:lovelace_l40s:1
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_debug
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=120G
+#SBATCH --cpus-per-task=15   # was 12; MN5 derives mem from cores (8G/core) -> 120G ~= old --mem=120G
 #SBATCH --time=2:00:00
 #SBATCH --job-name=fixbest
-#SBATCH --output=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_fixbest_%j.out
-#SBATCH --error=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_fixbest_%j.err
+#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.out
+#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.err
 
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-MYDA3=$ROOT/my-da3
-CUT3R_DIR=$MYDA3/src/CUT3R
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=$ROOT/scenes/pointworld_droid_splits/test/dl3dv_multi/wrist
-OUT=$ROOT/outputs/cut3r_eval
-BEST_CKPT=$ROOT/checkpoints/cut3r_multinode/multinode_finetune_aug_mini/checkpoint-best.pth
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+MYDA3=$WT
+BEST_CKPT=${BEST_CKPT:-$CKPT_ROOT/cut3r_multinode/multinode_finetune_aug_mini/checkpoint-best.pth}
+mn5_require f "$BEST_CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT" s "$SCENE_LIST"
+mn5_require_slurm
+
 export PYTHONPATH="$MYDA3/src:$CUT3R_DIR:$CUT3R_DIR/src:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=0

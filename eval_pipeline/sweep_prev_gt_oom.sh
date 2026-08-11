@@ -3,31 +3,39 @@
 # Runs the SAME ray worker (conditioning=prev_gt) on an A6000 (48GB) over only the
 # missing_scenes.txt list, into the REAL output dirs (resume-safe).
 #
-#SBATCH --account=avg
-#SBATCH --partition=avg
-#SBATCH --gres=gpu:rtx_a6000:1
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_debug
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=200G
+#SBATCH --cpus-per-task=25   # was 12; MN5 derives mem from cores (8G/core) -> 200G ~= old --mem=200G
 #SBATCH --time=02:00:00
 #SBATCH --job-name=pgt_sweep
-#SBATCH --output=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_pgt_sweep_%j.out
-#SBATCH --error=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_pgt_sweep_%j.err
+#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_pgt_sweep_%j.out
+#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_pgt_sweep_%j.err
 
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_gru_v3
-CUT3R_DIR=$CRAY/src/CUT3R
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=$ROOT/scenes/pointworld_droid_splits/test/dl3dv_multi/wrist
-OUT=$ROOT/outputs/cut3r_eval
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+CRAY=$WT
 LABEL=captain_ray_prev_gt
-CKPT=$ROOT/checkpoints/captain_cut3r_sim3rmse/prev_gt_finetune_aug_full/checkpoint-final.pth
+CKPT=${CKPT:-}
 MISS=$OUT/$LABEL/missing_scenes.txt
+
+[ -n "$CKPT" ] || { echo "ERROR: CKPT is required (no default exists on MN5); see eval_bundle/MN5_EVAL_README.md" >&2; exit 1; }
+mn5_require f "$CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT"
+mn5_require_slurm
 
 export PYTHONPATH="$CRAY/src:$CUT3R_DIR:$CUT3R_DIR/src:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

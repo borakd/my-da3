@@ -155,6 +155,24 @@ def main():
     print(f"{tag} loading model from {args.ckpt} ...", flush=True)
     t0 = time.time()
     model = ARCroco3DStereo.from_pretrained(args.ckpt).to(device)
+    # This worker is IMAGE-ONLY (demo.py-style views, no ray conditioning, no
+    # feed_prev_pred). A checkpoint trained with conditioning still loads —
+    # but evaluating it here is an out-of-distribution open-loop probe, so say
+    # so loudly and strip any PoseGRU (it would be inert anyway: the GRU only
+    # runs inside the feed_prev_pred loop). The conditioned arms belong to
+    # infer_and_eval_worker_ray.py.
+    trained_cond = getattr(model, "trained_conditioning", "none")
+    if trained_cond != "none":
+        print(f"{tag} WARNING: ckpt was trained with conditioning "
+              f"'{trained_cond}' but this worker runs image-only open loop — "
+              "an out-of-distribution probe, NOT the ckpt's honest arm. Use "
+              "eval_pipeline/infer_and_eval_worker_ray.py --conditioning "
+              f"{trained_cond} for the honest evaluation.", flush=True)
+    if getattr(model, "pose_gru", None) is not None:
+        print(f"{tag} ckpt carries pose_gru — disabling it for this image-only "
+              "worker (it only ever runs inside the feed_prev_pred loop).",
+              flush=True)
+        model.pose_gru = None
     model.eval()
     print(f"{tag} model loaded in {time.time()-t0:.1f}s", flush=True)
 

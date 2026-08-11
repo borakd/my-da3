@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=gru_grid_eval
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_debug
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:lovelace_l40s:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=60G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/gru_grid_eval_%A.out
 #SBATCH --error=logs/gru_grid_eval_%A.err
@@ -18,21 +18,34 @@
 #   sbatch eval_gru_grid_overfit.sbatch <label>=<ckpt.pth> [<label>=<ckpt> ...]
 # Outputs: $OUT/overfit_test_scene/gru_grid/<label>/{preds,eval}/<scene>/
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_gru_v3
-CUT3R_DIR=$CRAY/src/CUT3R
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi
-OUT=$ROOT/outputs/cut3r_eval/overfit_test_scene/gru_grid
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+CRAY=$WT
+SCENES_ROOT=$OVERFIT_ROOT
+OUT=$OUT_ROOT/cut3r_eval/overfit_test_scene/gru_grid
 SCENE_LIST=$OUT/scene_list_wrist_test.txt
 
 export PYTHONPATH="$CRAY/src:$CUT3R_DIR:$CUT3R_DIR/src:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+[ $# -gt 0 ] || { echo "usage: sbatch $0 <label>=<ckpt.pth> [<label>=@<run_dir> ...]" >&2
+                  echo "  (with no arguments this used to exit 0 having done nothing)" >&2
+                  exit 1; }
+mn5_require f "$EVAL_SCRIPT" d "$OVERFIT_ROOT/$OVERFIT_SCENE/dense"
+mn5_require_slurm
+
 mkdir -p "$OUT" logs
-echo "RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist" > "$SCENE_LIST"
+echo "$OVERFIT_SCENE" > "$SCENE_LIST"
 
 rc_all=0
 for spec in "$@"; do

@@ -12,28 +12,32 @@
 #   BASE_SHARD   global shard offset for this node's GPUs (default 0)
 #   NUM_SHARDS   total planned workers, only affects starting offset (default 16)
 #
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=12:00:00
 #SBATCH --job-name=augfull_eval
-#SBATCH --output=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_augfull_%j.out
-#SBATCH --error=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_augfull_%j.err
+#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_augfull_%j.out
+#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_augfull_%j.err
 
-# Source conda directly (NOT ~/.bashrc, whose line 1 is corrupted -> fatal under
-# set -e). No 'set -u' (MKL activation reads unset vars).
+# Source the conda hook directly so the job never depends on an interactive shell rc.
+# No 'set -u' (MKL activation scripts read unset vars).
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-MYDA3=$ROOT/my-da3
-CUT3R_DIR=$MYDA3/src/CUT3R
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=$ROOT/scenes/pointworld_droid_splits/test/dl3dv_multi/wrist
-OUT=$ROOT/outputs/cut3r_eval
-SCENE_LIST=$OUT/scene_list.txt
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+MYDA3=$WT
 LABEL=${LABEL:-augfull_last}
 CKPT=${CKPT:-$OUT/$LABEL/checkpoint-augfull-last-snapshot.pth}
 CLAIM_DIR=$OUT/$LABEL/claims
@@ -41,11 +45,14 @@ CLAIM_DIR=$OUT/$LABEL/claims
 BASE_SHARD=${BASE_SHARD:-0}
 NUM_SHARDS=${NUM_SHARDS:-16}
 
+mn5_require f "$CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT" s "$SCENE_LIST"
+mn5_require_slurm
+
 export PYTHONPATH="$MYDA3/src:$CUT3R_DIR:$CUT3R_DIR/src:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$OUT/logs" "$CLAIM_DIR"
 
-NUM_GPUS=$(nvidia-smi -L | wc -l)
+NUM_GPUS=$(mn5_require_gpus) || exit 1
 echo "Node: $(hostname)  GPUs visible: $NUM_GPUS  BASE_SHARD=$BASE_SHARD  NUM_SHARDS=$NUM_SHARDS"
 echo "Ckpt: $CKPT"
 echo "Scenes: $(wc -l < "$SCENE_LIST")   Start: $(date)"

@@ -130,7 +130,8 @@ def main():
         f.write("# CUT3R test-set evaluation (averaged over all test scenes)\n\n")
         f.write("Metrics are per-scene summary rows averaged (unweighted) across scenes. "
                 "Eval: eval_depth_poses.py default args "
-                "(depth median-scale-aligned, pose SE3-aligned, single stream).\n\n")
+                "(depth median-scale-aligned, pose sim3-aligned, RMSE-reduced, "
+                "single stream).\n\n")
         header = ["Setup", "Scenes"] + [nice[m] for m in METRICS]
         f.write("| " + " | ".join(header) + " |\n")
         f.write("|" + "|".join(["---"] * len(header)) + "|\n")
@@ -150,7 +151,7 @@ def main():
     with open(table_txt, "w") as f:
         f.write("CUT3R test-set evaluation -- averaged over all test scenes\n")
         f.write("Eval: eval_depth_poses.py default args "
-                "(depth median-scale-aligned, pose SE3-aligned).\n\n")
+                "(depth median-scale-aligned, pose sim3-aligned, RMSE-reduced).\n\n")
         colw = 26
         head = f"{'setup':<28}{'n_scenes':>10}" + "".join(f"{m:>14}" for m in METRICS)
         f.write(head + "\n")

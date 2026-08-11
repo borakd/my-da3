@@ -12,11 +12,26 @@ import csv
 import os
 import subprocess
 
-ROOT = "/scratch/bdursun25/cuteanything/outputs/cut3r_eval/overfit_test_scene"
+ROOT = os.environ.get(
+    "OVERFIT_EVAL_ROOT",
+    os.path.join(
+        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        "cut3r_eval", "overfit_test_scene",
+    ),
+)
 GRID = os.path.join(ROOT, "gru_grid")
-SCENE = "RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist"
-PREV_PRED_CSV = ("/scratch/bdursun25/cuteanything/outputs/cut3r_eval/"
-                 "demo_ray_smoketest/prev_pred/eval_depth_pose_metrics.csv")
+# MN5 drops the trailing camera component; override if evaluating elsewhere.
+SCENE = os.environ.get("OVERFIT_SCENE", "RAIL+eh61f232+2023-10-26-17h-33m-59s")
+# The published baseline row comes from a Jul-10 smoketest pass that predates
+# every surviving prev_pred checkpoint -- it cannot be regenerated, only located.
+PREV_PRED_CSV = os.environ.get(
+    "PREV_PRED_CSV",
+    os.path.join(
+        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        "cut3r_eval", "demo_ray_smoketest", "prev_pred",
+        "eval_depth_pose_metrics.csv",
+    ),
+)
 TEX = os.path.join(ROOT, "tables", "cut3r_droid_single_test_scene_sim3_gru_vs_prevpred.tex")
 METRICS = ["absrel", "a1", "ate", "rpe_trans", "rpe_rot"]
 HIGHER = {"a1"}
@@ -98,14 +113,16 @@ Method & AbsRel $\downarrow$ & $\delta < 1.25$ $\uparrow$ & ATE $\downarrow$ & R
 \end{center}
 \end{document}
 """
+    os.makedirs(os.path.dirname(TEX) or ".", exist_ok=True)
     with open(TEX, "w") as f:
         f.write(tex)
 
     tables_dir = os.path.dirname(TEX)
     base = os.path.splitext(os.path.basename(TEX))[0]
     cmd = (
-        "source /etc/profile.d/lmod.sh && module load latex/2025 ghostscript && "
-        "export TEXMFROOT=/opt/ohpc/pub/apps/latex/2025 && "
+        "source /etc/profile.d/lmod.sh && module load latex/20240430 && "
+        # MN5 has no ghostscript module; /usr/bin/gs is used for the `gs` step below.
+        "export TEXMFROOT=/apps/GPP/LATEX/20240430 && "
         "export TEXMFCNF=$TEXMFROOT:$TEXMFROOT/texmf-dist/web2c && "
         f"cd {tables_dir} && pdflatex -interaction=nonstopmode {base}.tex >/dev/null && "
         f"gs -sDEVICE=png16m -r300 -o {base}.png -dBATCH -dNOPAUSE {base}.pdf"

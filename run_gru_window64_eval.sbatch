@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=gru_win64
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:lovelace_l40s:4
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=450G
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=57   # was 48; MN5 derives mem from cores (8G/core) -> 456G ~= old --mem=450G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/gru_win64_%A.out
 #SBATCH --error=logs/gru_win64_%A.err
@@ -17,19 +17,31 @@
 #   sbatch run_gru_window64_eval.sbatch
 # Results: outputs/.../gru_windows64/<label>/eval/win_XXXX/.../eval_depth_pose_metrics.csv
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_gru_v3
-CUT3R_DIR=$CRAY/src/CUT3R
-CKPTS=$ROOT/checkpoints/captain_cut3r_sim3rmse
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-OUT=$ROOT/outputs/cut3r_eval/overfit_test_scene/gru_windows64
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+CRAY=$WT
+CKPTS=${CKPTS:-$CKPT_ROOT/captain_cut3r_sim3rmse}
+OUT=$OUT_ROOT/cut3r_eval/overfit_test_scene/gru_windows64
 
 export PYTHONPATH="$CRAY/src:$CUT3R_DIR:$CUT3R_DIR/src:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p logs
+
+# The window tree is NOT built here. Nothing in the repo invokes
+# build_windows_strided.py, so without this guard all 8 labels x 4 shards used
+# to run against an empty scene list and the job still exited 0.
+mn5_require d "$CKPTS" f "$EVAL_SCRIPT" d "$OUT/windows_scenes" s "$OUT/scene_list.txt"
+mn5_require_slurm
 
 # A3 (direct head) and A4 (residual head) across all three G arms = the
 # comparison in question; the two v3 G1 arms ride along for free.

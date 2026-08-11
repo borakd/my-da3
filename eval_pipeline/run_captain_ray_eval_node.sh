@@ -9,39 +9,49 @@
 #
 # Env (passed via --export):
 #   LABEL        output label under $OUT      (default captain_ray_gt_last)
-#   CKPT         checkpoint path              (default captain_ray_finetune_aug_full/checkpoint-last.pth)
+#   CKPT         checkpoint path              (REQUIRED -- see note below)
 #   CONDITIONING demo_ray conditioning mode   (default gt)
 #   BASE_SHARD   global shard offset for this node's GPUs (default 0)
 #   NUM_SHARDS   total planned workers, only affects starting offset (default 12)
 #   LIMIT        max scenes per worker, 0 = all (default 0; for smoke tests)
+# Storage anchors (CKPT_ROOT/OUT_ROOT/DATA_ROOT/SCENES_ROOT/EVAL_SCRIPT) come
+# from eval_pipeline/mn5_paths.sh and are all overridable the same way.
 #
-#SBATCH --account=avg
-#SBATCH --partition=avg
-#SBATCH --gres=gpu:lovelace_l40s:4
+# CKPT has no default: the old one (cut3r_multinode/captain_ray_finetune_aug_full)
+# was never copied to MN5, and a dead default that silently fails four workers
+# deep is worse than an explicit error.
+#
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=450G
+#SBATCH --cpus-per-task=80   # MN5 lua submit plugin: cpus >= nodes*gpus*20, so 4 GPUs => exactly 80
+                             # (57 is HARD REJECTED at submit: "Required cpus: 80"; 160 => node config
+                             # unavailable). Memory is derived at 8G/core -> 640G. Never add --mem.
 #SBATCH --time=24:00:00
 #SBATCH --job-name=cray_eval
-#SBATCH --output=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_cray_%j.out
-#SBATCH --error=/scratch/bdursun25/cuteanything/outputs/cut3r_eval/logs/slurm_cray_%j.err
+#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.out
+#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.err
 
-# Source conda directly (NOT ~/.bashrc, whose line 1 is corrupted -> fatal under
-# set -e). No 'set -u' (MKL activation reads unset vars).
+# Source the conda hook directly so the job never depends on an interactive shell rc.
+# No 'set -u' (MKL activation scripts read unset vars).
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_gru_v3
-CUT3R_DIR=$CRAY/src/CUT3R
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=$ROOT/scenes/pointworld_droid_splits/test/dl3dv_multi/wrist
-OUT=$ROOT/outputs/cut3r_eval
-SCENE_LIST=$OUT/scene_list.txt
+# --- MN5 storage anchors ----------------------------------------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+CRAY=$WT
 LABEL=${LABEL:-captain_ray_gt_last}
-CKPT=${CKPT:-$ROOT/checkpoints/cut3r_multinode/captain_ray_finetune_aug_full/checkpoint-last.pth}
 CONDITIONING=${CONDITIONING:-gt}
 CLAIM_DIR=$OUT/$LABEL/claims
 
@@ -49,11 +59,15 @@ BASE_SHARD=${BASE_SHARD:-0}
 NUM_SHARDS=${NUM_SHARDS:-12}
 LIMIT=${LIMIT:-0}
 
+[ -n "$CKPT" ] || { echo "ERROR: CKPT is required, e.g. CKPT=\$CKPT_ROOT/captain_cut3r_finetune_aug_full/<run>/checkpoint-final.pth" >&2; exit 1; }
+mn5_require f "$CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT" s "$SCENE_LIST"
+mn5_require_slurm
+
 export PYTHONPATH="$CRAY/src:$CUT3R_DIR:$CUT3R_DIR/src:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$OUT/logs" "$CLAIM_DIR"
 
-NUM_GPUS=$(nvidia-smi -L | wc -l)
+NUM_GPUS=$(mn5_require_gpus) || exit 1
 echo "Node: $(hostname)  GPUs visible: $NUM_GPUS  BASE_SHARD=$BASE_SHARD  NUM_SHARDS=$NUM_SHARDS  LIMIT=$LIMIT"
 echo "Ckpt: $CKPT  conditioning=$CONDITIONING  label=$LABEL"
 echo "Scenes: $(wc -l < "$SCENE_LIST")   Start: $(date)"

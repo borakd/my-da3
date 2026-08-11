@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=gru_overfit_all
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:rtx_a6000:4
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=400G
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=50   # was 24; MN5 derives mem from cores (8G/core) -> 400G ~= old --mem=400G
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/gru_overfit_all_%A.out
 #SBATCH --error=logs/gru_overfit_all_%A.err
@@ -31,22 +31,30 @@
 #
 # Outputs: $OUT/<label>/{preds,eval,epochs.txt,ckpt.txt}
 set -o pipefail
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 
-ROOT=/scratch/bdursun25/cuteanything
-CRAY=$ROOT/captain_gru_v3
-CUT3R_DIR=$CRAY/src/CUT3R
-CKPTS=$ROOT/checkpoints/captain_gru_overfit
-EVAL_SCRIPT=/scratch/bdursun25/streaming-3d/eval_depth_poses.py
-SCENES_ROOT=/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi
-SCENE="RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist"
-OUT=$ROOT/outputs/cut3r_eval/overfit_test_scene/gru_grid_final
+# --- MN5 storage anchors (shared; every value overridable) -------------------
+source "$WT/eval_pipeline/mn5_paths.sh"
+CRAY=$WT
+CKPTS=${CKPTS:-$CKPT_ROOT/captain_gru_overfit}
+SCENES_ROOT=$OVERFIT_ROOT
+SCENE=$OVERFIT_SCENE
+OUT=$OUT_ROOT/cut3r_eval/overfit_test_scene/gru_grid_final
 SCENE_LIST=$OUT/scene_list_wrist_test.txt
 
 export PYTHONPATH="$CRAY/src:$CUT3R_DIR:$CUT3R_DIR/src:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd "$CRAY" || exit 1
+mn5_require d "$CKPTS" f "$EVAL_SCRIPT" d "$OVERFIT_ROOT/$OVERFIT_SCENE/dense"
+mn5_require_slurm
 mkdir -p "$OUT" logs
 echo "$SCENE" > "$SCENE_LIST"
 

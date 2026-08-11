@@ -27,10 +27,25 @@ import re
 import shutil
 import subprocess
 
-ROOT = "/scratch/bdursun25/cuteanything/outputs/cut3r_eval/overfit_test_scene"
-SCENE = "RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist"
-PREV_PRED_CSV = ("/scratch/bdursun25/cuteanything/outputs/cut3r_eval/"
-                 "demo_ray_smoketest/prev_pred/eval_depth_pose_metrics.csv")
+ROOT = os.environ.get(
+    "OVERFIT_EVAL_ROOT",
+    os.path.join(
+        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        "cut3r_eval", "overfit_test_scene",
+    ),
+)
+# MN5 drops the trailing camera component; override if evaluating elsewhere.
+SCENE = os.environ.get("OVERFIT_SCENE", "RAIL+eh61f232+2023-10-26-17h-33m-59s")
+# The published baseline row comes from a Jul-10 smoketest pass that predates
+# every surviving prev_pred checkpoint -- it cannot be regenerated, only located.
+PREV_PRED_CSV = os.environ.get(
+    "PREV_PRED_CSV",
+    os.path.join(
+        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        "cut3r_eval", "demo_ray_smoketest", "prev_pred",
+        "eval_depth_pose_metrics.csv",
+    ),
+)
 TEX = os.path.join(ROOT, "tables", "cut3r_droid_single_test_scene_sim3_gru_vs_prevpred.tex")
 
 METRICS = ["absrel", "a1", "ate", "rpe_trans", "rpe_rot"]
@@ -47,33 +62,53 @@ A_TEXT = {
 CELL_RE = re.compile(r"(?:\\cellcolor\{[^}]*\})?\s*([0-9]*\.?[0-9]+)\s*$")
 
 
+# F SOURCE sub-lever suffix -> (short tag for the name bits, human detail text).
+# NB the F digit is the arm INDEX (f0 = 1 frame, f1 = 2 frames), not the count.
+F_SRC = {
+    "": ("", "img feats"),                    # pooled CUT3R tokens (original arms)
+    "r": ("r", "resnet18 img feats"),
+    "d": ("d", "DINOv2 CLS img feats"),
+    "c": ("c", "corr motion stats"),
+}
+
+
 def parse_label(label):
-    """'v2_a1_g0' / 'gru_a1_g0' / 'v3_a4_g1_f1_r8' -> (sort key, display name, group).
+    """'v2_a1_g0' / 'gru_a1_g0' / 'v3_a4_g1_f1_r8' / 'v3_a4_g1_f1d_r8'
+    -> (sort key, display name, group).
 
     The display name follows the convention already in the table: 'PoseGRU A<N> G<M>
     (<head algebra>, <gru input>)', with the v3 levers appended as they appear in the
-    run name (F1 = two-frame image features into the GRU, R<K> = K refinement iterations).
+    run name (F<i><s> = image features into the GRU — i the frame-arm index, s the
+    SOURCE suffix r/d/c per F_SRC — R<K> = K refinement iterations). The F token and
+    the source are both part of the sort key: a bare '_f1' membership test published
+    f0r/f0d as the F-OFF control and every f1<s> arm under the pooled F1 row.
     """
     m = re.search(r"(a[1-5])_g([0-2])", label)
     if not m:
         return None
     a, g = m.group(1), m.group(2)
-    f1 = "_f1" in label
+    fm = re.search(r"_f([01])([rdc]?)(?=_|$)", label)
     r = re.search(r"_r(\d+)(?:_|$)", label)
     bits = [f"PoseGRU {a.upper()} G{g}"]
-    if f1:
-        bits.append("F1")
+    if fm:
+        bits.append(f"F{fm.group(1)}{fm.group(2)}")
     if r:
         bits.append(f"R{r.group(1)}")
     detail = [A_TEXT[a]]
     if r:
         detail.append(f"{r.group(1)} iters")
-    if f1:
-        detail.append("img feats")
+    if fm:
+        detail.append(F_SRC[fm.group(2)][1])
     name = " ".join(bits) + " (" + ", ".join(detail) + ")"
-    # Order: the v2 grid by G then A (as published), then the v3 arms.
-    ver = 1 if (f1 or r) else 0
-    return (ver, int(g), int(a[1]), int(f1), int(r.group(1)) if r else 0), name, f"g{g}_v{ver}"
+    # Order: the v2 grid by G then A (as published), then the v3 arms. F slot:
+    # 0 = F off, 1 = F0 (one frame), 2 = F1 — keeps the published F-off-before-F1
+    # order while giving F0 arms their own slot; src rank separates the sources.
+    ver = 1 if (fm or r) else 0
+    f_slot = (int(fm.group(1)) + 1) if fm else 0
+    # NB not str.find: "rdc".find("") is 0, which collided pooled with resnet18.
+    src_rank = {"": 0, "r": 1, "d": 2, "c": 3}[fm.group(2)] if fm else 0
+    key = (ver, int(g), int(a[1]), f_slot, src_rank, int(r.group(1)) if r else 0)
+    return key, name, f"g{g}_v{ver}"
 
 
 def mean_row(csv_path):
@@ -109,6 +144,16 @@ def collect(grid):
                   f"UNVERIFIED. Write {ep_file} with the real epoch count.")
         key, name, group = p
         # 'gru_a1_g0_ep40'-style intermediate evals are keyed apart by their epoch.
+        if (key, epochs) in out:
+            # Two labels mapping to one key means the parser is blind to some
+            # lever in the run-name convention (this is exactly how the source
+            # suffix silently overwrote arms before it entered the key). Fail
+            # loudly instead of publishing one arm's numbers under another's name.
+            raise RuntimeError(
+                f"table key collision: {label!r} and {out[(key, epochs)][5]!r} "
+                f"both parse to {key} [{epochs} ep] — teach parse_label the "
+                "lever that distinguishes them before publishing"
+            )
         out[(key, epochs)] = (key, name, group, mean_row(csv_path), epochs, label)
     return out
 
@@ -245,12 +290,14 @@ Method & AbsRel $\downarrow$ & $\delta < 1.25$ $\uparrow$ & ATE $\downarrow$ & R
         src = os.path.join(tables_dir, base + ext)
         if os.path.isfile(src) and not os.path.isfile(src + ".bak_pre_v3arms"):
             shutil.copy(src, src + ".bak_pre_v3arms")
+    os.makedirs(os.path.dirname(tex_path) or ".", exist_ok=True)
     with open(tex_path, "w") as f:
         f.write(tex)
 
     cmd = (
-        "source /etc/profile.d/lmod.sh && module load latex/2025 ghostscript && "
-        "export TEXMFROOT=/opt/ohpc/pub/apps/latex/2025 && "
+        "source /etc/profile.d/lmod.sh && module load latex/20240430 && "
+        # MN5 has no ghostscript module; /usr/bin/gs is used for the `gs` step below.
+        "export TEXMFROOT=/apps/GPP/LATEX/20240430 && "
         "export TEXMFCNF=$TEXMFROOT:$TEXMFROOT/texmf-dist/web2c && "
         f"cd {tables_dir} && pdflatex -interaction=nonstopmode {base}.tex >/dev/null && "
         f"gs -sDEVICE=png16m -r300 -o {base}.png -dBATCH -dNOPAUSE {base}.pdf"

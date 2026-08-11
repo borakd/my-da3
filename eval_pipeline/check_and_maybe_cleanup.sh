@@ -11,8 +11,13 @@
 #   CLEANUP_RESUBMITTED -> all finished but coverage incomplete; one cleanup pass; reschedule
 #   COMPLETE            -> done; caller should aggregate, present table, and ping
 set -o pipefail
-OUT=/scratch/bdursun25/cuteanything/outputs/cut3r_eval
-MYDA3=/scratch/bdursun25/cuteanything/captain_gru_v3
+OUT=${OUT_ROOT:-/gpfs/projects/etur59/koc821022/outputs}/cut3r_eval
+# Self-locating: this is a plain driver script (not an sbatch body), so deriving
+# the worktree from ${BASH_SOURCE[0]} is correct here -- there is no SLURM spool
+# copy involved. Fail loudly rather than silently driving the wrong checkout.
+MYDA3="${MYDA3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+[ -f "$MYDA3/eval_pipeline/aggregate_results.py" ] || {
+  echo "ERROR: \$MYDA3 is not a my-da3 checkout: $MYDA3" >&2; exit 1; }
 JOBID=$(cat "$OUT/logs/jobid.txt" 2>/dev/null)
 RJOB=$(cat "$OUT/logs/regular_jobid.txt" 2>/dev/null)
 echo "main_jobid=$JOBID regular_jobid=$RJOB"
@@ -22,7 +27,7 @@ echo "main_jobid=$JOBID regular_jobid=$RJOB"
 # main job's worker_g*_ logs and the parallel job's worker_NEWg*_ logs). When a
 # checkpoint finishes, snapshot its averages to averages_after_<label>.{txt,md}
 # (eval CSVs already exist from inline per-scene eval), plus a cumulative table.
-AGG="conda run -n cuteanything python /scratch/bdursun25/cuteanything/captain_gru_v3/eval_pipeline/aggregate_results.py"
+AGG="conda run -n cuteanything python $MYDA3/eval_pipeline/aggregate_results.py"
 SL="$OUT/scene_list.txt"
 done_labels=""
 for lbl in best final regular; do

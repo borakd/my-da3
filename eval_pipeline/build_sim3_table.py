@@ -127,6 +127,7 @@ def main():
             cells.append(s)
         lines.append(" & ".join(cells) + r" \\")
 
+    os.makedirs(os.path.dirname(args.out_tex) or ".", exist_ok=True)
     with open(args.out_tex, "w") as f:
         f.write(HEADER + "\n".join(lines) + "\n" + FOOTER)
     print(f"Wrote {args.out_tex}  (agg={args.agg})")
