@@ -1,0 +1,251 @@
+{
+  "meta": {
+    "ckpt": "/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_finetune/checkpoint-final.pth",
+    "data_root": "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi",
+    "num_views": 64,
+    "batch_size": 4,
+    "batches_requested": 200,
+    "resolution": [
+      320,
+      192
+    ],
+    "pose_gru_mode": "residual",
+    "input_mode": "pose_delta",
+    "input_dim": 14,
+    "iters": 1,
+    "img_feat": "none",
+    "img_feat_src": "pooled",
+    "batches_done": 200,
+    "elapsed_seconds": 577.6,
+    "graded_start": 48,
+    "n_rows": 50400,
+    "n_sequences": 800,
+    "dim_labels": [
+      "absT_x",
+      "absT_y",
+      "absT_z",
+      "absQ_w",
+      "absQ_x",
+      "absQ_y",
+      "absQ_z",
+      "delta_t_x",
+      "delta_t_y",
+      "delta_t_z",
+      "delta_q_w",
+      "delta_q_x",
+      "delta_q_y",
+      "delta_q_z"
+    ],
+    "verdict_recomputed": "2026-08-12: scored by patch_probe_verdict.py against the measured expectations; measurements unchanged from the original run"
+  },
+  "per_dim": {
+    "std_all": [
+      0.4517567870495266,
+      0.4229454739326115,
+      0.5828322041149882,
+      0.04169015002774537,
+      0.09644659404643387,
+      0.10483420257761913,
+      0.14309435673778392,
+      0.03536930846857204,
+      0.02950902955357068,
+      0.03717372057238013,
+      0.0002475882045360787,
+      0.006827132223424699,
+      0.007130335232409805,
+      0.008392791087909886
+    ],
+    "std_graded": [
+      0.5850359514624667,
+      0.5454844692388061,
+      0.7442194904897622,
+      0.05802381021188477,
+      0.1268181636078062,
+      0.13950344271046158,
+      0.1901735820918574,
+      0.03967590000213706,
+      0.0318309344757902,
+      0.03968478441466993,
+      0.00033039534084523413,
+      0.007702723566294,
+      0.007975600519614554,
+      0.0089556260267838
+    ],
+    "mean_all": [
+      -0.029332607620141664,
+      0.04757458629670558,
+      0.07147695793098807,
+      0.9784520202709569,
+      -0.01083944264564087,
+      5.2921975179408325e-05,
+      0.0028157472200769865,
+      -0.0007976540263257569,
+      2.8090225253914337e-05,
+      0.001562967083544331,
+      0.9999159911736136,
+      -0.000285531492238453,
+      -5.809570237820368e-05,
+      8.491993410609313e-05
+    ],
+    "absmean_all": [
+      0.287499957988986,
+      0.27254110874193,
+      0.40183269245121656,
+      0.9784520202709569,
+      0.060877821430139645,
+      0.06558304504079379,
+      0.08928562316036426,
+      0.020223229686889874,
+      0.01839271218390285,
+      0.024153035666809645,
+      0.9999159911736136,
+      0.004302308954247159,
+      0.00432064403737019,
+      0.005240534806702732
+    ]
+  },
+  "absT_norm": {
+    "mean_graded": 0.9374052413215128,
+    "p50_graded": 0.8528595310610221,
+    "p95_graded": 1.975686334288335,
+    "mean_all": 0.6515269321658316,
+    "p50_all": 0.5385486625257758,
+    "min_all": 0.0005304767838839059,
+    "max_all": 4.009776356556111
+  },
+  "delta_t_norm": {
+    "p50": 0.03193680425019821,
+    "p95": 0.1183488202381222,
+    "p50_graded": 0.03467268651930548,
+    "p95_graded": 0.12502028064723908,
+    "mean": 0.0429835405507164,
+    "max": 0.9119391243443952
+  },
+  "absT_over_delta_t_median": 16.862947786093326,
+  "per_sequence_scale": {
+    "p5": 0.13263744335386526,
+    "p50": 0.5935649022876064,
+    "p95": 1.3420248145398481,
+    "p99": 1.6895822560864782,
+    "spread_p99_over_p5": 12.738350599678089
+  },
+  "input_gain": [
+    2.0,
+    2.0,
+    2.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    30.0,
+    30.0,
+    30.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "input_gain_graded": [
+    2.0,
+    2.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    30.0,
+    30.0,
+    30.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "input_gain_isotropic": [
+    2.0,
+    2.0,
+    2.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    30.0,
+    30.0,
+    30.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "validation": [
+    {
+      "name": "delta_t p95/p50 shape",
+      "value": 3.7057189351494895,
+      "lo": 3.0222222222222226,
+      "hi": 4.722222222222222,
+      "expected": "GT-derived 3.778, head-scale-invariant",
+      "kind": "wiring",
+      "gating": true,
+      "passed": true
+    },
+    {
+      "name": "head scale p50-vs-p95 agreement",
+      "value": 1.0194453070751794,
+      "lo": 1.0,
+      "hi": 1.2,
+      "expected": "two percentiles must imply the same factor",
+      "kind": "wiring",
+      "gating": true,
+      "passed": true
+    },
+    {
+      "name": "delta_t p50",
+      "value": 0.03193680425019821,
+      "lo": 0.0275,
+      "hi": 0.061875,
+      "expected": "measured 0.04125 +/-50%",
+      "kind": "regression",
+      "gating": true,
+      "passed": true
+    },
+    {
+      "name": "delta_t p95",
+      "value": 0.1183488202381222,
+      "lo": 0.09124,
+      "hi": 0.20529000000000003,
+      "expected": "measured 0.13686 +/-50%",
+      "kind": "regression",
+      "gating": true,
+      "passed": true
+    },
+    {
+      "name": "absT mean @ supervised views",
+      "value": 0.9374052413215128,
+      "lo": 0.6631533333333334,
+      "hi": 1.492095,
+      "expected": "measured 0.99473 +/-50%",
+      "kind": "regression",
+      "gating": true,
+      "passed": true
+    }
+  ],
+  "all_checks_passed": true,
+  "implied_head_scale": {
+    "from_dt_p50": 7.097067611155158,
+    "from_dt_p95": 6.961695308124835,
+    "from_absT_sup": 4.550510880201519,
+    "assumed_by_directive": 4.0
+  },
+  "superseded_expected": {
+    "source": "round2_evidence.md:159 GT stats x assumed head scale 4x (superseded 2026-08-12)",
+    "absT_sup_range": [
+      0.5,
+      0.8
+    ],
+    "delta_t_p50": 0.018,
+    "delta_t_p95": 0.068,
+    "absT_over_delta_t_median": 70.0
+  },
+  "wiring_checks_passed": true,
+  "scale_checks_passed": true
+}

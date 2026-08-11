@@ -628,7 +628,19 @@ def run_inference(args):
                 if gru.img_feat == "input"
                 else ""
             )
-            + f", iters={gru.iters}."
+            + f", iters={gru.iters}"
+            # P3.4 input_gain: a per-dimension scale on the cell input, carried
+            # as a BUFFER. Restored by the load_model sniff like every other
+            # lever, but unlike mode/iters a lost gain changes no shape and
+            # raises no error — it would just silently evaluate a different
+            # module. Print it (kept identical to
+            # eval_pipeline/infer_and_eval_worker_ray.py, per the note above).
+            + (
+                ""
+                if getattr(gru, "input_gain", None) is None
+                else f", input_gain={[round(v, 4) for v in gru.input_gain.tolist()]}"
+            )
+            + "."
         )
     elif getattr(model, "pose_gru", None) is not None:
         # The GRU runs whenever the module exists and feed_prev_pred is on, so a

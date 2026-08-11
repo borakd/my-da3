@@ -271,6 +271,17 @@ def train(args):
             # ckpt args (invisible in weight shapes — load_model reads it
             # back exactly like pose_gru_mode).
             iters=int(getattr(args, "pose_gru_iters", 1)),
+            # P3.4 scale normalization: per-dimension gain on the cell input,
+            # filled from probe_gru_input_stats.py's 1/std values (quaternion
+            # dims stay 1.0). The fed-back absT columns run ~70x larger than
+            # the informative delta_t ones, so the nuisance pose block
+            # dominates the hidden state; the rung-0 probe showed the module
+            # has no scale invariance at all. ABSENT KEY -> None -> no buffer,
+            # no state_dict key, byte-identical to every existing arm.
+            # A list of self.input_dim OR base-pose-width (7/14) floats; the
+            # short form is padded with ones over the appended F block, since
+            # input_dim is 46 on the F1 pooled arms, not 14.
+            input_gain=getattr(args, "pose_gru_input_gain", None),
         )
         # Split the param count: the encoder sources hang a frozen network
         # under pose_gru.img_encoder (11.2M resnet18 / 21M dinov2), and a
@@ -285,7 +296,7 @@ def train(args):
         printer.info(
             "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, "
             "img_feat=%s (src %s, appended %d, frames %d, proj=%s), iters=%d, "
-            "trainable params=%d%s"
+            "input_gain=%s, trainable params=%d%s"
             % (
                 model.pose_gru.mode,
                 model.pose_gru.input_mode,
@@ -297,6 +308,12 @@ def train(args):
                 model.pose_gru.img_feat_frames,
                 model.pose_gru.img_feat_proj,
                 model.pose_gru.iters,
+                # P3.4: print the vector, not just on/off — a run whose gain
+                # silently fell back to all-ones is indistinguishable from an
+                # off run in every metric, so the values belong in the log.
+                "off"
+                if model.pose_gru.input_gain is None
+                else "[" + ", ".join(f"{v:g}" for v in model.pose_gru.input_gain.tolist()) + "]",
                 gru_trainable,
                 f" (+{gru_frozen} frozen img_encoder)" if gru_frozen else "",
             )

@@ -211,7 +211,18 @@ def main():
                 if gru.img_feat == "input"
                 else ""
             )
-            + f", iters={gru.iters}.", flush=True)
+            + f", iters={gru.iters}"
+            # P3.4 input_gain: a per-dimension scale on the cell input, carried
+            # as a BUFFER. It is restored by the load_model sniff like every
+            # other lever, but unlike mode/iters a lost gain changes no shape
+            # and raises no error — it would just silently evaluate a different
+            # module. Print it so the eval log proves it survived the trip.
+            + (
+                ""
+                if getattr(gru, "input_gain", None) is None
+                else f", input_gain={[round(v, 4) for v in gru.input_gain.tolist()]}"
+            )
+            + ".", flush=True)
     elif getattr(model, "pose_gru", None) is not None:
         # v2 runs the GRU whenever the module exists and feed_prev_pred is on.
         # For every non-GRU arm, strip it so a GRU checkpoint evaluated under

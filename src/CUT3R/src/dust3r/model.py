@@ -82,10 +82,11 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
 
     Weight shapes stay authoritative wherever they can speak (hidden width,
     F on/off, projector presence, source width, block count, cell input
-    width); ckpt args fill in only what is INVISIBLE in shapes (mode, iters)
-    or ambiguous (source disambiguation), and every overlap is cross-checked
-    with a hard fail — a mis-sniffed module either refuses to load (shape
-    mismatch) or, worse, silently evaluates the wrong arm.
+    width, input-gain presence); ckpt args fill in only what is INVISIBLE in
+    shapes (mode, iters) or ambiguous (source disambiguation), and every
+    overlap is cross-checked with a hard fail — a mis-sniffed module either
+    refuses to load (shape mismatch) or, worse, silently evaluates the wrong
+    arm.
 
     Returns None when the state dict carries no pose_gru weights.
     """
@@ -236,6 +237,16 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
             f"expected 7 (pose) or 14 (pose_delta)"
         )
         input_mode = "pose_delta" if base_width == 14 else "pose"
+    # P3.4: the input-gain buffer is presence-gated exactly like img_norm — it
+    # is in the state dict iff the run was configured with pose_gru_input_gain.
+    # Rebuild it (all-ones; load_state_dict then writes the ckpt's own values)
+    # so a strict load has a home for the key. Without this, a gain-trained
+    # checkpoint would fail to load with "unexpected key pose_gru.input_gain",
+    # which is the intended hard failure for a mis-sniffed module but useless
+    # for a correctly-sniffed one. The buffer's WIDTH is not sniffed: it is
+    # self.input_dim by construction, and a disagreement there would already
+    # have failed on cell.weight_ih.
+    input_gain = True if g("input_gain") is not None else None
     return dict(
         hidden_dim=hidden_dim,
         mode=mode,
@@ -246,6 +257,7 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
         img_feat_proj=img_feat_proj,
         img_feat_src=img_feat_src,
         iters=iters,
+        input_gain=input_gain,
     )
 
 
@@ -634,6 +646,58 @@ class PoseGRU(nn.Module):
     the checkpoint sniff (it is invisible in weight shapes). In residual mode
     the zero-init head makes any number of untrained iterations an identity
     chain (up to repeated-quat-normalize fp noise; bit-exact at iters=1).
+
+    input_gain (P3.4 scale normalization): a per-dimension multiplier on the
+    CELL INPUT, registered as a persistent buffer so it serializes with the
+    checkpoint and eval rebuilds bit-exact. Motivation, measured not assumed
+    (round-2 forward-math audit, and reproduced by probe_gru_input_stats.py):
+    the fed-back absT columns run 0.5-0.8 head-units at the supervised views
+    while the delta_t columns — the only INFORMATIVE channel, the loop's
+    velocity — run 0.018-0.068, i.e. ~70x smaller. A GRUCell whose weight_ih
+    is initialised for O(1) inputs therefore lets the nuisance pose block
+    dominate the hidden state, and the velocity block's gate pre-activation
+    std reads 0.0007 against ~0.08 for the pose block. Scaling each column by
+    1/std equalises them.
+
+    The rung-0 probe (GRU_GAP_CLOSURE_DIRECTIVE.md) promoted this from a
+    tuning lever to a PREREQUISITE: handed a numerically PERFECT pose in the
+    wrong scale, the module scored ATE 0.1165 against 0.0888 with its own
+    stale one. It has no scale invariance whatsoever, so anything that feeds
+    it a better pose must fix scale first.
+
+    PRESENCE-GATED, like the F lever's img_norm: input_gain=None (the default,
+    and what an absent pose_gru_input_gain config key produces) registers NO
+    buffer, adds NO state_dict key, and leaves forward() on the identical
+    pre-P3.4 path — every existing config and checkpoint is byte-identical.
+    _sniff_pose_gru_config detects the buffer by key presence and rebuilds it
+    so a strict load_state_dict has a home for the key.
+
+    Accepted values:
+      None            -> off (see above).
+      True            -> build all-ones at self.input_dim. This is the
+                         CHECKPOINT-LOAD path: the sniff knows the buffer
+                         exists but not its values, and load_state_dict
+                         overwrites the ones with the ckpt's own.
+      sequence        -> the gains. Length must be self.input_dim OR the base
+                         pose width (7/14); a base-width vector is PADDED WITH
+                         ONES over the appended F block. NOTE self.input_dim is
+                         NOT always 14 — the F1 pooled/proj arms widen the cell
+                         input to 46 — so a bare 14-long buffer would fail to
+                         broadcast on any F arm; the buffer is always built at
+                         self.input_dim for that reason.
+
+    Applying the gain AFTER the img_feat concat (forward, below) is exactly
+    equivalent to applying it before — cat([g*a, f]) == cat([g, f]) * cat([a, 1])
+    elementwise — and the ones-padding over the F block is what makes it so.
+    That keeps image features untouched, which is correct: they are already
+    LayerNormed and are the one part of the cell input that is scale-conditioned.
+
+    This static buffer is only the FIRST HALF of the fix. The per-chunk
+    supervision factor spans 11.6x across batches, so the module must be
+    scale-EQUIVARIANT, not merely rescaled once; the dossier's full prescription
+    is a per-sequence running scale with the emitted translation correction
+    multiplied back by the same scale. probe_gru_input_stats.py logs the
+    per-sequence factor so that dynamic version can be priced before it is built.
     """
 
     def __init__(
@@ -651,6 +715,7 @@ class PoseGRU(nn.Module):
         img_encoder_pretrained=True,
         img_encoder_weights=None,
         iters=1,
+        input_gain=None,
     ):
         super().__init__()
         assert mode in ("residual", "direct", "split_anchor"), (
@@ -747,6 +812,40 @@ class PoseGRU(nn.Module):
             self.img_feat_frames = 0
             self.img_feat_blocks = 0
             self.img_feat_proj = False
+        # P3.4 scale normalization. See the class docstring for the mechanism
+        # and for why this is presence-gated rather than an all-ones default:
+        # a buffer that always exists would add a state_dict key every
+        # pre-P3.4 checkpoint lacks, and the loader hard-fails on that.
+        if input_gain is None:
+            self.input_gain = None
+        else:
+            # Always self.input_dim wide. The base pose block is 7 (A<=3) or
+            # 14 (A4 pose_delta), but F1 pooled/proj widens the cell input to
+            # 46 and img_feat_proj=False takes it to 1038/2062 — a base-width
+            # buffer would not broadcast against cell_in on any F arm.
+            gain = torch.ones(self.input_dim)
+            if input_gain is not True:
+                base_width = self.input_dim - self.img_feat_dim
+                vals = torch.as_tensor(
+                    [float(x) for x in input_gain], dtype=torch.float32
+                )
+                assert torch.isfinite(vals).all() and (vals > 0).all(), (
+                    f"pose_gru input_gain must be finite and positive, got {vals.tolist()}"
+                )
+                if vals.numel() == self.input_dim:
+                    gain = vals
+                elif vals.numel() == base_width:
+                    # Pad with ones over the appended F block: image features
+                    # are already LayerNormed and must stay unscaled.
+                    gain[:base_width] = vals
+                else:
+                    raise ValueError(
+                        f"pose_gru_input_gain has {vals.numel()} entries; expected "
+                        f"{self.input_dim} (full cell input) or {base_width} (pose "
+                        f"block only, padded with ones over the {self.img_feat_dim} "
+                        f"appended image-feature columns)"
+                    )
+            self.register_buffer("input_gain", gain)
         self.cell = nn.GRUCell(self.input_dim, hidden_dim)
         self.head = nn.Linear(hidden_dim, pose_dim)
         if mode == "residual":
@@ -792,6 +891,18 @@ class PoseGRU(nn.Module):
             cell_in = torch.cat(
                 [gru_in, self.img_proj(f) if self.img_feat_proj else f], dim=-1
             )
+        if self.input_gain is not None:
+            # P3.4: per-column rescale of the cell input. Applied HERE, after
+            # the concat, rather than on gru_in above — the buffer is
+            # self.input_dim wide with ones over the appended F block, and
+            # cat([g*a, f]) == cat([g, f]) * cat([a, 1]) elementwise, so this
+            # is the same arithmetic with one broadcast that works on every F
+            # arm. (It also leaves `cell_in = gru_in` above untouched, which
+            # is the anchor verify_plan_anchors.py resolves this site by.)
+            # The buffer is fp32 and cell_in arrives fp32 (the call site runs
+            # the GRU under autocast(enabled=False) and casts with .float()),
+            # so no dtype promotion happens in practice.
+            cell_in = cell_in * self.input_gain
         hidden = self.cell(cell_in, hidden)
         raw = self.head(hidden)
         # Explicit per-mode branches with a terminal raise: the old catch-all
@@ -1043,6 +1154,7 @@ class ARCroco3DStereo(CroCoNet):
         img_encoder_pretrained=True,
         img_encoder_weights=None,
         iters=1,
+        input_gain=None,
     ):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
@@ -1076,6 +1188,10 @@ class ARCroco3DStereo(CroCoNet):
             img_encoder_pretrained=img_encoder_pretrained,
             img_encoder_weights=img_encoder_weights,
             iters=iters,
+            # P3.4 scale normalization: None (the default, and what an absent
+            # pose_gru_input_gain config key gives) builds no buffer at all,
+            # so the module is byte-identical to every pre-P3.4 arm.
+            input_gain=input_gain,
         )
         self._pose_gru_hidden = None
         self._prev_img_feat = None
