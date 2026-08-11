@@ -1,0 +1,161 @@
+# ============================================================================
+# SMOKE TEST — copy of captain_gru_v3_a4_g3_f1_r8.yaml.
+# ----------------------------------------------------------------------------
+# Purpose: prove train_cut3r_baseline.py runs CLEANLY end-to-end on MareNostrum5
+# on ONE GPU with the newest levers all engaged (A4 x G3 x F1 x R8). NOT science:
+# 2 epochs over 16 samples, results are meaningless.
+#
+# EVERY lever field is byte-identical to the parent config. Only these differ:
+#   train_data/test_data ROOT -> /gpfs/scratch/etur59/koc821022/smoke/dl3dv_multi
+#         (a symlink tree holding ONE real staged DROID wrist episode; the parent
+#          config's ROOT still points at the old cluster because the dataset copy
+#          was still running when this was written)
+#   train_dataset 672 -> 16 ; test_dataset 672 -> 8 ; epochs 50 -> 2
+#   num_workers 10 -> 4 ; keep_freq 10 -> 1 ; print_freq 10 -> 1
+#   save_dir -> .../checkpoints/smoke ; exp_name -> ..._smoke
+#
+# num_views (64), batch_size (4), long_context/TBPTT, lr schedule, criteria and
+# all pose_gru_* keys are UNCHANGED, so the smoke run exercises the real code path.
+#
+# Run:  sbatch smoke_train_gru_v3.sbatch
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: gamma-weighted RAFT sequence loss over the 8 iterates,
+# TRAIN ONLY (w_k = gamma^(N-1-k), final iterate keeps weight exactly 1.0, so
+# its gradient scale matches an R1 run). The test criterion below deliberately
+# uses PoseGRULoss() (final-iterate only) — best-ckpt values stay comparable
+# across R arms. This breaks the v2 train==test string symmetry BY DESIGN.
+pose_gru_iter_gamma: 0.8
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Final-iterate-only on the test side (see pose_gru_iter_gamma note above).
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B. Add more entries to
+# track several criteria at once.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Model-side flag read by train_cut3r_baseline; both
+# dataset ray flags MUST stay False (the model asserts this). View 0 gets the
+# masked_ray_map_token, exactly like the GT-conditioned runs. The fed-back pose
+# is detached (it is an input, not a gradient path; required under TBPTT).
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 fixed — pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): gradient levers, unchanged from v2.
+#     BOTH True = G3, the intended superset: the main loss reaches the GRU AND
+#     credit crosses the steps of a chunk, so the reconstruction loss trains
+#     earlier steps' cell calls through the hidden too. The retired G2 arms ran
+#     bptt=False, i.e. G0+e2e — NOT a superset of G1; they became these G3 configs.
+#   pose_gru_iters (R lever): back-to-back cell iterations per view. The count
+#                   is persisted in ckpt args and restored by load_model (it is
+#                   invisible in weight shapes). Eval-time override:
+#                   POSE_GRU_FORCE_ITERS=<n> (anytime-N probe).
+#   pose_gru_iter_detach: RAFT discipline — detach the running estimate between
+#                   iterates (hidden never detached inside a view). Train-only.
+#   pose_gru_img_feat (F lever): 'input' feeds pooled PRE-ray image-encoder
+#                   features of views t and t-1 into the cell via a zero-init
+#                   projector; 'none' disables (this arm).
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1 (rolls BOTH pose stashes coherently),
+# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless),
+# POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 (F-lever falsifiers).
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0
+pose_gru_bptt: True
+pose_gru_e2e: True
+pose_gru_iters: 8
+pose_gru_iter_detach: True
+pose_gru_img_feat: input
+pose_gru_img_feat_dim: 32
+pose_gru_img_feat_frames: 2
+pose_gru_img_feat_src: dinov2_vits14  # F SOURCE: frozen DINOv2 ViT-S/14 CLS (384-d)
+pose_gru_img_encoder_weights: null    # default resolves to src/CUT3R/src/pretrained_encoders/
+
+# ONE TEST SCENE -- a single 672-frame DROID wrist episode, NOT the full
+# dataset. (The block previously labelled '# FULL DATASET' here was
+# byte-identical to this one; the duplicate has been removed.)
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/smoke/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/smoke/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+
+# (38633 / 4292 are the FULL-split scene counts -- not used by this arm.)
+train_dataset: 16 @ ${train_data}
+test_dataset: 8 @ ${test_data}
+
+seed: 0
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 2
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-6
+min_lr: 1e-7
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 4
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 1
+print_freq: 1
+print_img_freq: 200
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/smoke'
+exp_name: 'captain_gru_v3_a4_g3_f1d_r8_smoke'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

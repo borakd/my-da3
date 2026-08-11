@@ -1,0 +1,236 @@
+# ============================================================================
+# captain_gru_v3_a4_g3_f1_r4_finetune — FULL-DATASET finetune: A4 x G3 x F1 x R4
+# ----------------------------------------------------------------------------
+# The full-DROID finetune recipe (38633/4292 splits, aug_crop=16 + SeqColorJitter
+# on train) carrying the v3 lever set:
+#   A4: input pose+delta (14-d) -> pose RESIDUAL (zero-init head).
+#   G3: pose_gru_bptt=True, pose_gru_e2e=True -- the SUPERSET gradient arm.
+#       bptt keeps the hidden's tape across the views of one TBPTT chunk
+#       (model.py:1270), so the aux loss at a later view reaches earlier views'
+#       cell calls; e2e leaves the GRU output entering the ray build ATTACHED
+#       (model.py:1284), so the main reconstruction loss also reaches the GRU
+#       through the pose -> ray map -> frozen ray encoder chain. Superset of
+#       both G1 (bptt only) and the retired G2 (e2e only, which was NOT a
+#       superset of G1 -- see captain_gru_v2_grid_README.md).
+#       NB: under bptt the aux gradient is NOT confined to one view -- and with
+#       pose_gru_iters=4 the hidden is never detached BETWEEN iterates
+#       (model.py:1243-1254 detaches only the running estimate), so backprop
+#       still reaches all 4 cell calls of that view.
+#       NOTE: forward math is IDENTICAL across G0/G1/G3 -- G is purely a
+#       gradient-routing lever (model.py:1263-1296).
+#   F1: pooled PRE-ray image-encoder features of views t and t-1 (mean over
+#       tokens, per-frame LayerNorm, ZERO-INIT Linear(2048->32) appended AFTER
+#       the pose block, so an untrained F1 model is output-identical to F0).
+#       Re-injected unchanged at every R iterate as static context.
+#   R4: 4 back-to-back GRUCell iterations per view (RAFT-style: running estimate
+#       re-fed and detached between iterates, hidden never detached inside a
+#       view, ray map built ONCE from the final iterate). Zero new parameters.
+#       gamma=0.8 sequence loss over the iterates in the TRAIN criterion ONLY --
+#       the test criterion stays final-iterate so best-ckpt selection stays
+#       comparable across R arms.
+#
+# THREE CAVEATS FOR INTERPRETING THIS ARM (none is a defect; all bite silently):
+#
+# 1. R4 AUX REWEIGHTING. PoseGRULoss(iter_gamma=0.8) at N=4 adds
+#    1 + sum_{k=1..3} 0.8^k = 2.95x the aux gradient mass of an R1 arm
+#    (losses.py:1197-1204 + the weight-1.0 final term at :1169). Part of any
+#    R4-vs-R1 delta is therefore a ~3x reweighting, not the iteration itself.
+#    NB this differs from the R8 arm's 4.16x, so an R4-vs-R8 comparison is ALSO
+#    partly a reweighting contrast (2.95x vs 4.16x) unless the gamma sum is
+#    renormalised. Renormalise (or set pose_gru_loss_weight accordingly) before
+#    drawing a final R verdict.
+#
+# 2. ZERO-INIT HEAD BOOTSTRAP. In mode='residual' the head is zero-init
+#    (model.py:439-440), so on the first backward d(raw)/d(hidden) = head.W^T = 0
+#    and the gradient reaching cell / img_proj / img_norm is EXACTLY ZERO: only
+#    head.{weight,bias} move until the head unlocks. Until then all 4 iterates
+#    are numerically identical, so an early "F1 does nothing" or "R4 == R1"
+#    reading is an artifact. With lr=1e-6 x pose_gru_lr_scale=100 and
+#    warmup_epochs=0.5 that unlock is not instant -- do NOT run the
+#    POSE_GRU_IMG_FEAT_ZERO / _SHUFFLE falsifiers before head.weight is nonzero.
+#    (Identical in the G1/G3 twins, so arm comparisons stay fair.)
+#
+# 3. TBPTT GRADIENT WINDOW. loss_of_one_batch_tbptt runs all but the last 4
+#    chunks under torch.no_grad() (inference.py:162-163). With num_views=64,
+#    views_per_step=1 and chunk_size=4 that is 16 chunks, so ONLY views 48..63
+#    produce gradient at all; views 1..47 are pure forward. The effective aux
+#    gradient budget is 1/4 of what "64 views" suggests. Affects every G arm
+#    equally, but it is what makes G0-vs-G1 a 16-independent-gradients vs
+#    4-four-view-tapes comparison rather than 64 vs 16.
+#
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1, POSE_GRU_HIDDEN_SHUFFLE=1,
+# POSE_GRU_HIDDEN_ZERO=1, POSE_GRU_IMG_FEAT_SHUFFLE=1, POSE_GRU_IMG_FEAT_ZERO=1,
+# POSE_GRU_FORCE_ITERS=<n>.
+#
+# Structure follows captain_gru_v2_a4_g1_finetune.yaml (data/schedule/logging)
+# and captain_gru_v3_a4_g3_f1_r8.yaml (levers). See captain_gru_v3_grid_README.md.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: gamma-weighted RAFT sequence loss over the 8 iterates,
+# TRAIN ONLY (w_k = gamma^(N-1-k), final iterate keeps weight exactly 1.0, so
+# its gradient scale matches an R1 run). The test criterion below deliberately
+# uses PoseGRULoss() (final-iterate only) — best-ckpt values stay comparable
+# across R arms. This breaks the v2 train==test string symmetry BY DESIGN.
+pose_gru_iter_gamma: 0.8
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Final-iterate-only on the test side (see pose_gru_iter_gamma note above).
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B. Add more entries to
+# track several criteria at once.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Model-side flag read by train_cut3r_baseline; both
+# dataset ray flags MUST stay False (the model asserts this). View 0 gets the
+# masked_ray_map_token, exactly like the GT-conditioned runs. The fed-back pose
+# is detached (it is an input, not a gradient path; required under TBPTT).
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 fixed — pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): gradient levers, unchanged from v2.
+#     THIS ARM SETS BOTH FALSE = G0. No hidden tape across views, and the ray
+#     build gets a detached pose, so the main loss never reaches the GRU: the
+#     only gradient into the cell is the aux PoseGRULoss on the current view.
+#     (For reference: both True = G3, the intended superset. The retired G2 arms
+#     ran bptt=False, i.e. G0+e2e — NOT a superset of G1; they became G3 configs.)
+#   pose_gru_iters (R lever): back-to-back cell iterations per view. The count
+#                   is persisted in ckpt args and restored by load_model (it is
+#                   invisible in weight shapes). Eval-time override:
+#                   POSE_GRU_FORCE_ITERS=<n> (anytime-N probe).
+#   pose_gru_iter_detach: RAFT discipline — detach the running estimate between
+#                   iterates (hidden never detached inside a view). Train-only.
+#   pose_gru_img_feat (F lever): 'input' feeds pooled PRE-ray image-encoder
+#                   features of views t and t-1 into the cell via a zero-init
+#                   projector (THIS ARM = F1); 'none' disables.
+#                   [The parent F1 configs mistakenly tag '(this arm)' on 'none'
+#                    — copy-paste from the F0 files. Corrected here.]
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1 (rolls BOTH pose stashes coherently),
+# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless),
+# POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 (F-lever falsifiers).
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0
+pose_gru_bptt: True
+pose_gru_e2e: True
+pose_gru_iters: 4
+pose_gru_iter_detach: True
+pose_gru_img_feat: input
+pose_gru_img_feat_dim: 32
+pose_gru_img_feat_frames: 2
+
+# FULL DROID SPLITS -- the real thing, not the single-episode overfit set:
+# 38633 train / 4292 test scenes, per-lab stratified 90/10 (seed 42). Train adds
+# aug_crop=16 + SeqColorJitter; test stays aug_crop=0 + ImgNorm.
+# The ray-map kwargs are OMITTED here (as in captain_gru_v2_a4_g1_finetune.yaml):
+# DL3DV_Multi defaults feed_gt_ray_map/feed_prev_gt_ray_map to False
+# (dl3dv.py:26-27), which is exactly what the feed_prev_pred arm requires.
+#
+# REQUIRES the split symlink trees, which do NOT exist yet on MN5.
+#
+# !! WAIT FOR THE EPISODE COPY TO FINISH FIRST (all 42925 scenes present) !!
+# regenerate_split_symlinks.sh:47 uses `ln -sfn` unconditionally, so every
+# not-yet-copied scene becomes a DANGLING link. dl3dv.py:214-216 then silently
+# skips dangling links (`if os.path.isdir(p)` is False -- no error, no warning),
+# producing a SHORT index which is then written to the disk cache. The cache
+# fingerprint (dl3dv.py:69-92) only records ROOT plus each level-1 dir's mtime
+# and entry count -- both fixed at symlink-creation time -- so the truncated
+# scan would be accepted forever after. Check first:
+#   ls /gpfs/scratch/etur59/koc821022/pointworld_droid_wrist_VALAR | wc -l   # want 42925
+# Then:
+#   ln -s ../../pointworld_droid_wrist_VALAR \
+#         /gpfs/scratch/etur59/koc821022/pointworld_droid_wrist_all/dl3dv_multi/wrist
+#   ./regenerate_split_symlinks.sh \
+#       /gpfs/scratch/etur59/koc821022/pointworld_droid_wrist_all/dl3dv_multi \
+#       /gpfs/scratch/etur59/koc821022/pointworld_droid_splits
+# If you ever rebuild the trees, use a fresh DL3DV_CACHE_DIR (or
+# DL3DV_CACHE_DISABLE=1) on the next load and confirm the scan reports
+# 38633 / 4292 scenes.
+#
+# NB: the split="train"/"test" kwarg below is INERT -- DL3DV_Multi accepts and
+# discards it (dl3dv.py:23,33-41). Train/test separation comes ENTIRELY from
+# ROOT, so a ROOT typo cannot be caught by the split argument.
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+
+# 38633 train / 4292 test -- the full-split scene counts, genuinely used here.
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-6
+min_lr: 1e-7
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
+exp_name: 'captain_gru_v3_a4_g3_f1_r4_finetune'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

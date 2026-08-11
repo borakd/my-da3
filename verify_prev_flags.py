@@ -19,9 +19,9 @@ with a PASS/FAIL table and a non-zero exit code if anything failed.
 
 Run (from anywhere; conda env `cuteanything`):
 
-  cd /scratch/bdursun25/cuteanything/captain_gru_v3
+  cd /gpfs/home/koc/koc821022/my-da3
   export PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH"
-  export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
+  export DL3DV_CACHE_DIR=/gpfs/scratch/etur59/koc821022/.dl3dv_cache
   python verify_prev_flags.py
 """
 
@@ -29,7 +29,14 @@ import hashlib
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path.insert(0, <nonexistent>) SILENTLY SUCCEEDS, so a stale hardcoded
+# worktree makes imports fall through to PYTHONPATH -- letting you verify a
+# DIFFERENT checkout than the file you are editing, with no warning. Assert.
+WORKTREE = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WORKTREE, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WORKTREE}"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),
@@ -54,11 +61,15 @@ from dust3r.utils.camera import (
 from torch.utils.data._utils.collate import default_collate
 
 # ----------------------------------------------------------------------------- config
-DATA_ROOT = (
-    "/frozen/avg/bora_data/droid_datasets/training_data/"
-    "pointworld_droid_wrist_test/dl3dv_multi"
+# MN5: the DROID store moved to gpfs_scratch and the splits tree replaced the
+# old wrist_test layout. DL3DV_Multi walks ROOT two levels
+# (<scene>/<subscene>/dense), which both layouts satisfy. Same value the
+# captain_gru_v3 finetune configs train against.
+DATA_ROOT = os.environ.get(
+    "DL3DV_TEST_ROOT",
+    "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi",
 )
-CKPT = "/scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth"
+CKPT = os.path.join(WORKTREE, "src", "CUT3R", "src", "cut3r_512_dpt_4_64.pth")
 NV = 4  # views per sequence
 RES = (320, 192)  # (W, H) -> landscape, no portrait swap path
 IDXS = [5, 100]  # two dataset samples -> batch size 2

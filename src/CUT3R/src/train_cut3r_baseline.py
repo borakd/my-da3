@@ -251,29 +251,54 @@ def train(args):
             hidden_dim=int(getattr(args, "pose_gru_hidden_dim", 128)),
             mode=str(getattr(args, "pose_gru_mode", "residual")),
             input_mode=str(getattr(args, "pose_gru_input", "pose")),
-            # F lever: pooled pre-ray image features (current [+ previous]
-            # view) into the cell input via a zero-init projector.
+            # F lever: pooled pre-ray image features into the cell input.
+            # frames=1 ("F0") is the current view only; frames=2 ("F1") adds
+            # the previous view. img_feat_proj=False drops the zero-init
+            # projector and hands the cell the full 1024/2048-d features.
             img_feat=str(getattr(args, "pose_gru_img_feat", "none")),
             img_feat_dim=int(getattr(args, "pose_gru_img_feat_dim", 32)),
             img_feat_frames=int(getattr(args, "pose_gru_img_feat_frames", 2)),
+            img_feat_proj=bool(getattr(args, "pose_gru_img_feat_proj", True)),
+            # F source: where the per-step feature comes from — "pooled"
+            # (mean pre-ray tokens, the path above), a frozen resnet18 /
+            # dinov2_vits14 encoder on the raw image, or "corr" motion stats.
+            # The frozen encoder initializes from a local pretrained file
+            # (img_encoder_weights, None => default under pretrained_encoders/)
+            # and is serialized into every ckpt, so eval nodes never need it.
+            img_feat_src=str(getattr(args, "pose_gru_img_feat_src", "pooled")),
+            img_encoder_weights=getattr(args, "pose_gru_img_encoder_weights", None),
             # R lever: back-to-back cell iterations per view. Persisted in
             # ckpt args (invisible in weight shapes — load_model reads it
             # back exactly like pose_gru_mode).
             iters=int(getattr(args, "pose_gru_iters", 1)),
         )
+        # Split the param count: the encoder sources hang a frozen network
+        # under pose_gru.img_encoder (11.2M resnet18 / 21M dinov2), and a
+        # single total would misread as the GRU having grown 100x. Only the
+        # trainable count reaches the optimizer.
+        gru_trainable = sum(
+            p.numel() for p in model.pose_gru.parameters() if p.requires_grad
+        )
+        gru_frozen = sum(
+            p.numel() for p in model.pose_gru.parameters() if not p.requires_grad
+        )
         printer.info(
             "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, "
-            "img_feat=%s (dim %d, frames %d), iters=%d, params=%d"
+            "img_feat=%s (src %s, appended %d, frames %d, proj=%s), iters=%d, "
+            "trainable params=%d%s"
             % (
                 model.pose_gru.mode,
                 model.pose_gru.input_mode,
                 model.pose_gru.input_dim,
                 model.pose_gru.hidden_dim,
                 model.pose_gru.img_feat,
+                model.pose_gru.img_feat_src,
                 model.pose_gru.img_feat_dim,
                 model.pose_gru.img_feat_frames,
+                model.pose_gru.img_feat_proj,
                 model.pose_gru.iters,
-                sum(p.numel() for p in model.pose_gru.parameters()),
+                gru_trainable,
+                f" (+{gru_frozen} frozen img_encoder)" if gru_frozen else "",
             )
         )
 
@@ -322,7 +347,24 @@ def train(args):
         printer.info(f"pose_gru param groups split out with lr_scale x{pose_gru_lr_scale:g}")
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     # print(optimizer)
-    loss_scaler = NativeScaler(accelerator=accelerator)
+    # ddp_grad_sync: the TBPTT path forwards through the UNWRAPPED module, so
+    # DDP's reducer is never armed and no cross-rank gradient averaging happens
+    # (see croco/utils/misc.py:all_reduce_grads_). Default False reproduces the
+    # historical baseline exactly; set true in the config to restore the sync.
+    # Only meaningful with long_context=True — the non-TBPTT path already syncs
+    # via the DDP wrapper, and enabling this there would double-average.
+    ddp_grad_sync = bool(getattr(args, "ddp_grad_sync", False))
+    if ddp_grad_sync and not bool(getattr(args, "long_context", False)):
+        raise ValueError(
+            "ddp_grad_sync=True requires long_context=True: the non-TBPTT path "
+            "(loss_of_one_batch) forwards through the DDP wrapper and already "
+            "all-reduces, so syncing again would average gradients twice."
+        )
+    loss_scaler = NativeScaler(accelerator=accelerator, ddp_grad_sync=ddp_grad_sync)
+    printer.info(
+        f"ddp_grad_sync={ddp_grad_sync} "
+        f"({'cross-rank gradient averaging RESTORED' if ddp_grad_sync else 'baseline: NO cross-rank averaging on the TBPTT path'})"
+    )
 
     accelerator.even_batches = False
     optimizer, model, data_loader_train = accelerator.prepare(optimizer, model, data_loader_train)
@@ -355,6 +397,42 @@ def train(args):
         printer.info(
             f"pose_gru gradient levers: bptt={base_model.pose_gru_bptt} "
             f"(within-chunk BPTT), e2e={base_model.pose_gru_e2e} (main-loss grad)"
+        )
+    # ORACLE DIAGNOSTIC — NOT a lever, and unlike pose_gru_bptt/pose_gru_e2e it
+    # DOES change the forward math. Feeds the GRU the CURRENT view's GT pose in
+    # the aux loss's own frame and encoding, so a correctly wired zero-init
+    # residual GRU is a pass-through and scores identically zero. Use it to
+    # answer "is the GRU wired to the thing it is scored on"; it cannot answer
+    # "is the GRU learning" (the correct answer is zero before any gradient
+    # step). See gt_pose_encoding / the pose_gru_oracle block in model.py.
+    #   'gt' — the GRU's POSE input becomes the current view's GT pose instead
+    #          of the previous step's predicted pose P(x-1). That is the ONLY
+    #          change: the delta half of the A4 input, the image features, the
+    #          hidden, the pose stashes, the ray build (still fed the GRU's own
+    #          output), the e2e/bptt tapes and res["gru_pose"] are all untouched.
+    base_model.pose_gru_oracle = str(getattr(args, "pose_gru_oracle", "off") or "off")
+    assert base_model.pose_gru_oracle in ("off", "gt"), (
+        f"pose_gru_oracle must be off|gt, got {base_model.pose_gru_oracle!r}"
+    )
+    if base_model.pose_gru_oracle != "off":
+        assert use_pose_gru, "pose_gru_oracle requires pose_gru=True"
+        assert base_model.feed_prev_pred, "pose_gru_oracle requires feed_prev_pred=True"
+        assert base_model.pose_gru.mode == "residual", (
+            "pose_gru_oracle's zero-loss expectation needs pose_gru_mode='residual' "
+            "(zero-init head => exact pass-through); mode="
+            f"{base_model.pose_gru.mode!r} regresses the pose freely and has no "
+            "zero-loss expectation (direct: t and q; split_anchor: t)"
+        )
+        printer.warning(
+            f"*** pose_gru_oracle={base_model.pose_gru_oracle} — DIAGNOSTIC RUN, "
+            "NOT a training arm *** GT pose is injected at the GRU input. "
+            "Expect gru_quat_loss == 0 at step 0 (a zero-init residual head "
+            "returns its input unchanged). gru_trans_loss/gru_pose_loss stay "
+            "NONZERO by design: the criterion divides the GRU output by the "
+            "HEAD's scene scale while the injected GT is in GT scale. The "
+            "refined pose drives the conditioning ray build as always, so "
+            "reconstruction runs on a GT-derived pose and recon/pose metrics "
+            "are not comparable to an honest arm."
         )
     if use_pose_gru and base_model.pose_gru.iters > 1:
         printer.info(

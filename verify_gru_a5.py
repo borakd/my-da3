@@ -30,14 +30,25 @@ import os
 import subprocess
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
-V2_WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v2"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path.insert(0, <nonexistent>) SILENTLY SUCCEEDS, so a stale hardcoded
+# worktree makes imports fall through to PYTHONPATH -- letting you verify a
+# DIFFERENT checkout than the file you are editing, with no warning. Assert.
+WORKTREE = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WORKTREE, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WORKTREE}"
+# MN5 has ONE checkout. The cross-worktree byte-identity stage needs a SECOND
+# checkout of branch captain_gru_v2; export V2_WORKTREE=<path> to run it. Left
+# defaulting to this tree, where that stage degenerates to comparing a tree with
+# itself (it passes trivially and proves nothing).
+V2_WORKTREE = os.environ.get("V2_WORKTREE", WORKTREE)
 # The 16 grid runs were reorganised out of captain_cut3r_sim3rmse/ into
 # captain_gru_overfit/ on 2026-07-30; fall back to the old path for safety.
 CKPT_CANDIDATES = [
-    "/scratch/bdursun25/cuteanything/checkpoints/captain_gru_overfit/"
+    "/gpfs/projects/etur59/koc821022/checkpoints/captain_gru_overfit/"
     "captain_gru_v2_a4_g1/checkpoint-final.pth",
-    "/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse/"
+    "/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_sim3rmse/"
     "captain_gru_v2_a4_g1/checkpoint-final.pth",
 ]
 CKPT = next((p for p in CKPT_CANDIDATES if os.path.isfile(p)), CKPT_CANDIDATES[0])

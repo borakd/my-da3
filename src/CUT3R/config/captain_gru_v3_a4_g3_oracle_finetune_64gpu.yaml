@@ -1,0 +1,231 @@
+# ============================================================================
+# captain_gru_v3_a4_g3_oracle_finetune_64gpu -- 16 nodes x 4 = 64 GPUs
+# FULL-DATASET oracle finetune: A4 x G3 x F0 x R1, pose_gru_oracle='gt'
+# ----------------------------------------------------------------------------
+# The full-DROID finetune recipe (38633/4292 splits, aug_crop=16 + SeqColorJitter
+# on train, ImgNorm on test, 64 views, batch 4, 50 epochs, lr 1e-6) with ONE
+# change to the model: the PoseGRU is handed the CURRENT view's GROUND-TRUTH
+# pose instead of the pose the model predicted at the previous step.
+#
+# The 32-GPU twin is captain_gru_v3_a4_g3_oracle_finetune_32gpu.yaml; the two
+# files differ ONLY in this header and in exp_name (the GPU count comes from the
+# launcher's --nodes, not from the config), exactly like the
+# cut3r_pointworld_droid_aug_mn5_prevpred_{32,64}gpu pair.
+#
+# WHAT THE ORACLE DOES. GT enters the pipeline at exactly ONE point: the GRU
+# cell's input at iterate 0, in the exact frame and encoding PoseGRULoss targets
+# (view-0-relative absT_quaR -- see gt_pose_encoding in dust3r/model.py, which is
+# a byte-for-byte copy of the loss's own target construction). Nothing else is
+# touched:
+#   * the refined pose drives the conditioning ray build exactly as it always
+#     does, so the rest of the pipeline proceeds on the GRU's PREDICTION;
+#   * pose_gru_e2e keeps its live tape;
+#   * the _prev_pred_pose_enc / _prev_prev_pred_pose_enc stashes stay the RAW
+#     HEAD poses -- the oracle never rewrites them;
+#   * res["gru_pose"], the thing the loss scores, stays the GRU's OUTPUT.
+# So GT reaches the decoder only THROUGH the GRU. That is what makes the GRU the
+# component under test, and it is why this is an upper bound on what the GRU
+# could contribute, not a shortcut around it.
+#
+# WHAT TO READ AT STEP 0 (the wiring claim). mode='residual' has a zero-init
+# head, so an untrained GRU returns its input unchanged and gru_quat_loss is
+# EXACTLY 0.0 (the quaternion term is factor-free). Any nonzero quaternion
+# reading at step 0 is a wiring bug:
+#   ~ 2.0    -> quaternion hemisphere flip
+#   ~ 1e-4   -> the GT was round-tripped through fp16
+#   drifting -> wrong reference view for the pose encoding
+#
+# gru_trans_loss / gru_pose_loss are NONZERO at step 0, and that is correct, not
+# a bug. The criterion is UNCHANGED from the honest arms (norm_mode='?avg_dis',
+# gt_scale=False), which normalizes EACH SIDE BY ITS OWN SCALE -- correct for a
+# quantity living in the head's scene scale. The injected GT is in GT scale
+# while factor_pr comes from the head's own predicted poses, so
+#     t_err = ||t_gt|| * |1/factor_pr - 1/factor_gt|   != 0
+# (measured 2.128 at a 0.37x head scale). Note this also makes the translation
+# term a POOR discriminator under the oracle: a 0.05 pose error moves it by
+# under a percent and can move it the wrong way. Read gru_quat_loss for the
+# step-0 check; verify_gru_oracle.py covers the rest on CPU.
+#
+# AFTER STEP 0 the GRU trains normally under the same two forces as any honest
+# arm: the aux PoseGRULoss, and the reconstruction loss through pose_gru_e2e.
+#
+# ALSO: the conditioning ray map is built from a GT-derived pose, so recon/pose
+# metrics are not comparable to an honest arm -- in either direction.
+#
+# CHECKPOINTS FROM THIS RUN ARE DIAGNOSTIC-ONLY. The GRU has only ever seen GT
+# inputs. Never resume one as a training arm, never enter it in a cross-arm
+# table, and never take probe_gru_hidden_falsifier.py numbers off it (the
+# hidden's content is GT-driven). ckpt['args'].pose_gru_oracle is the provenance
+# marker; load_model deliberately does NOT read it back, so an oracle checkpoint
+# can never silently evaluate as an oracle.
+#
+# ----------------------------------------------------------------------------
+# LEVERS: A4 x G3 x F0 x R1 -- the MINIMAL GRU. F and R are deliberately OFF so
+# the only thing under test is the core pose->GRU->loss path.
+#   A4: pose_delta input (14-d), residual head (zero-init) -- required; the
+#       zero-loss expectation exists only for mode='residual' (trainer asserts).
+#   G3: pose_gru_bptt=True, pose_gru_e2e=True -- the v3 superset arm, LIVE here:
+#       the GRU's output drives the ray build, so the main loss reaches the GRU.
+#   F0: pose_gru_img_feat='none'. img_proj/img_norm are not built at all, so this
+#       is a genuinely smaller module, not a zeroed one.
+#   R1: pose_gru_iters=1, pose_gru_iter_gamma=0.0. One cell call per view, no
+#       iterate re-feed, no RAFT sequence loss -- gru_pose_iters is never
+#       attached and there is no gru_pose_loss_iters key.
+# Same lever set as the captain_gru_v2_a4_g3 control arm. The oracle is
+# orthogonal to A/G/F/R; verify_gru_oracle.py exercises F in {none,input} x
+# R in {1,4,8} on CPU, so turning them off costs no coverage.
+#
+# Run:  sbatch --nodes=16 train_gru_oracle_finetune.sbatch \
+#              captain_gru_v3_a4_g3_oracle_finetune_64gpu
+# (the launcher refuses to start if --nodes and the config's _NNgpu suffix
+#  disagree, so a mislabelled run is not possible)
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+# Base CUT3R weights, NOT a warm start from a trained GRU: the step-0 zero needs
+# the zero-init residual head, and a trained head is not zero.
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: 0.0 = OFF (this arm is R1, so there are no intermediate
+# iterates to weight and PoseGRULoss takes its final-iterate-only path). Keeping
+# the key at 0.0 rather than deleting it keeps the train and test criterion
+# strings identical, restoring the v2 train==test symmetry.
+pose_gru_iter_gamma: 0.0
+
+# UNCHANGED from the captain_gru_v3 finetune recipe -- byte-identical strings.
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Model-side flag read by train_cut3r_baseline; both
+# dataset ray flags MUST stay False (the model asserts this). View 0 gets the
+# masked_ray_map_token. The fed-back pose is detached.
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses (under
+# the oracle it rolls the INJECTED GT instead -- the positive control that the
+# step-0 zero comes from the injected input and not from a dead mask).
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 fixed -- pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): BOTH True = G3. Under
+#     pose_gru_oracle: 'gt' both stay LIVE -- the GRU's output still drives the
+#     ray build, so the reconstruction loss reaches the GRU.
+#   pose_gru_iters (R lever): 1 here. Eval-time override POSE_GRU_FORCE_ITERS=<n>
+#     still works and, under a correct oracle, must be INVARIANT (the injected
+#     pose is a fixed point of the iterate re-feed) -- a free R-chain check.
+#   pose_gru_img_feat (F lever): 'none' here (F0).
+#   pose_gru_oracle: THE DIAGNOSTIC. off | gt -- see the header.
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1, POSE_GRU_HIDDEN_SHUFFLE=1,
+# POSE_GRU_HIDDEN_ZERO=1 (the last two must be exact no-ops at step 0 -- a
+# pass-through needs no recurrent memory).
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0
+pose_gru_bptt: True
+pose_gru_e2e: True
+pose_gru_iters: 1                  # R OFF
+pose_gru_iter_detach: True         # inert at iters=1 (nothing to detach between)
+pose_gru_img_feat: none            # F OFF
+pose_gru_img_feat_dim: 32          # inert while img_feat='none' (kept so flipping
+pose_gru_img_feat_frames: 2        #   F back on is a one-word change)
+pose_gru_oracle: 'gt'
+
+# FULL DROID SPLITS -- 38633 train / 4292 test scenes, per-lab stratified 90/10
+# (seed 42). Train adds aug_crop=16 + SeqColorJitter; test stays aug_crop=0 +
+# ImgNorm. The ray-map kwargs are OMITTED (DL3DV_Multi defaults both to False,
+# which is what the feed_prev_pred arm requires).
+#
+# The launcher runs build_dataset_symlinks.py --check on the head node BEFORE
+# allocating, because dl3dv.py silently SKIPS dangling symlinks (no error, no
+# warning) and would train on a short dataset whose truncated scan then gets
+# written to the disk cache.
+#
+# NB: the split="train"/"test" kwarg is INERT -- DL3DV_Multi accepts and discards
+# it. Train/test separation comes ENTIRELY from ROOT, so a ROOT typo cannot be
+# caught by the split argument.
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+# ===== MULTINODE (16 nodes x 4 GPUs = 64 processes) =====
+# Global batch per optimizer step = batch_size * accum_iter * num_gpus
+#   64 GPUs here = 4 * 1 * 64 = 256
+# accum_iter stays 1 so the per-GPU batch_size=4 sampler micro-batch grouping is
+# unchanged. Everything else (lr schedule, epochs, dataset epoch-size) is
+# GPU-count-independent, so the 32- and 64-GPU arms differ ONLY in global batch.
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-6
+min_lr: 1e-7
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
+exp_name: 'captain_gru_v3_a4_g3_oracle_finetune_64gpu'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

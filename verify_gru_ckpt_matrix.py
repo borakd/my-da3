@@ -30,11 +30,27 @@ import sys
 import numpy as np
 import torch
 
-ROOT = "/scratch/bdursun25/cuteanything"
-CUT3R_DIR = os.path.join(ROOT, "captain_gru_v3", "src", "CUT3R")
-SCENE_DENSE = (
-    "/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/"
-    "dl3dv_multi/RAIL+eh61f232+2023-10-26-17h-33m-59s/13062452+wrist/dense"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path.insert(0, <nonexistent>) SILENTLY SUCCEEDS (see :137), so a stale
+# hardcoded worktree would let this verify a DIFFERENT checkout than the file
+# you are editing, with no warning. Assert instead.
+WORKTREE = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WORKTREE, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WORKTREE}"
+CUT3R_DIR = os.path.join(WORKTREE, "src", "CUT3R")
+# MN5: checkpoints live on gpfs_projects (scratch group quota is ~97% full).
+CKPT_ROOT = os.environ.get("CKPT_ROOT", "/gpfs/projects/etur59/koc821022/checkpoints")
+# The overfit episode the falsifier runs a few real frames through. The old
+# /frozen layout nested it one level deeper (<episode>/13062452+wrist/dense);
+# the MN5 copy puts dense/ directly under the episode. Keep in step with
+# OVERFIT_ROOT/OVERFIT_SCENE in eval_pipeline/mn5_paths.sh.
+OVERFIT_ROOT = os.environ.get(
+    "OVERFIT_ROOT", "/gpfs/scratch/etur59/koc821022/pointworld_droid_wrist_VALAR"
+)
+OVERFIT_SCENE = os.environ.get("OVERFIT_SCENE", "RAIL+eh61f232+2023-10-26-17h-33m-59s")
+SCENE_DENSE = os.environ.get(
+    "SCENE_DENSE", os.path.join(OVERFIT_ROOT, OVERFIT_SCENE, "dense")
 )
 
 # Naming convention -> (mode, input_mode). The A index fixes the head algebra and the
@@ -64,20 +80,34 @@ def resolve_latest_ckpt(run_dir):
     return p, f"epoch {n}"
 
 
+# F token in run names: _f<i><s> — i is the arm INDEX (f0 = 1 frame, f1 = 2
+# frames), s the optional SOURCE suffix (pose_gru_img_feat_src).
+F_TOKEN_RE = re.compile(r"_f([01])([rdc]?)(?=_|$)")
+F_SRC_FROM_SUFFIX = {"": "pooled", "r": "resnet18", "d": "dinov2_vits14", "c": "corr"}
+
+
 def levers_from_name(name):
-    """captain_gru_v{2,3}_a<N>_g<M>[_f1][_r<K>] -> expected lever dict."""
+    """captain_gru_v{2,3}_a<N>_g<M>[_f<i><s>][_r<K>] -> expected lever dict.
+
+    The old '_f1 in name' membership test read f0r/f0d (one-frame encoder
+    arms) as F-OFF and every f1<s> arm as the pooled F1 — which made this
+    harness FAIL honest source arms ('name-derived img_feat=none but live
+    img_feat=input') and abort the whole eval sweep.
+    """
     m = re.search(r"_(a[1-5])_g([0-2])", name)
     if not m:
         raise ValueError(f"cannot parse run name {name!r}")
     mode, input_mode = A_LEVERS[m.group(1)]
     r = re.search(r"_r(\d+)(?:_|$)", name)
+    fm = F_TOKEN_RE.search(name)
     return dict(
         mode=mode,
         input_mode=input_mode,
         hidden_dim=128,
-        img_feat="input" if "_f1" in name else "none",
-        img_feat_dim=32 if "_f1" in name else 0,
-        img_feat_frames=2 if "_f1" in name else 0,
+        img_feat="input" if fm else "none",
+        img_feat_dim=32 if fm else 0,
+        img_feat_frames=(int(fm.group(1)) + 1) if fm else 0,
+        img_feat_src=F_SRC_FROM_SUFFIX[fm.group(2)] if fm else "pooled",
         iters=int(r.group(1)) if r else 1,
         g=int(m.group(2)),
     )
@@ -103,6 +133,7 @@ def levers_from_config(run_dir):
         img_feat=img_feat,
         img_feat_dim=int(get("pose_gru_img_feat_dim", "32")) if img_feat == "input" else 0,
         img_feat_frames=int(get("pose_gru_img_feat_frames", "2")) if img_feat == "input" else 0,
+        img_feat_src=get("pose_gru_img_feat_src", "pooled") if img_feat == "input" else "pooled",
         iters=int(get("pose_gru_iters", "1")),
         feed_prev_pred=get("feed_prev_pred", "false") == "true",
         feed_gt_ray_map=get("feed_gt_ray_map", "false") == "true",
@@ -118,17 +149,19 @@ def live_levers(gru):
         img_feat=gru.img_feat,
         img_feat_dim=int(gru.img_feat_dim),
         img_feat_frames=int(gru.img_feat_frames),
+        # getattr: pre-source-lever pickled modules have no img_feat_src attr.
+        img_feat_src=getattr(gru, "img_feat_src", "pooled"),
         iters=int(gru.iters),
     )
 
 
 LEVER_KEYS = ("mode", "input_mode", "hidden_dim", "img_feat", "img_feat_dim",
-              "img_feat_frames", "iters")
+              "img_feat_frames", "img_feat_src", "iters")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt_root", default=os.path.join(ROOT, "checkpoints", "captain_gru_overfit"))
+    ap.add_argument("--ckpt_root", default=os.path.join(CKPT_ROOT, "captain_gru_overfit"))
     ap.add_argument("--frames", type=int, default=8, help="frames used by the liveness falsifier")
     ap.add_argument("--no-falsifier", action="store_true")
     ap.add_argument("--device", default="cuda")
@@ -227,7 +260,7 @@ def main():
 
             # --- GRU liveness falsifier ------------------------------------------
             if not args.no_falsifier and len(img_paths) >= 2:
-                images, ray_maps, intr = demo_ray.load_frames_training_style(
+                images, ray_maps, intr, _gt_poses = demo_ray.load_frames_training_style(
                     img_paths, cam_dir, 320)
                 views = demo_ray.prepare_input(images, ray_maps, intr,
                                                conditioning="prev_pred")

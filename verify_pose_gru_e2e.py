@@ -22,7 +22,14 @@ Submit via:  sbatch verify_pose_gru_e2e.sbatch   (1x L40S)
 import os
 import sys
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path.insert(0, <nonexistent>) SILENTLY SUCCEEDS, so a stale hardcoded
+# worktree makes imports fall through to PYTHONPATH -- letting you verify a
+# DIFFERENT checkout than the file you are editing, with no warning. Assert.
+WORKTREE = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WORKTREE, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WORKTREE}"
 for p in [
     os.path.join(WORKTREE, "src"),
     os.path.join(WORKTREE, "src/CUT3R"),
@@ -49,11 +56,15 @@ from dust3r.losses import (  # noqa: F401  names used by the criterion string
 from torch.utils.data._utils.collate import default_collate
 
 # ----------------------------------------------------------------------------- config
-DATA_ROOT = (
-    "/frozen/avg/bora_data/droid_datasets/training_data/"
-    "pointworld_droid_wrist_test/dl3dv_multi"
+# MN5: the DROID store moved to gpfs_scratch and the splits tree replaced the
+# old wrist_test layout. DL3DV_Multi walks ROOT two levels
+# (<scene>/<subscene>/dense), which both layouts satisfy. Same value the
+# captain_gru_v3 finetune configs train against.
+DATA_ROOT = os.environ.get(
+    "DL3DV_TEST_ROOT",
+    "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi",
 )
-CKPT = "/scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth"
+CKPT = os.path.join(WORKTREE, "src", "CUT3R", "src", "cut3r_512_dpt_4_64.pth")
 MODEL_STR = (
     "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, "
     "state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, "

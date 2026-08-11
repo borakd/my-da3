@@ -50,10 +50,44 @@ def main():
         "module.pose_gru." if any(k.startswith("module.pose_gru.") for k in sd) else None
     )
     assert prefix is not None, f"{args.src}: no pose_gru weights found"
+    # ORDER MATTERS: these source-lever refusals must run BEFORE the generic
+    # img_proj/img_norm asserts below — an encoder/corr checkpoint carries
+    # img_proj too, and the generic assert would refuse it first with a
+    # misleading 'already expanded' reason.
+    # Encoder-source F checkpoints (pose_gru_img_feat_src=resnet18/dinov2)
+    # carry a frozen img_encoder whose features — not pooled pre-ray tokens —
+    # are what the cell columns were trained on. Splicing the pooled-layout
+    # projector (enc_dim-wide img_norm/img_proj) onto that cell would wire the
+    # wrong source at the wrong width.
+    assert not any(k.startswith(prefix + "img_encoder.") for k in sd), (
+        f"{args.src}: carries a frozen img_encoder — this is an "
+        f"encoder-source F checkpoint (pose_gru_img_feat_src != pooled). "
+        f"Refusing to expand it into the pooled layout."
+    )
+    # Same refusal via the recorded args: corr checkpoints have no encoder
+    # keys, so key-sniffing alone would miss them. Anything not pooled
+    # (None covers pre-lever ckpts and non-struct OmegaConf misses) must not
+    # be expanded into the pooled layout.
+    feat_src = getattr(ckpt.get("args") or object(), "pose_gru_img_feat_src", None)
+    assert feat_src in (None, "pooled"), (
+        f"{args.src}: trained with pose_gru_img_feat_src={feat_src!r} — its "
+        f"cell consumes that source's features, not pooled pre-ray tokens. "
+        f"Expanding it into the pooled layout would produce a module that is "
+        f"neither arm. Refusing."
+    )
+
     assert prefix + "img_proj.weight" not in sd, (
         f"{args.src}: already carries an img_proj — refusing to re-expand"
     )
-
+    # img_proj absence is NO LONGER proof the F lever is off: a checkpoint
+    # trained with pose_gru_img_feat_proj=False has the features wired
+    # straight into the cell and carries img_norm but no projector. Splicing a
+    # projector onto that cell would produce a module that is neither arm.
+    assert prefix + "img_norm.weight" not in sd, (
+        f"{args.src}: carries img_norm but no img_proj — this is an F "
+        f"checkpoint trained with pose_gru_img_feat_proj=False, whose cell "
+        f"already consumes the raw features. Refusing to expand it."
+    )
     w_ih = sd[prefix + "cell.weight_ih"]
     hidden3, base_width = w_ih.shape
     hidden = sd[prefix + "cell.weight_hh"].shape[1]

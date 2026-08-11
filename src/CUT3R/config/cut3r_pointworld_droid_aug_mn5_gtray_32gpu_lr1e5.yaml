@@ -1,0 +1,151 @@
+# ============================================================================
+# cut3r_pointworld_droid_aug_mn5_gtray_32gpu_lr1e5
+# LR-SWEEP ARM lr1e5: 10x peak-LR clone of cut3r_pointworld_droid_aug_mn5_gtray_32gpu
+# ----------------------------------------------------------------------------
+# Generated for Step 1 of the verification plan in
+#   /gpfs/projects/etur59/koc821022/checkpoints/cut3r_multinode/GPU_TEST.md
+#
+# WHY: the completed 32-GPU runs plateau at ~12,000 optimizer steps, but by then the
+# cosine has annealed to 20% of peak and ~95% of the Sum(lr x steps) budget is spent.
+# That makes "converged" and "schedule ran out" indistinguishable from those runs alone.
+# This arm multiplies the LR budget by 10x at IDENTICAL batch size, epochs, data and
+# seed, so the two hypotheses separate.
+#
+# CHANGED vs the parent, and nothing else:
+#   lr       1e-6  ->  1e-5
+#   min_lr   1e-7  ->  1e-6      (scaled by the same 10x so the cosine SHAPE is
+#                                 preserved -- a pure vertical rescale. Holding min_lr
+#                                 at 1e-7 would change the peak-to-floor ratio and
+#                                 confound the very thing being measured.)
+#   exp_name          ->  cut3r_finetune_aug_full_gtray_32gpu_lr1e5
+#
+# Directly comparable to the completed baseline run:
+#   /gpfs/projects/etur59/koc821022/checkpoints/cut3r_multinode/cut3r_finetune_aug_full_gtray_32gpu
+#
+# NB the "20-GPU"/"accum_iter" discussion in the inherited comment blocks below is stale
+# boilerplate carried over from an older config; this is a 32-GPU arm (global batch
+# 4 x 1 x 32 = 128, 301 steps/epoch). GPU count comes from the launcher, not this file:
+#   cd /gpfs/home/koc/koc821022/my-da3 && \
+#   sbatch --parsable --nodes=8 --job-name=cut3r_gtray_32gpu_lr1e5 \
+#          train_gru_v3_finetune_64node.sbatch cut3r_pointworld_droid_aug_mn5_gtray_32gpu_lr1e5
+# ============================================================================
+# ============================================================================
+# cut3r_pointworld_droid_aug_mn5_gtray_32gpu -- 8 nodes x 4 = 32 GPUs
+# FULL-DATASET finetune: current-frame GT pose conditioning (oracle)
+# ----------------------------------------------------------------------------
+# IDENTICAL to the regular-CUT3R full-DROID finetune recipe in every other
+# respect (38633/4292 splits, aug_crop=16 + SeqColorJitter train / ImgNorm test,
+# 64 views, batch 4, 50 epochs, lr 1e-6, criteria unchanged -- no PoseGRU term).
+# The ONLY change is the pose-conditioning block below.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE)
+# Kept equal to train_criterion to watch overfitting (train vs test on the same loss).
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE)
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B. Add more entries to
+# track several criteria at once.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+# ---- pose conditioning -------------------------------------------------------
+# CURRENT-FRAME GT POSE ORACLE (matches captain_ray.yaml). Every non-reference view
+# is conditioned on its OWN ground-truth camera (pose + intrinsics from the cam npz),
+# encoded through CUT3R's PRETRAINED ray-map encoder branch -- zero new parameters.
+# View 0 stays image-only (its relative pose is identity).
+# This is a DATASET-side flag: the loader builds the ray maps, so the kwargs must be
+# passed into DL3DV_Multi below (the plain-CUT3R config does not pass them).
+# NB safe with aug_crop=16: _crop_resize_if_necessary returns crop-adjusted
+# intrinsics (dl3dv.py:322-331) and the ray map is built afterwards from those and
+# the post-crop h/w (base_multiview_dataset.py:374), so geometry stays consistent.
+# Falsifier: env GT_RAY_MAP_SHUFFLE=1 feeds wrong ray maps -- metrics MUST degrade.
+feed_gt_ray_map: True
+feed_prev_gt_ray_map: False
+feed_prev_pred: False
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Native-CUT3R-style augmentation: TRAIN uses aug_crop=16 + transform=SeqColorJitter
+# (random scale-crop jitter + temporally-consistent color jitter); TEST stays clean
+# (aug_crop=0, transform=ImgNorm), exactly as the upstream stage/dpt_512 configs do it.
+#
+# Symlinked train/test splits under scenes/pointworld_droid_splits. ROOT must point at the
+# `dl3dv_multi` level (the loader walks ROOT/wrist/<scene>/dense and follows symlinks).
+#
+# ===== SMOKE TEST (cache verification) =====
+# ===== FULL DROID SPLITS (38633 train / 4292 test) on MareNostrum5 =====
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
+
+# 38633 4292
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+# ===== MULTINODE (8 nodes x 4 GPUs = 32 processes) =====
+# This config is the 20-GPU counterpart of cut3r_pointworld_droid_aug.yaml (4 GPUs).
+# The effective (global) batch per optimizer step is batch_size * accum_iter * num_gpus.
+#   4-GPU original : 4 * 4 * 4  = 64
+#   20-GPU here    : 4 * 1 * 20 = 80
+# 64 is not divisible by 20, so the global batch cannot be matched exactly; accum_iter is
+# dropped to 1 to keep per-GPU batch_size=4 (sampler micro-batch grouping unchanged) and land
+# as close as possible (80). Everything else (lr schedule, epochs, dataset epoch-size, etc.)
+# is GPU-count-independent and identical to the 4-GPU config.
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-5
+min_lr: 1e-6
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/cut3r_multinode'
+exp_name: 'cut3r_finetune_aug_full_gtray_32gpu_lr1e5'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

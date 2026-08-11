@@ -317,11 +317,98 @@ def init_distributed_mode(args):
     setup_for_distributed(args.rank == 0)
 
 
+def all_reduce_grads_(parameters, bucket_bytes=128 * 1024 * 1024):
+    """Average gradients across ranks, in place — the all-reduce DDP would have done.
+
+    Needed only on the TBPTT path (dust3r/inference.py:loss_of_one_batch_tbptt),
+    which drives the rollout through accelerator.unwrap_model(model) because the
+    stepwise API (_forward_encoder / _forward_decoder_group_step) consists of
+    custom methods and DistributedDataParallel only intercepts forward(). With
+    DDP.forward() never called, its Reducer is never armed by
+    prepare_for_backward(), the per-parameter autograd hooks return early, and
+    NO gradient synchronization happens: every rank steps on its own local
+    gradient and the replicas diverge from optimizer step 1 onward. Only rank
+    0's weights are ever saved, so a 32-GPU run silently optimizes at an
+    effective batch of one rank's worth of sequences.
+
+    The non-TBPTT path (loss_of_one_batch) calls model(batch) on the WRAPPED
+    module and syncs correctly — it must not use this function, or gradients
+    would be averaged twice.
+
+    Call AFTER backward and BEFORE grad clipping, so the clip sees the true
+    global norm (DDP's own ordering). Gradients are unscaled fp32 here
+    (mixed_precision="bf16" => accelerator.scaler is None), so no unscale dance
+    is required.
+
+    Bucketed to keep the flatten buffer bounded: a flat copy of every gradient
+    in this model would be several GB.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return 0
+    world_size = dist.get_world_size()
+    if world_size < 2:
+        return 0
+
+    # EVERY rank must issue the SAME sequence of collectives or the job
+    # deadlocks. Two things guarantee that here, and both are load-bearing:
+    #
+    #  1. Materialize zeros for parameters that got no gradient on THIS rank.
+    #     The graded chunks are data-dependent (that is why the Accelerator is
+    #     built with find_unused_parameters=True, train_cut3r_baseline.py:139),
+    #     so rank A can have a gradient where rank B has None. Filtering on
+    #     `p.grad is not None` would then bucket differently per rank and
+    #     mismatch the all_reduce. Zero-filling also matches DDP's own
+    #     find_unused_parameters semantics: unused params get a zero gradient
+    #     and are still touched by weight decay.
+    #  2. Walk parameters in their fixed registration order and start a new
+    #     bucket whenever dtype/device changes. Grouping via a set of
+    #     (dtype, device) keys would iterate in hash order, which is not
+    #     guaranteed identical across processes.
+    params = [p for p in parameters if p.requires_grad]
+    if not params:
+        return 0
+    for p in params:
+        if p.grad is None:
+            p.grad = torch.zeros_like(p)
+
+    scale = 1.0 / world_size
+    n_synced = 0
+
+    def _flush(bucket):
+        if not bucket:
+            return
+        flat = torch._utils._flatten_dense_tensors(bucket)
+        dist.all_reduce(flat)
+        flat.mul_(scale)
+        for g, synced in zip(bucket, torch._utils._unflatten_dense_tensors(flat, bucket)):
+            g.copy_(synced)
+
+    bucket, bucket_numel, bucket_key = [], 0, None
+    for p in params:
+        g = p.grad
+        key = (g.dtype, g.device)
+        max_numel = max(1, bucket_bytes // g.element_size())
+        if bucket and (key != bucket_key or bucket_numel + g.numel() > max_numel):
+            _flush(bucket)
+            bucket, bucket_numel = [], 0
+        bucket.append(g)
+        bucket_key = key
+        bucket_numel += g.numel()
+        n_synced += 1
+    _flush(bucket)
+    return n_synced
+
+
 class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
-    def __init__(self, enabled=True, accelerator: Accelerator = None):
+    def __init__(self, enabled=True, accelerator: Accelerator = None, ddp_grad_sync=False):
         self.accelerator = accelerator
+        # ddp_grad_sync (config key of the same name): restore the cross-rank
+        # gradient averaging that the unwrapped TBPTT forward bypasses. OFF by
+        # default so every existing config reproduces the previous baseline
+        # byte-for-byte; the new arm turns it on. See all_reduce_grads_.
+        self.ddp_grad_sync = bool(ddp_grad_sync)
 
     def __call__(
         self,
@@ -336,6 +423,11 @@ class NativeScalerWithGradNormCount:
             loss, create_graph=create_graph
         )  # .backward(create_graph=create_graph)
         if update_grad:
+            if self.ddp_grad_sync:
+                # Before the clip, so clip_grad_norm_ sees the synced norm.
+                assert parameters is not None, "ddp_grad_sync needs the parameter list"
+                parameters = list(parameters)
+                all_reduce_grads_(parameters)
             if clip_grad is not None:
                 assert parameters is not None
                 # self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place

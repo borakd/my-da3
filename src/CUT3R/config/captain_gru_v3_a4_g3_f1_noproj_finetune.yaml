@@ -1,0 +1,245 @@
+# ============================================================================
+# captain_gru_v3_a4_g3_f1_noproj_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
+# FULL-DATASET finetune: A4 x G3 x F1-RAW x R1 -- two-frame image features,
+# NO projection: the 2x1024-D LayerNormed pooled features of the current view t
+# AND the previous view t-1 go straight into the GRUCell.
+# ----------------------------------------------------------------------------
+# NAMING. "f1" = img_feat_frames=2 (current + previous view), the same frame
+# arm as captain_gru_v3_a4_g3_f1_finetune -- the ONLY difference vs that config
+# is pose_gru_img_feat_proj: False (no 32-D bottleneck). See the PoseGRU
+# docstring convention at model.py:455-462.
+#
+# LEVERS: A4, G3, R1 byte-identical to captain_gru_v3_a4_g3_f1_finetune.yaml
+# (see that header for the full A/G/R documentation, the zero-init-head
+# bootstrap warning, the TBPTT gradient window, and the pose_gru_lr_scale x lr
+# interaction -- ALL of it applies here unchanged). What differs is the F arm:
+#   F1-RAW  pose_gru_img_feat='input', pose_gru_img_feat_frames=2,
+#           pose_gru_img_feat_proj=False:
+#     - frames=2: the pooled PRE-ray image-encoder features of the current view
+#       t and the previous view t-1 (mean over the 240 tokens, the
+#       _get_img_level_feat statistic; view 0's stash subtracts the constant
+#       masked_ray_map_token so all frames carry the same pure-image statistic;
+#       the stash is always-detached data).
+#     - proj=False: there is NO zero-init Linear(2048 -> 32). The per-frame
+#       LayerNorm (shared affine) is kept -- it is feature conditioning, not
+#       projection (model.py:529-534) -- and its output enters the cell RAW:
+#       gru_in stays pose-first 14-d, the cell input widens 14 -> 14+2048=2062.
+#       weight_ih grows from 17,664 params (46 wide, the projected F1 arm) to
+#       791,808: no low-rank bottleneck forces the module to summarise
+#       appearance. pose_gru_img_feat_dim is IGNORED when proj=False (the
+#       appended width is dictated by encoder width x frames); it is kept below
+#       only so flipping proj back on is a one-word change.
+#     - INIT-EQUIVALENCE IS WEAKER THAN THE PROJECTED ARMS. With proj=True the
+#       zero-init projector makes even the HIDDEN trajectory identical to F-off
+#       at init. With proj=False there is no zero gate: image content reaches
+#       the hidden state from step one through the cell's default-init
+#       weight_ih columns. Only mode='residual''s zero-init HEAD makes the
+#       OUTPUT identical to F-off at init (model.py:468-481). The head is still
+#       the gradient gate: until head.weight is nonzero, d(loss)/d(cell) is
+#       exactly zero and the wide input columns stay locked -- the same
+#       bootstrap window as every other arm; do NOT run the IMG_FEAT
+#       falsifiers before the head unlocks.
+#
+# WHAT THIS ARM IS FOR. Paired against captain_gru_v3_a4_g3_f1_finetune (same
+# frames, proj=True) it prices the 32-D BOTTLENECK itself -- a single-variable
+# change. Paired against captain_gru_v3_a4_g3_f0_noproj_finetune (same raw
+# access, frames=1) it prices the PREVIOUS-FRAME contribution. F-off control:
+# captain_gru_v3_a4_g3_finetune.
+#
+# CHECKPOINT COMPATIBILITY. img_norm.{weight,bias} exist, img_proj does NOT,
+# and cell.weight_ih is 2062 wide -- so this checkpoint is shape-incompatible
+# with F-off, projected-F, and f0_noproj configs alike: the loader HARD-FAILS
+# on any pose_gru mismatch (silent random-GRU eval is impossible). load_model
+# sniffs the arm back from the weights alone: img_norm present + img_proj
+# absent => proj=False, and frames is recovered uniquely from the cell input
+# width (14 + 2*1024; model.py:156-177). Round-trip covered by
+# verify_gru_f0_proj.py. NO WARM START EXISTS for the noproj arms --
+# pose_gru_expand_ckpt.py only emits projected destinations and refuses to
+# splice a projector onto a proj=False checkpoint; this arm trains from base
+# CUT3R like every other v3 arm (which is what keeps the comparison clean).
+#
+# ddp_grad_sync: false (explicit) -- the historical baseline behavior: the
+# TBPTT path forwards through the unwrapped module, DDP's reducer never arms,
+# and NO cross-rank gradient averaging happens (see the header block in
+# captain_gru_v3_a4_g3_ddpsync_finetune.yaml for the full story). Kept false
+# so this arm is comparable to the rest of the finetune family, which all ran
+# without sync.
+#
+# Falsifiers (keep_freq snapshot only, NOT before the head unlocks):
+#   PREV_PRED_RAY_SHUFFLE=1                                -- pose-feedback channel
+#   POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 -- THE F LEVER
+#   POSE_GRU_HIDDEN_SHUFFLE=1 / POSE_GRU_HIDDEN_ZERO=1     -- recurrence
+#
+# Run (32 GPUs; the GPU count comes from --nodes, NOT from this file):
+#   cd /gpfs/home/koc/koc821022/my-da3 && \
+#   sbatch --nodes=8 --job-name=gru_a4g3f1np_ft \
+#          train_gru_v3_finetune_64node.sbatch captain_gru_v3_a4_g3_f1_noproj_finetune
+# NB the launcher's #SBATCH default is --nodes=64; --nodes=8 on the command
+# line is REQUIRED.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+# Base CUT3R weights, NOT a warm start from a trained GRU -- identical to every
+# other v3 grid arm, which is what keeps the comparison clean.
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# Override on the CLI (e.g. pose_gru_loss_weight=0.5) to tune without editing.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: 0.0 = OFF (this arm is R1, so there are no intermediate
+# iterates to weight and PoseGRULoss takes its final-iterate-only path). Keeping
+# the key at 0.0 rather than deleting it keeps the train and test criterion
+# strings identical, restoring the v2 train==test symmetry.
+pose_gru_iter_gamma: 0.0
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Byte-identical to train_criterion at iter_gamma=0.0 (see the note above), so
+# train-vs-test on the same loss watches overfitting exactly as in v2.
+# NOTE: best_ckpt_agg selects on the test loss INCLUDING the gru term -- compare
+# arms at fixed epochs, or subtract gru_pose_loss_avg from headline losses.
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B. Add more entries to
+# track several criteria at once.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Model-side flag read by train_cut3r_baseline; both
+# dataset ray flags MUST stay False (the model asserts this). View 0 gets the
+# masked_ray_map_token. The fed-back pose is detached (it is an input, not a
+# gradient path; required under TBPTT).
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 -- pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): BOTH True = G3, the superset.
+#   pose_gru_img_feat (F lever): 'input' = F ON. frames=2 + proj=False = the
+#                   F1-RAW arm: the 2x1024-D LayerNormed features of views t
+#                   and t-1 enter the cell RAW; cell input width 14+2048=2062.
+#                   These weights ARE in the state_dict, so this checkpoint is
+#                   not shape-compatible with any other F arm -- the loader
+#                   hard-fails rather than loading a random GRU.
+#   pose_gru_iters (R lever): 1 here = R OFF. The count is persisted in ckpt args
+#                   and restored by load_model (it is invisible in weight shapes).
+#   pose_gru_oracle: ABSENT -> 'off'. This is an HONEST arm; the GRU only ever
+#                   sees the pose the model itself predicted.
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1 (rolls BOTH pose stashes coherently),
+# POSE_GRU_HIDDEN_SHUFFLE=1 (rolls hidden), POSE_GRU_HIDDEN_ZERO=1 (stateless),
+# POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 (F-lever falsifiers).
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0           # x lr -> GRU group peaks at 1e-3; see the
+                                   # f1_finetune header. img_norm rides in the
+                                   # scaled group too (collected by identity).
+pose_gru_bptt: True                # G1 half of G3
+pose_gru_e2e: True                 # G2 half of G3
+pose_gru_iters: 1                  # R OFF
+pose_gru_iter_detach: True         # inert at iters=1 (nothing to detach between)
+pose_gru_img_feat: input           # F ON
+pose_gru_img_feat_dim: 32          # IGNORED while proj=False (appended width is
+                                   #   encoder x frames); kept so flipping proj
+                                   #   back on is a one-word change
+pose_gru_img_feat_frames: 2        # f1: current view t + previous t-1
+pose_gru_img_feat_proj: False      # NO Linear: 2048-D raw  <-- the ONLY key that
+                                   #   differs from captain_gru_v3_a4_g3_f1_finetune
+
+# ddp_grad_sync false = the historical baseline: no cross-rank gradient
+# averaging on the TBPTT path (see captain_gru_v3_a4_g3_ddpsync_finetune.yaml).
+# Explicit rather than omitted so the choice is visible in the file.
+ddp_grad_sync: false
+
+# FULL DROID SPLITS -- 38633 train / 4292 test scenes, per-lab stratified 90/10
+# (seed 42). Train adds aug_crop=16 + SeqColorJitter; test stays aug_crop=0 +
+# ImgNorm. The ray-map kwargs are OMITTED (DL3DV_Multi defaults both to False,
+# which is what the feed_prev_pred arm requires).
+#
+# The launcher runs build_dataset_symlinks.py --check on the head node BEFORE
+# allocating, because dl3dv.py silently SKIPS dangling symlinks (no error, no
+# warning) and would train on a short dataset whose truncated scan then gets
+# written to the disk cache.
+#
+# NB: the split="train"/"test" kwarg is INERT -- DL3DV_Multi accepts and discards
+# it. Train/test separation comes ENTIRELY from ROOT, so a ROOT typo cannot be
+# caught by the split argument.
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+# ===== MULTINODE (8 nodes x 4 GPUs = 32 processes) =====
+# Global batch per optimizer step = batch_size * accum_iter * num_gpus
+#   32 GPUs here = 4 * 1 * 32 = 128   (301 optimizer steps/epoch)
+# accum_iter stays 1 so the per-GPU batch_size=4 sampler micro-batch grouping is
+# unchanged. Everything else (lr schedule, epochs, dataset epoch-size) is
+# GPU-count-independent, so a 32- and a 64-GPU run of this config would differ
+# ONLY in global batch.
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-5                 # 10x the 1e-6 GRU-family default -- see f1_finetune header
+min_lr: 1e-6             # scaled by the same 10x: cosine shape preserved
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
+exp_name: 'captain_gru_v3_a4_g3_f1_noproj_finetune'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

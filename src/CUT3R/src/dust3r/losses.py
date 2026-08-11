@@ -357,9 +357,16 @@ class Regr3DPose(Criterion, MultiLoss):
                 .squeeze(-1)
             )
         else:
-            norm_factor_gt = torch.ones(
-                len(gt_trans), dtype=gt_trans[0].dtype, device=gt_trans[0].device
-            )
+            # (B, 1), matching the normalized branch above — gt_trans is a list
+            # over VIEWS, so the old torch.ones(len(gt_trans)) produced a
+            # (V,)-shaped factor and every consumer here divides a (B, 3)
+            # translation by it. That crashed outright whenever V != 1 and
+            # V != 3 (e.g. `RuntimeError: The size of tensor a (3) must match
+            # the size of tensor b (4)`), so this branch — reached by
+            # gt_scale=True or a falsy norm_mode — was unusable. Pre-existing
+            # bug, fixed here because the oracle diagnostic wants a
+            # no-normalization PoseGRULoss as a readout.
+            norm_factor_gt = torch.ones_like(gt_trans[0][..., :1])
 
         norm_factor_pr = norm_factor_gt.clone()
         if self.norm_mode and not_metric_mask.sum() > 0 and not self.gt_scale:
@@ -1090,6 +1097,7 @@ class PoseGRULoss(MultiLoss):
     loss trains the GRU and nothing else, and nothing else trains the GRU.
     Views without a "gru_pose" key (view 0, non-GRU runs) are skipped; with
     no such views at all the loss is 0 (safe to keep in a baseline config).
+
     """
 
     def __init__(self, norm_mode="?avg_dis", iter_gamma=0.0):

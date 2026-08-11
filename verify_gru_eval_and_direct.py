@@ -8,14 +8,20 @@ import os
 import subprocess
 import sys
 
-WT = "/scratch/bdursun25/cuteanything/captain_gru_v3"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path[:0] = [...] with a stale path SILENTLY NO-OPS, so imports would fall
+# through to PYTHONPATH and verify a different checkout. Assert instead.
+WT = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WT, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WT}"
 # A keep_freq snapshot, NOT checkpoint-last/best: those are rewritten every
 # epoch by the live training job and torch.load races the writer.
 CKPT = (
-    "/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse/"
+    "/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_sim3rmse/"
     "captain_gru_v2/checkpoint-10.pth"
 )
-BASE_CKPT = "/scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth"
+BASE_CKPT = os.path.join(WT, "src", "CUT3R", "src", "cut3r_512_dpt_4_64.pth")
 
 sys.path[:0] = [WT, f"{WT}/src", f"{WT}/src/CUT3R", f"{WT}/src/CUT3R/src"]
 

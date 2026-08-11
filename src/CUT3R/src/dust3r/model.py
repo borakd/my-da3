@@ -25,6 +25,7 @@ from dust3r.patch_embed import get_patch_embed
 # `dust3r.utils.camera` would then resolve to the other tree, which may lack
 # get_ray_map_torch. `.utils.camera` always binds to the tree this file lives in.
 from .utils.camera import (
+    camera_to_pose_encoding,
     get_ray_map_torch,
     matrix_to_quaternion,
     pose_encoding_to_camera,
@@ -73,6 +74,181 @@ def strip_module(state_dict):
     return new_state_dict
 
 
+def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint"):
+    """Recover the enable_pose_gru kwargs for a checkpoint from its state dict
+    (keys + tensor shapes) and its saved training args. Pure function — no
+    model build, no I/O — so the sniff is unit-testable on synthetic state
+    dicts (verify_gru_encoder_levers.py) without instantiating the net.
+
+    Weight shapes stay authoritative wherever they can speak (hidden width,
+    F on/off, projector presence, source width, block count, cell input
+    width); ckpt args fill in only what is INVISIBLE in shapes (mode, iters)
+    or ambiguous (source disambiguation), and every overlap is cross-checked
+    with a hard fail — a mis-sniffed module either refuses to load (shape
+    mismatch) or, worse, silently evaluates the wrong arm.
+
+    Returns None when the state dict carries no pose_gru weights.
+    """
+    if not any(k.startswith(("pose_gru.", "module.pose_gru.")) for k in state):
+        return None
+
+    def g(suffix):
+        return state.get("pose_gru." + suffix, state.get("module.pose_gru." + suffix))
+
+    # residual / direct / split_anchor all share ONE head of identical
+    # shape, so the mode is invisible in the weights and ckpt args are
+    # the only source. A missing key used to fall back to "residual",
+    # which builds the WRONG algebra with matching shapes and zero errors
+    # — i.e. a silently mislabelled evaluation. Hard-fail instead.
+    mode = getattr(train_args, "pose_gru_mode", None)
+    if mode is None:
+        raise RuntimeError(
+            f"{where}: checkpoint carries pose_gru weights but its "
+            "ckpt['args'] has no 'pose_gru_mode'. The mode cannot be "
+            "recovered from weight shapes — refusing to guess."
+        )
+    hidden_dim = getattr(train_args, "pose_gru_hidden_dim", 128)
+    input_mode = getattr(train_args, "pose_gru_input", "pose")
+    # R lever: the iteration count is INVISIBLE in weight shapes (shared-
+    # weight iteration) — ckpt args are the only source, like mode.
+    iters = int(getattr(train_args, "pose_gru_iters", 1))
+    w_hh = g("cell.weight_hh")
+    if w_hh is not None:
+        hidden_dim = w_hh.shape[1]
+    w_ih = g("cell.weight_ih")
+    # F lever: the weights stay authoritative in BOTH projector modes.
+    #   img_norm.weight exists iff img_feat == "input" (it is built for
+    #     the raw-feature arm too), so it — not img_proj — is the switch.
+    #   img_proj.weight exists iff img_feat_proj is ALSO True; it then
+    #     gives the appended width (rows) and block count (cols/src).
+    # Sniffing "F is on" off img_proj alone would rebuild an F-OFF module
+    # for an img_feat_proj=False checkpoint.
+    w_proj = g("img_proj.weight")
+    w_norm = g("img_norm.weight")
+    img_feat = "input" if w_norm is not None else "none"
+    img_feat_proj = w_proj is not None
+    img_feat_dim = 32  # appended width; recomputed below when F is on
+    img_feat_frames = 2
+    img_feat_src = "pooled"
+    if img_feat == "input":
+        from dust3r.img_encoders import CORR_FEAT_DIM, ENCODER_DIMS
+
+        src_dim = int(w_norm.shape[0])
+        # Source lever: the frozen encoders leave unmistakable key
+        # fingerprints (their weights ARE serialized); corr and pooled add
+        # no keys and are told apart by the img_norm width instead. The
+        # saved args cross-check every branch — on a disagreement nobody
+        # should guess which side is mislabelled.
+        args_src = getattr(train_args, "pose_gru_img_feat_src", None)
+
+        def enc_key(fragment):
+            # Fingerprint by suffix inside the img_encoder namespace: the
+            # frozen net nests under FrozenImageEncoder's own attribute
+            # (img_encoder.net.conv1.weight / img_encoder.net.cls_token),
+            # so exact-path lookups would silently miss it.
+            return any(
+                k.startswith(("pose_gru.img_encoder.", "module.pose_gru.img_encoder."))
+                and k.endswith(fragment)
+                for k in state
+            )
+
+        if enc_key("conv1.weight"):
+            img_feat_src = "resnet18"
+        elif enc_key("cls_token"):
+            img_feat_src = "dinov2_vits14"
+        elif src_dim == CORR_FEAT_DIM:
+            img_feat_src = "corr"
+        elif src_dim == int(enc_embed_dim):
+            img_feat_src = "pooled"
+        else:
+            raise RuntimeError(
+                f"{where}: pose_gru.img_norm width {src_dim} matches no "
+                f"known source (pooled={int(enc_embed_dim)}, "
+                f"corr={CORR_FEAT_DIM}) and no encoder weights are present "
+                "— cannot identify img_feat_src"
+            )
+        if args_src is not None and str(args_src) != img_feat_src:
+            raise RuntimeError(
+                f"{where}: weights identify img_feat_src={img_feat_src!r} "
+                f"but ckpt['args'].pose_gru_img_feat_src={args_src!r} — "
+                "mislabelled checkpoint, refusing to guess which side is wrong"
+            )
+        if img_feat_src in ENCODER_DIMS and src_dim != ENCODER_DIMS[img_feat_src]:
+            raise RuntimeError(
+                f"{where}: {img_feat_src} encoder weights present but "
+                f"img_norm width is {src_dim}, expected "
+                f"{ENCODER_DIMS[img_feat_src]}"
+            )
+        if img_feat_proj:
+            img_feat_dim = w_proj.shape[0]
+            assert w_proj.shape[1] % src_dim == 0, (
+                f"pose_gru.img_proj input width {w_proj.shape[1]} is not a "
+                f"multiple of the source width {src_dim}"
+            )
+            blocks = w_proj.shape[1] // src_dim
+        else:
+            # No projector tensor to read the block count off. Solve it
+            # from the cell input width instead: base(7|14) + blocks*
+            # src_dim. Even the narrowest source width (corr, 54) dwarfs
+            # the 7-wide base gap, so the split is unique — assert that
+            # rather than assume it.
+            assert w_ih is not None, (
+                "pose_gru checkpoint has img_norm but no img_proj and no "
+                "cell.weight_ih — the block count cannot be recovered"
+            )
+            cand = [
+                b
+                for b in (1, 2)
+                for base in (7, 14)
+                if int(w_ih.shape[1]) == base + b * src_dim
+            ]
+            assert len(cand) == 1, (
+                f"pose_gru cell input width {int(w_ih.shape[1])} does not "
+                f"decompose uniquely as base(7|14) + blocks(1|2)*{src_dim} "
+                f"(candidates: {cand})"
+            )
+            blocks = cand[0]
+            img_feat_dim = blocks * src_dim
+        if img_feat_src == "corr":
+            # corr appends exactly ONE pair-statistic block; its (semantic)
+            # frame count is fixed at 2 — it consumes the previous view.
+            assert blocks == 1, (
+                f"{where}: img_feat_src='corr' appends one "
+                f"{CORR_FEAT_DIM}-wide block, but the weights show "
+                f"{blocks} blocks"
+            )
+            img_feat_frames = 2
+        else:
+            assert blocks in (1, 2), (
+                f"{where}: {blocks} appended blocks — expected 1 (F0) or 2 (F1)"
+            )
+            img_feat_frames = blocks
+    # The weights are authoritative for the input width: base (7 = pose,
+    # 14 = pose+delta) plus the APPENDED F width; the saved config only
+    # breaks ties. Hard-fail on anything unexplained — a mis-sniffed
+    # width would otherwise rebuild the wrong cell and (before the
+    # load_state_dict hardening) silently evaluate a random GRU.
+    if w_ih is not None:
+        base_width = w_ih.shape[1] - (img_feat_dim if img_feat == "input" else 0)
+        assert base_width in (7, 14), (
+            f"pose_gru cell input width {w_ih.shape[1]} minus appended F width "
+            f"{img_feat_dim if img_feat == 'input' else 0} = {base_width}; "
+            f"expected 7 (pose) or 14 (pose_delta)"
+        )
+        input_mode = "pose_delta" if base_width == 14 else "pose"
+    return dict(
+        hidden_dim=hidden_dim,
+        mode=mode,
+        input_mode=input_mode,
+        img_feat=img_feat,
+        img_feat_dim=img_feat_dim,
+        img_feat_frames=img_feat_frames,
+        img_feat_proj=img_feat_proj,
+        img_feat_src=img_feat_src,
+        iters=iters,
+    )
+
+
 def load_model(model_path, device, verbose=True):
     if verbose:
         print("... loading model from", model_path)
@@ -99,78 +275,55 @@ def load_model(model_path, device, verbose=True):
     # otherwise refuses them). mode/hidden_dim come from the training config
     # saved inside the checkpoint — the authoritative source (mode is not
     # inferable from the weights).
-    if any(k.startswith(("pose_gru.", "module.pose_gru.")) for k in ckpt["model"]):
-        train_args = ckpt["args"]
-        # residual / direct / split_anchor all share ONE head of identical
-        # shape, so the mode is invisible in the weights and ckpt["args"] is
-        # the only source. A missing key used to fall back to "residual",
-        # which builds the WRONG algebra with matching shapes and zero errors
-        # — i.e. a silently mislabelled evaluation. Hard-fail instead.
-        mode = getattr(train_args, "pose_gru_mode", None)
-        if mode is None:
-            raise RuntimeError(
-                f"{model_path}: checkpoint carries pose_gru weights but its "
-                "ckpt['args'] has no 'pose_gru_mode'. The mode cannot be "
-                "recovered from weight shapes — refusing to guess."
-            )
-        hidden_dim = getattr(train_args, "pose_gru_hidden_dim", 128)
-        input_mode = getattr(train_args, "pose_gru_input", "pose")
-        # R lever: the iteration count is INVISIBLE in weight shapes (shared-
-        # weight iteration) — ckpt args are the only source, like mode.
-        iters = int(getattr(train_args, "pose_gru_iters", 1))
-        w_hh = ckpt["model"].get(
-            "pose_gru.cell.weight_hh", ckpt["model"].get("module.pose_gru.cell.weight_hh")
-        )
-        if w_hh is not None:
-            hidden_dim = w_hh.shape[1]
-        # F lever: projector presence + shapes are authoritative — D from
-        # img_proj.weight rows, frame count from its columns / enc width.
-        w_proj = ckpt["model"].get(
-            "pose_gru.img_proj.weight", ckpt["model"].get("module.pose_gru.img_proj.weight")
-        )
-        img_feat = "none" if w_proj is None else "input"
-        img_feat_dim = 32
-        img_feat_frames = 2
-        if w_proj is not None:
-            img_feat_dim = w_proj.shape[0]
-            src_dim = net.enc_embed_dim
-            assert w_proj.shape[1] % src_dim == 0, (
-                f"pose_gru.img_proj input width {w_proj.shape[1]} is not a "
-                f"multiple of the encoder width {src_dim}"
-            )
-            img_feat_frames = w_proj.shape[1] // src_dim
-        # The weights are authoritative for the input width: base (7 = pose,
-        # 14 = pose+delta) plus the projector dim; the saved config only
-        # breaks ties. Hard-fail on anything unexplained — a mis-sniffed
-        # width would otherwise rebuild the wrong cell and (before the
-        # load_state_dict hardening) silently evaluate a random GRU.
-        w_ih = ckpt["model"].get(
-            "pose_gru.cell.weight_ih", ckpt["model"].get("module.pose_gru.cell.weight_ih")
-        )
-        if w_ih is not None:
-            base_width = w_ih.shape[1] - (img_feat_dim if img_feat == "input" else 0)
-            assert base_width in (7, 14), (
-                f"pose_gru cell input width {w_ih.shape[1]} minus projector dim "
-                f"{img_feat_dim if img_feat == 'input' else 0} = {base_width}; "
-                f"expected 7 (pose) or 14 (pose_delta)"
-            )
-            input_mode = "pose_delta" if base_width == 14 else "pose"
-        net.enable_pose_gru(
-            hidden_dim=hidden_dim,
-            mode=mode,
-            input_mode=input_mode,
-            img_feat=img_feat,
-            img_feat_dim=img_feat_dim,
-            img_feat_frames=img_feat_frames,
-            iters=iters,
-        )
+    gru_cfg = _sniff_pose_gru_config(
+        ckpt["model"], ckpt["args"], net.enc_embed_dim, where=str(model_path)
+    )
+    has_pose_gru = gru_cfg is not None
+    if has_pose_gru:
+        # img_encoder_pretrained=False: for the encoder sources the ckpt's
+        # own serialized img_encoder weights overwrite the random init in
+        # load_state_dict below — eval never needs the pretrained file.
+        net.enable_pose_gru(img_encoder_pretrained=False, **gru_cfg)
         if verbose:
             print(
-                f"... pose_gru enabled from ckpt: mode={mode}, "
-                f"hidden_dim={hidden_dim}, input={input_mode}, "
-                f"img_feat={img_feat} (dim={img_feat_dim}, frames={img_feat_frames}), "
-                f"iters={iters}"
+                "... pose_gru enabled from ckpt: "
+                + ", ".join(f"{k}={v}" for k, v in gru_cfg.items())
             )
+    # Training-time RUN-MODE flags that live outside the weights (unlike the
+    # pose_gru module config above, which IS restored). They are deliberately
+    # NOT auto-enabled: conditioning needs caller-built inputs (ray maps,
+    # intrinsics, and — for the oracle — real GT camera_pose in the views), so
+    # flipping them here would break plain image-only callers. Instead they are
+    # stashed on the net so every inference surface can see what the checkpoint
+    # was trained as and warn instead of silently evaluating out of
+    # distribution. demo_ray.py / the eval workers read these.
+    run_args = ckpt.get("args")
+    if bool(getattr(run_args, "feed_gt_ray_map", False)):
+        net.trained_conditioning = "gt"
+    elif bool(getattr(run_args, "feed_prev_gt_ray_map", False)):
+        net.trained_conditioning = "prev_gt"
+    elif bool(getattr(run_args, "feed_prev_pred", False)):
+        net.trained_conditioning = "prev_pred_gru" if has_pose_gru else "prev_pred"
+    else:
+        net.trained_conditioning = "none"
+    net.trained_pose_gru_oracle = str(getattr(run_args, "pose_gru_oracle", "off") or "off")
+    if verbose and net.trained_conditioning != "none":
+        print(
+            f"NOTE: this checkpoint was trained with ray-map conditioning "
+            f"('{net.trained_conditioning}'). Nothing is auto-enabled here — "
+            f"run it through demo_ray.py / infer_and_eval_worker_ray.py with "
+            f"--conditioning {net.trained_conditioning}, or an image-only run "
+            f"is an out-of-distribution open-loop probe."
+        )
+    if verbose and net.trained_pose_gru_oracle != "off":
+        print(
+            "*** NOTE: this checkpoint was trained with pose_gru_oracle="
+            f"'{net.trained_pose_gru_oracle}' — a GT-injection DIAGNOSTIC arm, "
+            "not an honest one. The oracle is OFF at inference unless the "
+            "caller enables it (model.pose_gru_oracle='gt', views carrying "
+            "real GT camera_pose); either way, do not compare its metrics "
+            "against honest arms. ***"
+        )
     s = net.load_state_dict(ckpt["model"], strict=False)
     if verbose:
         print(s)
@@ -329,6 +482,44 @@ def pose_delta_encoding(prev_enc, cur_enc):
     return torch.cat([rel_t, matrix_to_quaternion(rel_R)], dim=-1)
 
 
+def gt_pose_encoding(views, idx, ref_idx=0):
+    """View-ref-relative GT pose encoding for view `idx` — the ORACLE target.
+
+    Built byte-for-byte the way PoseGRULoss builds its supervision target
+    (losses.py: camera_to_pose_encoding(inv(cam1) @ gt["camera_pose"]) with
+    cam1 = views[0]["camera_pose"]), so that feeding this into a zero-init
+    residual PoseGRU makes the aux error identically zero. Any deviation from
+    that construction — a different reference view, a missing inverse, a
+    non-standardized quaternion — shows up as a nonzero oracle reading, which
+    is exactly what makes the diagnostic informative.
+
+    Returns (enc, ok):
+      enc: (B, 7) absT_quaR, FLOAT32, detached.
+      ok:  (B, 1) bool — False for samples whose reference pose is singular or
+           whose encoding is not finite.
+
+    fp32 is not incidental. The honest fed-back pose lives in the head's amp
+    dtype (fp16 under torch.cuda.amp), and round-tripping a GT quaternion
+    through fp16 leaves ~1e-4 of quaternion error — enough to make a perfectly
+    wired oracle look broken. Callers must keep this fp32 and must call it
+    with autocast disabled.
+
+    torch.linalg.inv_ex (not inv): a view with no pose gets a SINGULAR
+    ones((4,4)) placeholder from the dataset base class, and plain inv() raises
+    for the whole batch. inv_ex returns an info code instead, so that one
+    sample degrades to the honest closed loop while the rest proceed. Returns
+    (None, None) for idx < 0 (no such view yet).
+    """
+    if idx < 0:
+        return None, None
+    ref = views[ref_idx]["camera_pose"].float()
+    cur = views[idx]["camera_pose"].float()
+    inv_ref, info = torch.linalg.inv_ex(ref)
+    enc = camera_to_pose_encoding(inv_ref @ cur)
+    ok = (info == 0)[:, None] & torch.isfinite(enc).all(dim=-1, keepdim=True)
+    return enc.detach(), ok
+
+
 class PoseGRU(nn.Module):
     """Recurrent filter for the feed_prev_pred pose loop.
 
@@ -375,11 +566,67 @@ class PoseGRU(nn.Module):
     img_feat="input" (F lever): the cell input is additionally conditioned on
     pooled PRE-ray image-encoder features of the current view (and, with
     img_feat_frames=2, the previous view): per-frame LayerNorm (shared
-    affine) then a ZERO-INIT Linear(src_dim*frames -> img_feat_dim) appended
-    AFTER the pose block — so gru_in keeps its pose-first 7/14-d layout, the
-    residual anchor is untouched, and an untrained module is output-identical
-    to img_feat="none" (the feature term is exactly zero at init, while the
-    cell's default-init input columns keep the gradient to img_proj alive).
+    affine) then an optional ZERO-INIT Linear(src_dim*frames -> img_feat_dim)
+    appended AFTER the pose block — so gru_in keeps its pose-first 7/14-d
+    layout and the residual anchor is untouched.
+
+    img_feat_frames selects WHICH frames the lever contributes:
+        1 ("F0")  -> the current view only            -> src_dim  ( 1024) raw
+        2 ("F1")  -> current view + previous view     -> 2*src_dim( 2048) raw
+    img_feat_proj selects WHETHER those pooled features are compressed:
+        True  (default) -> zero-init Linear to img_feat_dim (32) columns
+        False           -> the LayerNormed features go into the cell RAW,
+                           i.e. the cell input widens by the FULL 1024/2048
+    So the four F arms append, respectively, 32 / 32 / 1024 / 2048 columns.
+
+    img_feat_src (source lever, suffixed onto the F arm name) selects WHAT
+    produces the per-step feature — the frame/proj machinery above is shared
+    by every source, only the block width changes:
+        "pooled"        (default) -> mean over the CUT3R pre-ray tokens, the
+                                     original arms. src_dim = enc width (1024).
+        "resnet18"      ("r")     -> frozen ImageNet resnet18 avgpool feature
+                                     of the RAW image. src_dim = 512.
+        "dinov2_vits14" ("d")     -> frozen DINOv2 ViT-S/14 CLS token of the
+                                     RAW image. src_dim = 384.
+        "corr"          ("c")     -> hand-crafted correlation/flow statistics
+                                     BETWEEN the current and previous views'
+                                     CUT3R token sets (dust3r/img_encoders.py:
+                                     corr_motion_stats). src_dim = 54. The
+                                     only source that carries explicit
+                                     relative-motion evidence — the per-frame
+                                     sources are global summaries the cell
+                                     must learn to compare.
+    The encoder sources hold the frozen network as self.img_encoder — its
+    (requires_grad=False, eval-locked) weights serialize into every ckpt, so
+    EVAL rebuilds bit-exact from ckpt["model"] on offline nodes with no
+    pretrained file; the pretrained path matters at TRAIN init only. "corr"
+    is per-frame in NEITHER sense: frames must be 2 (it consumes the previous
+    view) but the appended feature is ONE 54-wide block, so img_feat_blocks
+    (which drives the LayerNorm reshape and projector width) is 1 there and
+    == img_feat_frames everywhere else.
+
+    self.img_feat_dim always reports the APPENDED WIDTH (what the cell
+    actually receives), not the constructor's img_feat_dim, which is ignored
+    when img_feat_proj=False.
+
+    Init-equivalence to img_feat="none" holds in BOTH projector modes, but for
+    different reasons, and this distinction matters:
+      * img_feat_proj=True  — the projector is zero-init, so the appended
+        columns are exactly zero and even the HIDDEN trajectory is identical
+        to the F-off arm. The cell's default-init input columns keep the
+        gradient to img_proj alive.
+      * img_feat_proj=False — there is no zero gate. Image content reaches the
+        hidden state from step one through the cell's default-init weight_ih
+        columns. Only mode="residual"'s zero-init HEAD makes the OUTPUT
+        identical to F-off at init; the hidden trajectory already differs.
+        With mode="direct" there is no init-equivalence at all in this mode.
+    Either way the head is the gradient gate: while it is zero, d(loss)/d(cell)
+    is exactly zero, so the (much wider) input columns stay locked until the
+    head unlocks — the same bootstrap the projector arm has.
+    NOTE the parameter cost of img_feat_proj=False: weight_ih is
+    3*hidden x input_dim, so at hidden=128 the cell grows from 17,664 params
+    (46 wide) to 398,592 (1038 wide, F0) or 791,808 (2062 wide, F1), and there
+    is no low-rank bottleneck forcing the module to summarise appearance.
 
     iters (R lever): number of back-to-back cell iterations per view. The
     CALL SITE owns the loop (this module stays a pure single-step cell — the
@@ -398,7 +645,11 @@ class PoseGRU(nn.Module):
         img_feat="none",
         img_feat_dim=32,
         img_feat_frames=2,
+        img_feat_proj=True,
         img_feat_src_dim=1024,
+        img_feat_src="pooled",
+        img_encoder_pretrained=True,
+        img_encoder_weights=None,
         iters=1,
     ):
         super().__init__()
@@ -412,27 +663,90 @@ class PoseGRU(nn.Module):
         self.input_mode = input_mode
         self.hidden_dim = hidden_dim
         self.img_feat = img_feat
+        self.img_feat_src = str(img_feat_src)
         self.img_feat_src_dim = int(img_feat_src_dim)
+        self.img_encoder = None
         self.iters = int(iters)
         self.input_dim = pose_dim if input_mode == "pose" else 2 * pose_dim
         if img_feat == "input":
+            from dust3r.img_encoders import (
+                CORR_FEAT_DIM,
+                ENCODER_DIMS,
+                FrozenImageEncoder,
+            )
+
+            assert self.img_feat_src in ("pooled",) + tuple(ENCODER_DIMS) + ("corr",), (
+                f"unknown pose_gru img_feat_src {img_feat_src!r}"
+            )
             assert int(img_feat_frames) in (1, 2), (
                 f"img_feat_frames must be 1 (current view) or 2 (current + previous), "
                 f"got {img_feat_frames!r}"
             )
-            assert int(img_feat_dim) > 0, "img_feat_dim must be positive when img_feat='input'"
-            self.img_feat_dim = int(img_feat_dim)
             self.img_feat_frames = int(img_feat_frames)
+            self.img_feat_proj = bool(img_feat_proj)
+            # Source lever: which network produces the appended feature.
+            #   "pooled" keeps the constructor's img_feat_src_dim (the CUT3R
+            #   encoder width); the other sources DICTATE their own width, so
+            #   the constructor arg is overridden — self.img_feat_src_dim
+            #   always reports the width of ONE block as the cell sees it.
+            if self.img_feat_src == "corr":
+                # The pair statistic needs the previous view by construction.
+                assert self.img_feat_frames == 2, (
+                    "img_feat_src='corr' is a two-frame statistic — "
+                    "img_feat_frames must be 2 (arm F1c)"
+                )
+                self.img_feat_src_dim = CORR_FEAT_DIM
+            elif self.img_feat_src in ENCODER_DIMS:
+                self.img_feat_src_dim = ENCODER_DIMS[self.img_feat_src]
+                self.img_encoder = FrozenImageEncoder(
+                    self.img_feat_src,
+                    pretrained=bool(img_encoder_pretrained),
+                    weights_path=img_encoder_weights,
+                )
+            # Number of src_dim-wide blocks appended to the cell input. The
+            # per-frame sources contribute one block per frame; corr compresses
+            # the PAIR into a single block (frames stays 2 semantically — it
+            # records that the previous view is consumed — but the LayerNorm
+            # reshape and the projector width follow blocks, not frames).
+            self.img_feat_blocks = 1 if self.img_feat_src == "corr" else self.img_feat_frames
+            # LayerNorm is kept in BOTH modes: it is feature conditioning, not
+            # the projection. Pooled encoder activations are not unit-scaled,
+            # and feeding 1024/2048 raw columns into a GRUCell whose weight_ih
+            # is initialised for O(1) inputs would swamp the 7/14 pose columns
+            # that carry the residual anchor.
             self.img_norm = nn.LayerNorm(self.img_feat_src_dim)
-            self.img_proj = nn.Linear(
-                self.img_feat_src_dim * self.img_feat_frames, self.img_feat_dim
-            )
-            nn.init.zeros_(self.img_proj.weight)
-            nn.init.zeros_(self.img_proj.bias)
+            if self.img_feat_proj:
+                assert int(img_feat_dim) > 0, (
+                    "img_feat_dim must be positive when img_feat='input' and "
+                    "img_feat_proj=True"
+                )
+                self.img_feat_dim = int(img_feat_dim)
+                self.img_proj = nn.Linear(
+                    self.img_feat_src_dim * self.img_feat_blocks, self.img_feat_dim
+                )
+                nn.init.zeros_(self.img_proj.weight)
+                nn.init.zeros_(self.img_proj.bias)
+            else:
+                # No projector: the LayerNormed features are the cell input.
+                # img_feat_dim (the constructor arg) is deliberately ignored —
+                # the appended width is dictated by the source and the block
+                # count, and self.img_feat_dim reports that actual width.
+                self.img_feat_dim = self.img_feat_src_dim * self.img_feat_blocks
             self.input_dim += self.img_feat_dim
         else:
+            # A source with the F lever OFF is a mis-paired config: the run
+            # would train F-OFF while its ckpt args record a source arm, and
+            # the sniff (which ignores args when img_feat='none') would later
+            # relabel it 'pooled' — three names for one run. Refuse instead.
+            assert self.img_feat_src == "pooled", (
+                f"pose_gru_img_feat_src={img_feat_src!r} has no effect with "
+                "img_feat='none' — refusing a config that would train F-OFF "
+                "while recording a source arm in ckpt args"
+            )
             self.img_feat_dim = 0
             self.img_feat_frames = 0
+            self.img_feat_blocks = 0
+            self.img_feat_proj = False
         self.cell = nn.GRUCell(self.input_dim, hidden_dim)
         self.head = nn.Linear(hidden_dim, pose_dim)
         if mode == "residual":
@@ -447,21 +761,37 @@ class PoseGRU(nn.Module):
                 self.head.weight[3:pose_dim].zero_()
                 self.head.bias[3:pose_dim].zero_()
 
+    def extract_img_feat(self, img):
+        """Frozen-encoder appearance of ONE view: (B, 3, H, W) in the loader's
+        [-1, 1] normalization -> (B, src_dim) detached fp32. Only valid for the
+        encoder sources ("resnet18"/"dinov2_vits14"); "pooled" and "corr" build
+        their features from the CUT3R tokens at the call site instead."""
+        assert self.img_encoder is not None, (
+            f"extract_img_feat needs an encoder source, got "
+            f"img_feat_src={self.img_feat_src!r}"
+        )
+        return self.img_encoder(img)
+
     def forward(self, gru_in, hidden, img_feat=None):
         """gru_in: (B, 7) or (B, 14) detached prev-step pose (+delta); hidden:
-        (B, H) or None at sequence start; img_feat: (B, frames*src_dim) pooled
-        pre-ray image features (current view first, then previous) when
-        img_feat="input", else None. Returns (refined_pose_enc, new_hidden)."""
+        (B, H) or None at sequence start; img_feat: (B, blocks*src_dim) image
+        feature (per-frame sources: current view first, then previous; corr:
+        one pair-statistic block) when img_feat="input", else None. Returns
+        (refined_pose_enc, new_hidden)."""
         if hidden is None:
             hidden = gru_in.new_zeros(gru_in.shape[0], self.hidden_dim)
         cell_in = gru_in
         if self.img_feat == "input":
-            assert img_feat is not None, "img_feat='input' needs the pooled image features"
+            assert img_feat is not None, "img_feat='input' needs the image features"
             f = img_feat.reshape(
-                img_feat.shape[0], self.img_feat_frames, self.img_feat_src_dim
+                img_feat.shape[0], self.img_feat_blocks, self.img_feat_src_dim
             )
             f = self.img_norm(f).reshape(img_feat.shape[0], -1)
-            cell_in = torch.cat([gru_in, self.img_proj(f)], dim=-1)
+            # img_feat_proj=False sends the LayerNormed features in RAW: the
+            # cell input is [pose(7|14) | features(src_dim*frames)].
+            cell_in = torch.cat(
+                [gru_in, self.img_proj(f) if self.img_feat_proj else f], dim=-1
+            )
         hidden = self.cell(cell_in, hidden)
         raw = self.head(hidden)
         # Explicit per-mode branches with a terminal raise: the old catch-all
@@ -708,15 +1038,23 @@ class ARCroco3DStereo(CroCoNet):
         img_feat="none",
         img_feat_dim=32,
         img_feat_frames=2,
+        img_feat_proj=True,
+        img_feat_src="pooled",
+        img_encoder_pretrained=True,
+        img_encoder_weights=None,
         iters=1,
     ):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
         Call BEFORE load_state_dict when the checkpoint carries pose_gru
         weights, and BEFORE the optimizer is built (the module needs its own
-        param group / lr). Created on CPU — move with .to(device) afterwards
-        if the model already lives on GPU. New kwargs are defaulted so every
-        legacy caller keeps constructing the exact v2 module.
+        param group / lr; the frozen img_encoder of the "resnet18"/"dinov2_*"
+        sources is requires_grad=False and skipped by get_parameter_groups).
+        Created on CPU — move with .to(device) afterwards if the model already
+        lives on GPU. New kwargs are defaulted so every legacy caller keeps
+        constructing the exact v2 module. img_encoder_pretrained=False is the
+        load_model path: the ckpt's own serialized encoder weights overwrite
+        the random init, so eval never needs the pretrained file on disk.
         """
         if mode in ("direct", "split_anchor") and int(iters) > 1:
             what = "the pose" if mode == "direct" else "the TRANSLATION"
@@ -732,7 +1070,11 @@ class ARCroco3DStereo(CroCoNet):
             img_feat=img_feat,
             img_feat_dim=img_feat_dim,
             img_feat_frames=img_feat_frames,
+            img_feat_proj=img_feat_proj,
             img_feat_src_dim=self.enc_embed_dim,
+            img_feat_src=img_feat_src,
+            img_encoder_pretrained=img_encoder_pretrained,
+            img_encoder_weights=img_encoder_weights,
             iters=iters,
         )
         self._pose_gru_hidden = None
@@ -1136,17 +1478,36 @@ class ARCroco3DStereo(CroCoNet):
                 self._prev_img_feat = None
                 pose_gru = getattr(self, "pose_gru", None)
                 if pose_gru is not None and pose_gru.img_feat == "input":
-                    # Stash view 0's pooled PRE-ray appearance for the next
-                    # step's (current, previous) feature pair. View 0's tokens
-                    # carry the constant, pose-free masked_ray_map_token added
-                    # in _encode_views — subtract it so the stash is the same
-                    # pure-image statistic every other view provides.
-                    self._prev_img_feat = (
-                        (feat_group[0] - self.masked_ray_map_token.to(feat_group[0].dtype))
-                        .detach()
-                        .mean(dim=1)
-                        .float()
-                    )
+                    # Stash view 0's appearance for the next step's (current,
+                    # previous) feature pair, per the SOURCE lever. The token
+                    # sources ("pooled"/"corr") see view 0's tokens carrying
+                    # the constant, pose-free masked_ray_map_token added in
+                    # _encode_views — subtract it so the stash is the same
+                    # pure-image statistic every other view provides. The
+                    # encoder sources read the RAW image, which never carries
+                    # the ray token — nothing to correct.
+                    src = getattr(pose_gru, "img_feat_src", "pooled")
+                    if src == "pooled":
+                        self._prev_img_feat = (
+                            (feat_group[0] - self.masked_ray_map_token.to(feat_group[0].dtype))
+                            .detach()
+                            .mean(dim=1)
+                            .float()
+                        )
+                    elif src == "corr":
+                        # corr compares TOKEN SETS, so the stash keeps the
+                        # full (B, N, C) tokens instead of their mean —
+                        # detached fp32 data, ~1 MB/sample, crossing TBPTT
+                        # chunks exactly like the pooled stash.
+                        self._prev_img_feat = (
+                            (feat_group[0] - self.masked_ray_map_token.to(feat_group[0].dtype))
+                            .detach()
+                            .float()
+                        )
+                    else:
+                        self._prev_img_feat = pose_gru.extract_img_feat(
+                            views[view_indices[0]]["img"]
+                        )
             else:
                 prev_pose_enc = getattr(self, "_prev_pred_pose_enc", None)
                 prev_prev_pose_enc = getattr(self, "_prev_prev_pred_pose_enc", None)
@@ -1188,14 +1549,41 @@ class ARCroco3DStereo(CroCoNet):
                     img_feat_vec = None
                     cur_img_feat = None
                     if pose_gru.img_feat == "input":
-                        # F lever: pooled PRE-ray appearance of the current
-                        # view (the ray add below happens later), plus the
-                        # previous view's stash for the two-frame pair. The
-                        # detach is structural: the encoder is frozen and
-                        # (under TBPTT) already detached — the feature is
-                        # data, never a gradient path.
-                        cur_img_feat = feat_group[0].detach().mean(dim=1).float()
-                        if pose_gru.img_feat_frames == 2:
+                        # F lever, per the SOURCE sub-lever. All sources are
+                        # PRE-ray (the ray add below happens later) and
+                        # structurally detached: the producing network is
+                        # frozen and (under TBPTT) already detached — the
+                        # feature is data, never a gradient path.
+                        src = getattr(pose_gru, "img_feat_src", "pooled")
+                        if src == "pooled":
+                            cur_img_feat = feat_group[0].detach().mean(dim=1).float()
+                        elif src == "corr":
+                            # Full token set: the pair statistic below needs
+                            # per-token correspondence, and this tensor also
+                            # becomes the NEXT step's stash.
+                            cur_img_feat = feat_group[0].detach().float()
+                        else:
+                            # Frozen-encoder appearance of the raw image
+                            # (fp32 no-grad island inside extract_img_feat).
+                            cur_img_feat = pose_gru.extract_img_feat(
+                                views[view_indices[0]]["img"]
+                            )
+                        if src == "corr":
+                            prev_img_feat = getattr(self, "_prev_img_feat", None)
+                            assert prev_img_feat is not None, (
+                                "pose_gru img_feat: no stashed view x-1 tokens — "
+                                "views must be processed sequentially from view 0"
+                            )
+                            from dust3r.img_encoders import corr_motion_stats
+
+                            h, w = views[view_indices[0]]["img"].shape[-2:]
+                            ps = getattr(self.patch_embed, "patch_size", (16, 16))
+                            if isinstance(ps, int):
+                                ps = (ps, ps)
+                            img_feat_vec = corr_motion_stats(
+                                cur_img_feat, prev_img_feat, (h // ps[0], w // ps[1])
+                            )
+                        elif pose_gru.img_feat_frames == 2:
                             prev_img_feat = getattr(self, "_prev_img_feat", None)
                             assert prev_img_feat is not None, (
                                 "pose_gru img_feat: no stashed view x-1 feature — "
@@ -1238,6 +1626,60 @@ class ARCroco3DStereo(CroCoNet):
                         delta = pose_delta_encoding(prev_prev_pose_enc, prev_pose_enc)
                         delta_static = delta.to(prev_pose_enc.dtype)
                     est = prev_pose_enc
+                    # ---------------- ORACLE DIAGNOSTIC (pose_gru_oracle) ----
+                    # THE ONLY CHANGE: the POSE handed to the GRU becomes the
+                    # CURRENT view's GT pose instead of the previous step's
+                    # predicted pose P(x-1). Nothing else. Specifically NOT
+                    # changed: the delta half of the A4 input (still the honest
+                    # velocity between the last two raw head poses), the image
+                    # features, the hidden, the pose stashes, the ray build (it
+                    # still consumes the GRU's own output), the e2e/bptt tapes,
+                    # and res["gru_pose"] (still the GRU's OUTPUT — writing GT
+                    # there would zero the loss by construction and test
+                    # nothing). So GT enters at exactly one point and reaches
+                    # the rest of the pipeline only THROUGH the GRU.
+                    #
+                    # The GT pose is built in the exact frame and encoding
+                    # PoseGRULoss targets (gt_pose_encoding is a byte-for-byte
+                    # copy of the loss's own target construction), so a GRU that
+                    # simply returns its input scores zero — which a zero-init
+                    # residual head does exactly. Any nonzero reading at init is
+                    # a wiring, frame, dtype or masking bug.
+                    #
+                    # Substituted at iterate 0 only; with iters>1 the R loop
+                    # re-feeds the GRU's own output as always.
+                    # Placed AFTER the F-lever pooling above so image features
+                    # can never become GT-contaminated.
+                    oracle = str(getattr(self, "pose_gru_oracle", "off") or "off")
+                    assert oracle in ("off", "gt"), (
+                        f"unknown pose_gru_oracle {oracle!r} (expected off|gt)"
+                    )
+                    if oracle == "gt":
+                        with torch.autocast(
+                            device_type=feat_group[0].device.type, enabled=False
+                        ):
+                            gt_cur, ok_cur = gt_pose_encoding(views, view_indices[0])
+                        # Stay in FLOAT32 — do NOT cast to prev_pose_enc.dtype.
+                        # That stash is the head's camera_pose produced under
+                        # torch.cuda.amp, i.e. fp16; round-tripping the GT quat
+                        # through fp16 leaves ~1e-4 of error and a perfectly
+                        # wired oracle would read nonzero. torch.where promotes
+                        # the honest per-sample fallback up to fp32.
+                        est = torch.where(ok_cur, gt_cur, prev_pose_enc.float())
+                        if delta_static is not None:
+                            # Widen the (unchanged) honest delta so the cat below
+                            # is homogeneous. fp16 -> fp32 is exact: same value.
+                            delta_static = delta_static.to(est.dtype)
+                        if (
+                            os.environ.get("PREV_PRED_RAY_SHUFFLE") == "1"
+                            and est.shape[0] > 1
+                        ):
+                            # Re-apply the falsifier AFTER the substitution: the
+                            # roll above hit the stash the oracle just
+                            # overwrote and would otherwise be a silent no-op.
+                            # The loss target is NOT rolled, so under the oracle
+                            # this MUST destroy the zero — the positive control.
+                            est = torch.roll(est, shifts=1, dims=0)
                     with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
                         for _it in range(n_iters):
                             gru_in = (
@@ -1256,9 +1698,10 @@ class ARCroco3DStereo(CroCoNet):
                     new_hidden = hidden
                     if pose_gru.img_feat == "input":
                         # Stash the current view's (honest, unfalsified)
-                        # pooled pre-ray appearance for the next step's pair.
-                        # Pure detached data — crosses TBPTT chunks like the
-                        # pose stashes, no boundary handling needed.
+                        # pre-ray appearance for the next step's pair — the
+                        # pooled/encoder vector or, for corr, the full token
+                        # set. Pure detached data — crosses TBPTT chunks like
+                        # the pose stashes, no boundary handling needed.
                         self._prev_img_feat = cur_img_feat
                     if bool(getattr(self, "pose_gru_bptt", False)):
                         # Within-chunk BPTT (lever G1): keep the tape so the aux
@@ -1278,6 +1721,8 @@ class ARCroco3DStereo(CroCoNet):
                     # reconstruction loss also reaches the GRU through the
                     # pose -> ray map -> frozen ray encoder chain (frozen only
                     # pins the encoder's params; gradient passes through).
+                    # NOT touched by pose_gru_oracle: the refined pose drives the
+                    # ray build exactly as always, under 'off' and 'gt' alike.
                     pose_gru_e2e = bool(getattr(self, "pose_gru_e2e", False)) and (
                         torch.is_grad_enabled() and gru_pose_pred.requires_grad
                     )

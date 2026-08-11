@@ -40,6 +40,36 @@ TBPTT-detached: features can never backprop into it. Zero-init img_proj ⇒ an
 untrained F1 model is output-identical to F0 (the cell's default-init feature
 columns keep img_proj's gradient alive — do NOT zero them, e.g. in surgery).
 
+### F SOURCE sub-lever (`pose_gru_img_feat_src`, suffix on the F arm name)
+
+Selects WHAT produces the per-step feature; the frames/proj machinery above is
+shared by every source, only the block width changes:
+
+| suffix | src               | feature (one block)                             | width |
+|--------|-------------------|-------------------------------------------------|-------|
+| (none) | `pooled` (default)| mean over the CUT3R pre-ray tokens (original)   | 1024  |
+| `r`    | `resnet18`        | frozen ImageNet resnet18 avgpool of the RAW img | 512   |
+| `d`    | `dinov2_vits14`   | frozen DINOv2 ViT-S/14 CLS of the RAW img       | 384   |
+| `c`    | `corr`            | cur<->prev token correlation/flow statistic     | 54    |
+
+Arms: `f0r/f1r`, `f0d/f1d` (per-frame sources, F0/F1 as before) and `f1c`
+(corr REQUIRES frames=2 but appends ONE 54-wide block — the previous view's
+FULL token set is stashed instead of its mean). `corr` is the only source
+carrying explicit relative-motion evidence (`corr_motion_stats` in
+`dust3r/img_encoders.py`); the per-frame sources are global summaries the cell
+must learn to compare. The frozen encoders live at `pose_gru.img_encoder.*`
+(eval-locked, requires_grad=False, excluded from optimizer/DDP) and their
+weights serialize into every ckpt, so offline eval needs no pretrained file —
+`pose_gru_img_encoder_weights` (default `src/CUT3R/src/pretrained_encoders/`)
+matters at TRAIN init only. The load_model sniff identifies the source from
+key fingerprints (`img_encoder.net.conv1.weight` / `img_encoder.net.cls_token`)
+or the `img_norm` width (54=corr, enc width=pooled), cross-checked against
+`ckpt['args'].pose_gru_img_feat_src` with a hard fail on disagreement.
+Zero-init img_proj ⇒ init-equivalence holds for every source; the
+`POSE_GRU_IMG_FEAT_SHUFFLE/ZERO` falsifiers act downstream of all of them.
+CPU test suite: `verify_gru_encoder_levers.py` (repo root).
+`pose_gru_expand_ckpt.py` refuses source-lever checkpoints.
+
 ## R lever — iterative GRU (`pose_gru_iters`)
 
 N back-to-back cell iterations per view, shared weights, zero new parameters

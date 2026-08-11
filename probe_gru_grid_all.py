@@ -24,7 +24,14 @@ import os
 import sys
 import time
 
-WORKTREE = "/scratch/bdursun25/cuteanything/captain_gru_v3"
+# Self-locating: derive the checkout from THIS file, never a hardcoded path.
+# sys.path.insert(0, <nonexistent>) SILENTLY SUCCEEDS, so a stale hardcoded
+# worktree makes imports fall through to PYTHONPATH -- letting you verify a
+# DIFFERENT checkout than the file you are editing, with no warning. Assert.
+WORKTREE = os.path.dirname(os.path.abspath(__file__))
+assert os.path.isfile(
+    os.path.join(WORKTREE, "src", "CUT3R", "src", "train_cut3r_baseline.py")
+), f"not a my-da3 checkout: {WORKTREE}"
 if WORKTREE not in sys.path:
     sys.path.insert(0, WORKTREE)
 
@@ -38,7 +45,14 @@ from dust3r.losses import L21, Regr3DPose  # noqa: E402
 from dust3r.model import load_model  # noqa: E402
 from torch.utils.data._utils.collate import default_collate  # noqa: E402
 
-CKPT_ROOT = "/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse"
+# Was a bare literal that ignored $CKPT_ROOT, unlike every sbatch wrapper.
+CKPT_ROOT = os.environ.get(
+    "GRID_CKPT_ROOT",
+    os.path.join(
+        os.environ.get("CKPT_ROOT", "/gpfs/projects/etur59/koc821022/checkpoints"),
+        "captain_cut3r_sim3rmse",
+    ),
+)
 
 # label -> run dir; every arm probed at checkpoint-final (epoch 50) so the
 # comparison is epoch-uniform (the earlier one-off probes were ep20/30/40).
@@ -80,6 +94,8 @@ def probe_one(label, batches):
     cfg = {
         "mode": gru.mode, "input_mode": getattr(gru, "input_mode", "?"),
         "iters": iters, "img_feat": getattr(gru, "img_feat", "none"),
+        # SOURCE sub-lever; getattr'd so pre-lever checkpoints print "pooled".
+        "img_feat_src": getattr(gru, "img_feat_src", "pooled"),
         "img_feat_dim": int(getattr(gru, "img_feat_dim", 0)),
         "img_feat_frames": int(getattr(gru, "img_feat_frames", 0)),
         "hidden_dim": gru.hidden_dim, "ckpt": path,
