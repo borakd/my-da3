@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=captain_gru_overfit
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:lovelace_l40s:2
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=100G
 #SBATCH --time=48:00:00
 #SBATCH --output=logs/captain_gru_overfit_%A.out
 #SBATCH --error=logs/captain_gru_overfit_%A.err
@@ -16,25 +16,34 @@
 # with default config captain_gru_v2. Submit from the worktree root:
 #   sbatch train_captain_gru_overfit.sbatch                # -> captain_gru_v2
 #   sbatch train_captain_gru_overfit.sbatch <config_name>  # any other config
-# NOTE: source conda directly — ~/.bashrc line 1 is corrupted (fatal under set -e).
+# NOTE: source the conda hook directly so the job never depends on an interactive
+# shell rc. (On the old avg cluster ~/.bashrc line 1 was corrupted and fatal under
+# set -e; MN5's ~/.bashrc is clean, but sourcing the hook is still the right thing.)
 set -eo pipefail
 mkdir -p logs
 
 CONFIG_NAME=${1:-captain_gru_v2}
 
-source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
-cd /scratch/bdursun25/cuteanything/captain_gru_v3/src/CUT3R/src
+cd "$WT/src/CUT3R/src"
 
-export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
+export DL3DV_CACHE_DIR=/gpfs/scratch/etur59/koc821022/.dl3dv_cache
 # Full three-tree path (worktree root + src + src/CUT3R): src/CUT3R is REQUIRED for
 # the optional `eval.monodepth`/`eval.video_depth` import in the test loop — without
 # it, absrel/a1 depth metrics are silently skipped ("No module named 'eval'").
-WT=/scratch/bdursun25/cuteanything/captain_gru_v3
 export PYTHONPATH=$WT:$WT/src:$WT/src/CUT3R:${PYTHONPATH:-}
 export HYDRA_FULL_ERROR=1
-# PCIe P2P is broken on some avg nodes — without this, DDP init can hang with
-# all GPUs pinned at 100% util.
+# Kept from the avg cluster, where PCIe P2P was broken and DDP init hung with all
+# GPUs pinned at 100% util. UNVERIFIED on MN5 (NVLink H100s), where it may cost
+# throughput — flip it as a deliberate experiment, not as part of a path migration.
 export NCCL_P2P_DISABLE=1
 
 # Unique rendezvous port per job (default 29500 collides when two jobs share

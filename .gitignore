@@ -37,6 +37,12 @@ temp*.png
 /traj_plots
 *.sh
 !eval_pipeline/*.sh
+# Utilities that MUST be tracked. NB: the blanket `*.sh` above silently hides any
+# new root-level shell script from git (and from `grep -r`, which honours
+# .gitignore via the ugrep wrapper) -- add an exception here when you add one.
+!wandb_port_offline_runs.sh
+!sync_offline_run.sh
+!sync_all_offline_runs.sh
 
 # Ignore streaming version, takes unnecessary space
 da3_streaming/
@@ -45,3 +51,7 @@ da3_streaming/
 logs/
 checkpoints/
 src/CUT3R/config/old/
+
+# Local W&B working dir: offline runs plus a multi-MB debug-cli log. Runs are
+# ported to wandb.ai with sync_nomedia.sh, never committed.
+wandb/

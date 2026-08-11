@@ -346,4 +346,3 @@ dependencies:
       - yourdfpy==0.0.58
       - zipp==3.23.0
       - zstandard==0.25.0
-prefix: /home/bora/miniconda3/envs/cuteanything

@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=cut3r_multinode
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=5                       # <-- number of nodes
 #SBATCH --ntasks-per-node=1             # ONE srun task per node; accelerate spawns the per-GPU procs
-#SBATCH --gres=gpu:lovelace_l40s:4      # <-- GPUs per node
-#SBATCH --cpus-per-task=48              # ~12 cpus/gpu * 4 gpus
-#SBATCH --mem=480G
-#SBATCH --time=168:00:00
+#SBATCH --gres=gpu:4      # <-- GPUs per node
+#SBATCH --cpus-per-task=60              # ~12 cpus/gpu * 4 gpus   # was 48; MN5 derives mem from cores (8G/core) -> 480G ~= old --mem=480G
+#SBATCH --time=72:00:00   # was 168:00:00; acc_ehpc MaxWall is 3-00:00:00
 #SBATCH --output=logs/mn_%A.out
 #SBATCH --error=logs/mn_%A.err
 
@@ -33,9 +33,16 @@ CONFIG_NAME=${1:-cut3r_pointworld_droid}
 # the single-quoted body. Outer vars (NNODES, MASTER_*, CONFIG_NAME) are injected by concatenation.
 srun --ntasks="$NNODES" --ntasks-per-node=1 bash -c '
   set -euo pipefail
-  source ~/.bashrc
+  # Source the conda hook directly rather than ~/.bashrc: an interactive rc is not
+  # guaranteed to define `conda` in a non-interactive srun shell, and under set -e a
+  # non-zero return from it aborts the task before training starts.
+  source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
   conda activate cuteanything
+  # This is the one launcher that already honoured $SLURM_SUBMIT_DIR -- i.e. it always
+  # ran the checkout you submitted from. Kept, with a loud check added.
   cd "'"$SLURM_SUBMIT_DIR"'"
+  [ -f "src/CUT3R/src/train_cut3r_baseline.py" ] || {
+    echo "ERROR: submit dir is not a my-da3 checkout: $PWD" >&2; exit 1; }
   export PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:${PYTHONPATH:-}"
 
   echo "[node $SLURM_NODEID / host $(hostname)] launching $((1))-machine slice"

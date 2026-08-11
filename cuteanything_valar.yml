@@ -138,4 +138,3 @@ dependencies:
   - lerc=4.0.0
   - libdeflate=1.22
   - ipykernel
-prefix: /home/bdursun25/.conda/envs/cuteanything

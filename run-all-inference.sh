@@ -4,51 +4,58 @@
 # `conda activate` needs conda shell functions in non-interactive scripts
 eval "$(conda shell.bash hook)"
 conda activate cuteanything
-cd /scratch/bdursun25/cuteanything/my-da3
+# --- self-locating worktree -------------------------------------------------
+# Run the checkout this job was SUBMITTED from, never a hardcoded path, and fail
+# loudly if that is not a my-da3 tree. (Do not use ${BASH_SOURCE[0]} here: SLURM
+# copies the batch script to its spool dir, so it would not point at the repo.)
+WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+[ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+  echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+cd "$WT"
 
 # can
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_can_only/dl3dv_multi/can/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_can/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_can/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_can/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_can/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_can_only/dl3dv_multi/can/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_can_mvu/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_can_mvu/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_can_mvu/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_can_mvu/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python src/CUT3R/demo.py \
---model_path /scratch/bdursun25/cuteanything/checkpoints/cut3r_baselines/cut3r_overfit_can/checkpoint-final.pth \
+--model_path /gpfs/projects/etur59/koc821022/checkpoints/cut3r_baselines/cut3r_overfit_can/checkpoint-final.pth \
 --seq_path /scratch/bdursun25/cuteanything/scenes/robomimic_can_only/dl3dv_multi/can/demo_0/dense/rgb \
---output_dir /scratch/bdursun25/cuteanything/outputs/multiview_update/cut3r_overfit_can/final \
+--output_dir /gpfs/projects/etur59/koc821022/outputs/multiview_update/cut3r_overfit_can/final \
 --disable_viewer
 
 # lift
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_lift_only/dl3dv_multi/lift/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_lift/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_lift/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_lift/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_lift/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_lift_only/dl3dv_multi/lift/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_lift_mvu/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_lift_mvu/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_lift_mvu/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_lift_mvu/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python src/CUT3R/demo.py \
---model_path /scratch/bdursun25/cuteanything/checkpoints/cut3r_baselines/cut3r_overfit_lift/checkpoint-final.pth \
+--model_path /gpfs/projects/etur59/koc821022/checkpoints/cut3r_baselines/cut3r_overfit_lift/checkpoint-final.pth \
 --seq_path /scratch/bdursun25/cuteanything/scenes/robomimic_lift_only/dl3dv_multi/lift/demo_0/dense/rgb \
---output_dir /scratch/bdursun25/cuteanything/outputs/multiview_update/cut3r_overfit_lift/final \
+--output_dir /gpfs/projects/etur59/koc821022/outputs/multiview_update/cut3r_overfit_lift/final \
 --disable_viewer
 
 # square
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_square_only/dl3dv_multi/square/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_square/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_square/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_square/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_square/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python with_cut3r_v3.py \
 --input_path /scratch/bdursun25/cuteanything/scenes/robomimic_square_only/dl3dv_multi/square/demo_0/dense/rgb \
---output_path /scratch/bdursun25/cuteanything/outputs/multiview_update/ours_overfit_square_mvu/final \
---cut3r_model /scratch/bdursun25/cuteanything/checkpoints/our_model_mvu/ours_overfit_square_mvu/checkpoint-final.pth
+--output_path /gpfs/projects/etur59/koc821022/outputs/multiview_update/ours_overfit_square_mvu/final \
+--cut3r_model /gpfs/projects/etur59/koc821022/checkpoints/our_model_mvu/ours_overfit_square_mvu/checkpoint-final.pth
 PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH" python src/CUT3R/demo.py \
---model_path /scratch/bdursun25/cuteanything/checkpoints/cut3r_baselines/cut3r_overfit_square/checkpoint-final.pth \
+--model_path /gpfs/projects/etur59/koc821022/checkpoints/cut3r_baselines/cut3r_overfit_square/checkpoint-final.pth \
 --seq_path /scratch/bdursun25/cuteanything/scenes/robomimic_square_only/dl3dv_multi/square/demo_0/dense/rgb \
---output_dir /scratch/bdursun25/cuteanything/outputs/multiview_update/cut3r_overfit_square/final \
+--output_dir /gpfs/projects/etur59/koc821022/outputs/multiview_update/cut3r_overfit_square/final \
 --disable_viewer
 
 # tool hang

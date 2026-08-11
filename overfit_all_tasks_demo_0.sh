@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=cut3r_train
-#SBATCH --account=avg                  # From your alias: -A avg
-#SBATCH --partition=avg                # From your alias: -p avg
+#SBATCH --account=etur59                  # From your alias: -A avg
+#SBATCH --partition=acc                # From your alias: -p avg
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=1                      # Standard for single-node tasks
 #SBATCH --ntasks=1                     # From your alias: --ntasks-per-node=1
-#SBATCH --cpus-per-task=12             # From your alias: --cpus-per-task=12
-#SBATCH --mem=120G                     # From your alias: --mem=120G
-#SBATCH --time=168:00:00               # From your alias: --time=168:00:00
-#SBATCH --gres=gpu:lovelace_l40s:1     # From your alias: Request 1 L40S GPU
+#SBATCH --cpus-per-task=15             # From your alias: --cpus-per-task=12   # was 12; MN5 derives mem from cores (8G/core) -> 120G ~= old --mem=120G
+#SBATCH --time=72:00:00               # From your alias: --time=168:00:00   # was 168:00:00; acc_ehpc MaxWall is 3-00:00:00
+#SBATCH --gres=gpu:1     # From your alias: Request 1 L40S GPU
 #SBATCH --array=1-15                   # Spawns 15 jobs for the 15 lines in the text file
 #SBATCH --output=logs/job_%A_%a.out    # Master Job ID (%A) and Array Task ID (%a)
 #SBATCH --error=logs/job_%A_%a.err

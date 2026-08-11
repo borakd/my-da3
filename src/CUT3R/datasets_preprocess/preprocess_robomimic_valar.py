@@ -1,6 +1,6 @@
 # Preprocess Robomimic ground truth and convert to DL3DV_Multi on VALAR
 # WARNING: some parameters are hard-coded, this file was designed to be run from:
-#       /scratch/bdursun25/cuteanything/my-da3
+#       /gpfs/home/koc/koc821022/my-da3
 # with:
 #       python src/CUT3R/datasets_preprocess/preprocess_robomimic_valar.py \
 #       --input_dir "scratch/bdursun25/robomimic_dataset" \

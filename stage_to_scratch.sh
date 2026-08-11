@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=stage_pw
-#SBATCH --account=avg
-#SBATCH --partition=avg
-#SBATCH --gres=gpu:lovelace_l40s:4   # batch equivalent of your l40s4 alias: claims a full l40s node
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
+#SBATCH --gres=gpu:4   # batch equivalent of your l40s4 alias: claims a full l40s node
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48           # all 48 CPUs on the l40s node (CPUTot=48)
-#SBATCH --mem=450G                   # matches l40s4 alias
+#SBATCH --cpus-per-task=57           # all 48 CPUs on the l40s node (CPUTot=48)   # was 48; MN5 derives mem from cores (8G/core) -> 456G ~= old --mem=450G
 #SBATCH --time=24:00:00
 # NOTE: the 4 GPUs sit idle during the copy (it needs none) — the deliberate tradeoff for
 # grabbing one full dedicated node so all 48 CPUs + the node's NIC are yours for the transfer.

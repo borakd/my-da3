@@ -187,7 +187,6 @@ dependencies:
       - cycler==0.12.1
       - dash==3.3.0
       - decorator==4.4.2
-      - depth-anything-3==0.0.0
       - distlib==0.4.0
       - durationpy==0.10
       - e3nn==0.5.9
@@ -365,4 +364,3 @@ dependencies:
       - yourdfpy==0.0.58
       - zipp==3.23.0
       - zstandard==0.25.0
-prefix: /home/bdursun25/.conda/envs/cuteanything

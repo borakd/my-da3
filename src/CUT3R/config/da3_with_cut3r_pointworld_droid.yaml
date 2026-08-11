@@ -60,7 +60,7 @@ keep_freq: 10
 print_freq: 10
 print_img_freq: 200
 num_imgs_vis: 4
-save_dir: '/scratch/bdursun25/cuteanything/checkpoints/cut3r_overfit'
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/cut3r_overfit'
 exp_name: 'finetune_da3_withcut3r_wrist_2gpus'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs

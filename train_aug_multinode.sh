@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=cut3r_aug_mn
-#SBATCH --account=avg
-#SBATCH --partition=avg
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
 #SBATCH --nodes=5                       # 5 nodes
 #SBATCH --ntasks-per-node=1             # ONE srun task per node; accelerate spawns the 4 per-GPU procs
-#SBATCH --gres=gpu:lovelace_l40s:4      # 4 L40S GPUs per node  -> 20 GPUs total
-#SBATCH --cpus-per-task=48              # full node: 4 GPUs * 10 num_workers (40) + main procs/pin threads
-#SBATCH --mem=450G
-#SBATCH --time=168:00:00
+#SBATCH --gres=gpu:4      # 4 GPUs per node (H100 on MN5 acc) -> 20 GPUs total
+#SBATCH --cpus-per-task=57              # full node: 4 GPUs * 10 num_workers (40) + main procs/pin threads.
+                                        # was 48; MN5 derives memory from cores (8G/core) -> 456G ~= old --mem=450G
+#SBATCH --time=72:00:00   # was 168:00:00; acc_ehpc MaxWall is 3-00:00:00
 #SBATCH --output=logs/aug_mn_%A.out
 #SBATCH --error=logs/aug_mn_%A.err
 
@@ -38,14 +39,26 @@ srun --ntasks="$NNODES" --ntasks-per-node=1 bash -c '
   # NOTE: no "-u" (nounset) here — conda env activation scripts (e.g. the MKL
   # libblas_mkl_activate.sh) reference unset vars and would abort under nounset.
   set -eo pipefail
-  # Source conda directly (NOT ~/.bashrc: its line 1 is corrupted ("\# .bashrc") and
-  # returns 127, which under set -e aborts the task before training starts).
-  source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+  # Source the conda hook directly so the job never depends on an interactive rc.
+  source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
   conda activate '"$CONDA_ENV"'
-  cd /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src
 
-  export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
-  export PYTHONPATH=/scratch/bdursun25/cuteanything/my-da3:${PYTHONPATH:-}
+  # --- self-locating worktree -----------------------------------------------
+  # Run the checkout this job was SUBMITTED from, never a hardcoded path, and
+  # fail loudly if that is not a my-da3 tree. $SLURM_SUBMIT_DIR is propagated to
+  # every node by srun. (Not ${BASH_SOURCE[0]}: SLURM runs a spool copy.)
+  WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+  [ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+    echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+  cd "$WT/src/CUT3R/src"
+
+  export DL3DV_CACHE_DIR=/gpfs/scratch/etur59/koc821022/.dl3dv_cache
+  # WARNING: ONE entry only (worktree root). This is the documented bug that
+  # silently drops the absrel/a1 depth metrics -- src/CUT3R is missing, so the
+  # optional eval.monodepth import in the trainer fails inside a try/except.
+  # Left at its original arity ON PURPOSE: changing which trees dust3r resolves
+  # from is a behaviour change, not a path migration. Fix it deliberately.
+  export PYTHONPATH=$WT:${PYTHONPATH:-}
   export HYDRA_FULL_ERROR=1
   # If rendezvous hangs at startup, pin the NCCL interface (find it via `ip addr` on a node):
   # export NCCL_SOCKET_IFNAME=ib0

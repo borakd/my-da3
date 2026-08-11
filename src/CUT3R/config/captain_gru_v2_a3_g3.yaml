@@ -12,7 +12,7 @@
 # G3=both. See captain_gru_v2_grid_README.md.
 # ============================================================================
 model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
-pretrained: /scratch/bdursun25/cuteanything/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
 load_only_encoder: False
 long_context: True
 fixed_length: False
@@ -94,15 +94,13 @@ pose_gru_lr_scale: 100.0
 pose_gru_bptt: True
 pose_gru_e2e: True
 
-# ONE TEST SCENE
-# train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
-# test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
-
-# FULL DATASET
+# ONE TEST SCENE -- a single 672-frame DROID wrist episode, NOT the full
+# dataset. (The block previously labelled '# FULL DATASET' here was
+# byte-identical to this one; the duplicate has been removed.)
 train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
 test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist_test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling}, feed_gt_ray_map=${feed_gt_ray_map}, feed_prev_gt_ray_map=${feed_prev_gt_ray_map})'
 
-# 38633 4292
+# (38633 / 4292 are the FULL-split scene counts -- not used by this arm.)
 train_dataset: 672 @ ${train_data}
 test_dataset: 672 @ ${test_data}
 
@@ -137,7 +135,7 @@ keep_freq: 10
 print_freq: 10
 print_img_freq: 200
 num_imgs_vis: 4
-save_dir: '/scratch/bdursun25/cuteanything/checkpoints/captain_cut3r_sim3rmse'
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_sim3rmse'
 exp_name: 'captain_gru_v2_a3_g3'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs

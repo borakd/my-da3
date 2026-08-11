@@ -1,14 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=captain_gru_mn
-#SBATCH --account=avg
-#SBATCH --partition=avg
-#SBATCH --nodes=6                       # 6 nodes x 3 GPUs = 18 GPUs (20 not claimable: avg is fragmented)
+#SBATCH --account=etur59
+#SBATCH --partition=acc
+#SBATCH --qos=acc_ehpc
+#SBATCH --nodes=6                       # 6 nodes x 3 GPUs = 18 GPUs (world size KEPT at 18 so
 #SBATCH --ntasks-per-node=1             # ONE srun task per node; accelerate spawns the 3 per-GPU procs
-#SBATCH --gres=gpu:3                    # untyped: mixes lovelace_l40s (ai29/30/32/33) + rtx_a6000 (ai15/17), both 48GB
-#SBATCH --nodelist=ai15,ai17,ai29,ai30,ai32,ai33
-#SBATCH --cpus-per-task=24              # capped by ai17 (24 cores total); pair with num_workers=7 (3*7+3 <= 24)
-#SBATCH --mem=250G                      # ai15 has ~368G free (partially occupied) — stay well under
-#SBATCH --time=168:00:00
+#SBATCH --gres=gpu:3                    # results stay comparable to the avg-cluster runs; MN5 acc
+                                        # nodes have 4 GPUs, so 5x4 would also give 20 -- see NOTE)
+#SBATCH --cpus-per-task=32              # was 24 (capped by the old ai17's 24 cores); raised because MN5
+                                        # derives memory from cores (8G/core) -> 256G ~= the old --mem=250G.
+                                        # num_workers=7 below still fits (3*7+3 <= 32).
+#SBATCH --time=72:00:00   # was 168:00:00; acc_ehpc MaxWall is 3-00:00:00
 #SBATCH --output=logs/captain_gru_mn_%A.out
 #SBATCH --error=logs/captain_gru_mn_%A.err
 # Identical launch recipe to captain_ray's train_captain_ray_18gpu.sh (the
@@ -16,6 +18,13 @@
 # default config captain_gru_v2. Submit from the worktree root:
 #   sbatch train_captain_gru_18gpu.sh                # -> captain_gru_v2
 #   sbatch train_captain_gru_18gpu.sh <config_name>  # any other config
+#
+# NOTE(mn5): the old --nodelist=ai15,ai17,ai29,ai30,ai32,ai33 was REMOVED (those
+# nodes do not exist on MareNostrum5 and the job would never schedule). The 6x3
+# topology is otherwise kept verbatim: MN5 acc nodes are a uniform 4xH100, so
+# 5 nodes x 4 GPUs would be the natural shape, but that changes the world size
+# from 18 to 20 and with it the global batch size and effective LR schedule.
+# Retuning that is a science decision, not a migration one -- do it deliberately.
 
 set -euo pipefail
 mkdir -p logs
@@ -42,20 +51,28 @@ srun --ntasks="$NNODES" --ntasks-per-node=1 bash -c '
   # NOTE: no "-u" (nounset) here — conda env activation scripts (e.g. the MKL
   # libblas_mkl_activate.sh) reference unset vars and would abort under nounset.
   set -eo pipefail
-  # Source conda directly (NOT ~/.bashrc: its line 1 is corrupted ("\# .bashrc") and
-  # returns 127, which under set -e aborts the task before training starts).
-  source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+  # Source the conda hook directly so the job never depends on an interactive rc.
+  source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
   conda activate '"$CONDA_ENV"'
-  cd /scratch/bdursun25/cuteanything/captain_gru_v3/src/CUT3R/src
 
-  export DL3DV_CACHE_DIR=/scratch/bdursun25/cuteanything/.dl3dv_cache
+  # --- self-locating worktree -----------------------------------------------
+  # Run the checkout this job was SUBMITTED from, never a hardcoded path, and
+  # fail loudly if that is not a my-da3 tree. $SLURM_SUBMIT_DIR is propagated to
+  # every node by srun. (Not ${BASH_SOURCE[0]}: SLURM runs a spool copy.)
+  WT="${WT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+  [ -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ] || {
+    echo "ERROR: \$WT is not a my-da3 checkout: $WT" >&2; exit 1; }
+  cd "$WT/src/CUT3R/src"
+
+  export DL3DV_CACHE_DIR=/gpfs/scratch/etur59/koc821022/.dl3dv_cache
   # Full three-tree path: src/CUT3R is required for the optional eval.monodepth
   # import (absrel/a1 depth metrics) — silently skipped without it.
-  WT=/scratch/bdursun25/cuteanything/captain_gru_v3
   export PYTHONPATH=$WT:$WT/src:$WT/src/CUT3R:${PYTHONPATH:-}
   export HYDRA_FULL_ERROR=1
-  # PCIe P2P is broken on some avg nodes (ai15 confirmed, kernel 4.18) — without this,
-  # DDP init hangs with all GPUs pinned at 100% util.
+  # Kept from the avg cluster, where PCIe P2P was broken (ai15, kernel 4.18) and
+  # DDP init hung with all GPUs at 100% util. UNVERIFIED on MN5 (NVLink H100s),
+  # where it may cost throughput — change it as a deliberate experiment, not as
+  # part of the path migration.
   export NCCL_P2P_DISABLE=1
   # If rendezvous hangs at startup, pin the NCCL interface (find it via `ip addr` on a node):
   # export NCCL_SOCKET_IFNAME=ib0

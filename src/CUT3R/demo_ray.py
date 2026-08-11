@@ -99,7 +99,12 @@ def parse_args():
     parser.add_argument(
         "--seq_path",
         type=str,
-        default="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist/dl3dv_multi/AUTOLab+0d4edc83+2023-10-21-19h-06m-10s/18026681+wrist/dense/rgb",
+        default=os.environ.get(
+            "DEMO_SEQ_PATH",
+            # MN5 default; the old /frozen wrist store is not on this cluster.
+            "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi/"
+            "wrist/AUTOLab+0d4edc83+2023-10-21-19h-11m-38s/dense/rgb",
+        ),
         help="Path to the directory containing the image sequence.",
     )
     parser.add_argument(
@@ -123,6 +128,19 @@ def parse_args():
         "the checkpoint's PoseGRU refiner active (all its hyperparameters are "
         "restored from the ckpt), 'none' = no ray conditioning, exactly demo.py "
         "(regular CUT3R checkpoints; needs no pose files).",
+    )
+    parser.add_argument(
+        "--oracle",
+        type=str,
+        default="off",
+        choices=["off", "gt"],
+        help="pose_gru_oracle run mode (DIAGNOSTIC, not an arm): 'gt' feeds the "
+        "GRU the CURRENT view's GT pose instead of the fed-back prediction — "
+        "requires --conditioning prev_pred_gru and a pose stream (the GT "
+        "camera_pose goes into the views). A correctly wired zero-init residual "
+        "GRU is then an exact pass-through. Default 'off' = honest closed loop, "
+        "even for checkpoints TRAINED with the oracle (a loud warning is printed "
+        "for those either way).",
     )
     parser.add_argument(
         "--device",
@@ -199,8 +217,12 @@ def load_frames_training_style(img_paths, pose_path, size):
     a multiple of 16 — for the 320x180 DROID frames at size=320 this is exactly
     the 320x192 training resolution.
 
-    Returns (images, ray_maps): load_images-style dicts and (1, H, W, 6)
-    float32 tensors, in image order.
+    Returns (images, ray_maps, intrinsics_list, poses): load_images-style
+    dicts, (1, H, W, 6) float32 ray maps, (1, 3, 3) intrinsics and (1, 4, 4)
+    GT c2w poses, all in image order. The poses are what the ray maps were
+    built from — hand them to prepare_input(gt_poses=...) so the views carry
+    real GT camera_pose (required by the pose_gru_oracle diagnostic; inert
+    data for every honest arm).
     """
     from src.dust3r.datasets.base.base_multiview_dataset import get_ray_map
     from src.dust3r.datasets.utils.transforms import ImgNorm
@@ -210,6 +232,7 @@ def load_frames_training_style(img_paths, pose_path, size):
     images = []
     ray_maps = []
     intrinsics_list = []
+    poses = []
     for i, img_path in enumerate(img_paths):
         base = os.path.splitext(os.path.basename(img_path))[0]
         npz_path = os.path.join(pose_path, base + ".npz")
@@ -234,6 +257,7 @@ def load_frames_training_style(img_paths, pose_path, size):
         ray_map = get_ray_map(ref_pose, pose, K, th, tw).astype(np.float32)
         ray_maps.append(torch.from_numpy(ray_map).unsqueeze(0))  # (1, H, W, 6)
         intrinsics_list.append(torch.from_numpy(K).unsqueeze(0))  # (1, 3, 3)
+        poses.append(torch.from_numpy(pose).unsqueeze(0))  # (1, 4, 4) GT c2w
         images.append(
             dict(
                 img=ImgNorm(img)[None],
@@ -242,10 +266,10 @@ def load_frames_training_style(img_paths, pose_path, size):
                 instance=str(i),
             )
         )
-    return images, ray_maps, intrinsics_list
+    return images, ray_maps, intrinsics_list, poses
 
 
-def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
+def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt", gt_poses=None):
     """
     Prepare input views for inference. Every view carries its image; the ray
     conditioning depends on the mode:
@@ -267,6 +291,13 @@ def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
         ray_maps (list): Per-frame (1, H, W, 6) GT ray maps, same order.
         intrinsics_list (list): Per-frame (1, 3, 3) intrinsics, same order.
         conditioning (str): "gt", "prev_gt", "prev_pred" or "prev_pred_gru".
+        gt_poses (list|None): Per-frame (1, 4, 4) GT c2w poses (the 4th return
+            of load_frames_training_style). When given, each view carries its
+            REAL camera_pose instead of an identity placeholder — required by
+            the pose_gru_oracle diagnostic (model.pose_gru_oracle='gt', which
+            reads views[x]['camera_pose'] via gt_pose_encoding) and inert data
+            for every honest arm (the model never reads camera_pose otherwise;
+            losses are not run at inference).
 
     Returns:
         list: A list of view dictionaries.
@@ -299,7 +330,14 @@ def prepare_input(images, ray_maps, intrinsics_list, conditioning="gt"):
             "true_shape": torch.from_numpy(images[i]["true_shape"]),
             "idx": i,
             "instance": str(i),
-            "camera_pose": torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(0),
+            # Real GT pose when the caller provides it (oracle-capable views);
+            # identity placeholder otherwise. Only the pose_gru_oracle path
+            # ever reads this at inference.
+            "camera_pose": (
+                gt_poses[i].float()
+                if gt_poses is not None
+                else torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(0)
+            ),
             # Needed by feed_prev_pred's in-loop ray-map builder; harmless
             # (unused by the model) in the other modes.
             "camera_intrinsics": intrinsics_list[i],
@@ -517,17 +555,19 @@ def run_inference(args):
 
         print(f"Found {len(img_paths)} images in {args.seq_path}.")
         print(f"Loading frames + GT poses from {pose_path} (training-style crop)...")
-        images, ray_maps, intrinsics_list = load_frames_training_style(
+        images, ray_maps, intrinsics_list, gt_poses = load_frames_training_style(
             img_paths, pose_path, args.size
         )
 
-        # Prepare input views.
+        # Prepare input views. The GT poses ride along as plain data so the
+        # views are oracle-capable; no honest arm reads them.
         print("Preparing input views...")
         views = prepare_input(
             images=images,
             ray_maps=ray_maps,
             intrinsics_list=intrinsics_list,
             conditioning=args.conditioning,
+            gt_poses=gt_poses,
         )
         if args.conditioning == "gt":
             print(
@@ -576,7 +616,15 @@ def run_inference(args):
             f"PoseGRU active (from ckpt): mode={gru.mode}, input={gru.input_mode}, "
             f"hidden_dim={gru.hidden_dim}, img_feat={gru.img_feat}"
             + (
-                f" (dim={gru.img_feat_dim}, frames={gru.img_feat_frames})"
+                # img_feat_dim is the APPENDED cell width: the projector dim
+                # when proj=True, the full src_dim*blocks width when proj=False
+                # (blocks == frames for every source but corr, which is a
+                # pair statistic: frames=2 semantically, ONE appended block).
+                # src is the SOURCE sub-lever (pooled/resnet18/dinov2_vits14/
+                # corr) — getattr'd so pickled pre-lever modules still print.
+                f" (src={getattr(gru, 'img_feat_src', 'pooled')}, "
+                f"appended={gru.img_feat_dim}, frames={gru.img_feat_frames}, "
+                f"proj={gru.img_feat_proj})"
                 if gru.img_feat == "input"
                 else ""
             )
@@ -591,6 +639,44 @@ def run_inference(args):
             "— disabling the GRU for this run (GRU-less ablation)."
         )
         model.pose_gru = None
+
+    # Run-mode cross-checks against how the checkpoint was TRAINED (stashed on
+    # the net by load_model from ckpt['args']). Mismatches are legal ablations,
+    # but never silent ones.
+    trained_cond = getattr(model, "trained_conditioning", "none")
+    if trained_cond != args.conditioning:
+        print(
+            f"WARNING: checkpoint was trained with conditioning "
+            f"'{trained_cond}' but this run uses '{args.conditioning}' — an "
+            "out-of-distribution probe, not the checkpoint's honest arm. "
+            "Label the results accordingly."
+        )
+    trained_oracle = getattr(model, "trained_pose_gru_oracle", "off")
+    if args.oracle == "gt":
+        # DIAGNOSTIC: GT pose at the GRU input. Needs the refiner active and
+        # views that carry REAL GT camera_pose (prepare_input(gt_poses=...) —
+        # every conditioned mode above builds them; 'none' fills identities,
+        # which would make the "oracle" silently feed identity poses).
+        assert args.conditioning == "prev_pred_gru", (
+            "--oracle gt refines the GRU input — it requires "
+            "--conditioning prev_pred_gru"
+        )
+        model.pose_gru_oracle = "gt"
+        print(
+            "*** pose_gru_oracle=gt — DIAGNOSTIC RUN, NOT an arm. GT pose is "
+            "injected at the GRU input (views carry the real GT camera_pose); "
+            "a zero-init residual GRU is an exact pass-through. Outputs are "
+            "GT-derived — never compare against honest runs. ***"
+        )
+    elif trained_oracle != "off":
+        print(
+            f"WARNING: checkpoint was TRAINED with pose_gru_oracle="
+            f"'{trained_oracle}' (GT-injection diagnostic arm) but this run "
+            "keeps the oracle OFF: the GRU now sees predicted poses it never "
+            "trained on. Honest-loop metrics of an oracle-trained arm are an "
+            "out-of-distribution probe (pass --oracle gt to reproduce the "
+            "training-time wiring)."
+        )
     model.eval()
 
     # Run inference.
