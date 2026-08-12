@@ -1174,11 +1174,51 @@ the right quantity. `cos²` materially > 0 while `e_probe > e_vel` ⇒ the probe
 is informative and the premise test measured the wrong thing. Costs three
 extra logged scalars per view on the same minutes-long rollout.
 
-**OPERATIONAL — dead-falsifier window.** `POSE_GRU_PROBE_SHUFFLE` is a NO-OP
-while `cell.weight_ih[:, 14:21]` is zero-init: a zero-weight channel is immune
-to a shuffled input. Check the column norm BEFORE falsifying. This generalizes
-to every zero-init channel this program adds (same trap the R8 header flags
-for `POSE_GRU_FORCE_ITERS` under a locked zero-init head).
+**THE DECIDING NUMBER IS PARTIAL, NOT MARGINAL.** `cos²_probe > cos²_vel` is
+NOT sufficient: both are marginal fits and the two proposals overlap, since
+the probe and velocity both partly encode inter-frame motion. A probe can
+score a higher marginal cos² while adding nothing the cell cannot already get
+from Δ — the trajectory-only ceiling restated in new units, which is the
+confusion this program keeps re-hitting. The P4.3-specific claim is
+INCREMENTAL:
+
+    minimize over (a,b):  |w − a·u_vel − b·u_probe|²
+    R²_joint = [S_vw S_pw] G⁻¹ [S_vw S_pw]ᵀ / S_ww ,  G = [[S_vv, S_vp],[S_vp, S_pp]]
+    **ΔR² = R²_joint − cos²_vel**   ← P4.3 lives or dies here
+
+Six pooled scalars per band, and the load-bearing one is the cross term
+`S_vp = <u_vel, u_probe>` — without it the joint fit is not identifiable and
+ΔR² cannot be recovered after the fact. Pre-registered reading:
+
+- **ΔR² ≈ 0 mid/late** ⇒ the probe is REDUNDANT with velocity. P4.3 refuted on
+  the right quantity and for the right reason — the observation carries
+  nothing the trajectory lacks. A cleaner negative than the magnitude result.
+- **ΔR² materially > 0** ⇒ drift-correlated signal no trajectory-only
+  corrector can reach. ΔR² is then literally the headroom ABOVE the ≤20–25%
+  ceiling, in the same units.
+- **cos²_probe large with ΔR² ≈ 0 is the trap.** Always report both.
+
+Guard: near-collinear `u_vel`/`u_probe` makes G singular — which is itself the
+ΔR² ≈ 0 finding. Report `S_vp/√(S_vv·S_pp)` and refuse to invert past |corr|
+> 0.99.
+
+Pool per band (`a* = ΣS_uw/ΣS_uu`), never mean-of-per-sample-cos²: the latter
+is a per-sample ORACLE gain, a looser bound than any deployable corrector.
+Rotation via the log map with `w ≥ 0` quaternion standardization so the double
+cover cannot flip the axis. Form `u` and `w` AFTER per-side scale
+normalization — `u` is pred-side while `w` mixes pred- and GT-side, so raw
+inner products put the ~4.8× head/GT mismatch straight into the numerator, and
+a scale offset along the GT direction INFLATES `<u,w>` rather than cancelling.
+That would manufacture a false positive, the worst available failure here.
+
+**PROGRAM-LEVEL RULE — the dead-falsifier window.** EVERY zero-init channel
+this program adds has a window in which its own falsifier reports "unused"
+regardless of whether the mechanism works: a zero-weight channel is immune to
+a shuffled input. `POSE_GRU_PROBE_SHUFFLE` is a no-op while
+`cell.weight_ih[:, 14:21]` is zero, exactly as `POSE_GRU_FORCE_ITERS` is under
+a locked zero-init head. Applies to `img_proj`, the residual head, the ray
+gate's bias, and the probe columns. **The weight-norm check must precede the
+falsifier**, always.
 
 **Scoreability:** `pose_gru_refine_passes` / `pose_gru_probe_every` must be
 registered in `preflight_ckpt.py`'s lever list — but only AFTER the load path
