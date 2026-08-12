@@ -188,6 +188,39 @@ spread. That single number retro-calibrates every comparison ever made here
 and decides whether any of the queued arms are worth running at all. Spending
 19h on a lever control before knowing the noise floor risks measuring nothing.
 
+#### PRE-REGISTERED: the harness-determinism re-score must run FIRST
+
+**Authorized by the user 2026-08-12 16:xx; ~1h on 8 nodes; NO training slot.**
+Re-score an already-scored checkpoint under a fresh label, changing nothing
+else. This decomposes the 0.00281 arm-to-arm scatter into the two sources it
+currently conflates, and it gates the 19h replicate: if the scoreboard is not
+deterministic, a seed replicate measures training variance PLUS harness
+variance and cannot isolate either.
+
+**The reading is fixed here, before the number lands, so neither side can move
+the goalposts afterwards:**
+
+- **Per-scene ATE reproduces EXACTLY on 4292/4292 scenes** → harness/sharding/
+  claim-order noise is identically zero, and 100% of the arm-to-arm scatter is
+  attributable to training. The 0.00281 median becomes a clean statement about
+  training variance, and the seed replicate is then the ONLY instrument that
+  can calibrate it. Proceed to the replicate.
+- **Per-scene ATE does NOT reproduce** → this is the more urgent finding and it
+  outranks every queued arm. It would mean the scoreboard itself is
+  nondeterministic, that all 12 rows in `averages_table.csv` carry an unmeasured
+  harness term, and that every lever attribution ever made on this program —
+  including the ones this document treats as settled — is confounded by it. In
+  that case: STOP arming new evals, quantify the harness term first, and do not
+  spend a 19h training slot until it is bounded.
+- **Ambiguous middle** (reproduces on most scenes, differs on a few): report
+  the per-scene diff distribution, NOT a mean. A handful of large per-scene
+  disagreements and a uniform small jitter are different failures with
+  different causes, and the mean hides both.
+
+Do NOT read a reproducing re-score as evidence that any arm result is real. It
+bounds harness noise only; the training-variance term stays unmeasured until
+the replicate runs.
+
 **Correction to an earlier framing in this document:** the 4.1611 aux-weight
 factor was NOT "silent". The `captain_gru_v3_a4_g3_r8_finetune.yaml` header
 already documents it and even names `pose_gru_loss_weight=0.2403` as the
@@ -225,8 +258,11 @@ Read this table before anything else:
   of the C→B ATE gap at a 54.2% win rate — a real but tiny majority.
 - **R8 (iters=8) is the only lever that helped**; F1 pooled features hurt
   (39.2%), consistent with the analysis' shift-invariant-pooling finding.
-- Arms `f1c` (corr), `f1d` (DINOv2) and `f1r` (resnet18) are **training now**
-  and are not in this table yet.
+- Arms `f1c` (corr), `f1d` (DINOv2) and `f1r` (resnet18) **have since finished
+  and been scored at 4292 scenes** — see the experiment-state section for the
+  rows and their two confounds. They land at ATE 0.0799–0.0822, a spread of
+  0.0023 that is at or below the arm-to-arm noise floor, so they do not rank
+  their feature sources. All three also inherited `img_feat_proj=True`.
 
 The analysis' own 50-sequence subset ladder (A 0.001745/0.574°, B
 0.000822/0.177°, C 0.001866/0.609°, D 0.001982/0.633°, E 0.002031/0.606°,
@@ -1571,14 +1607,89 @@ harness the plan invokes. Verified 39/39 exact on 2026-08-11. An `UNRESOLVED`
 line means the code around that anchor genuinely changed — re-read that
 region before editing, never edit blind.
 
-### Experiment state as of 2026-08-11 19:00 (verify before acting)
+### Experiment state as of 2026-08-12 16:30 (verify before acting)
 
-- **Running**: three 8-node finetunes — `f1c` (job 44504130, epoch 10/50),
-  `f1d` (44496323, epoch 21/50), `f1r` (44496322, epoch 21/50). Do not
-  resubmit or touch their run dirs.
-- **Finished and scored** (rows in `averages_table.csv`): `gru_a4g3`,
+- **Running**: two 8-node finetunes — `f1r_r8_noproj` (job 44521973) and
+  `f1d_r8_noproj` (44521974), launched ~10:00 2026-08-12 at the user's direct
+  request, ~2d18h remaining. Each is an exact re-run of its projected twin
+  with ONE key added (`pose_gru_img_feat_proj: False`); verified mechanically
+  as 73→74 yaml keys, zero removals, `exp_name` the only other change. Runtime
+  wiring confirmed from the logs: f1r cell input 1038 (14 + 2×512, resnet18),
+  f1d 782 (14 + 2×384, dinov2_vits14), both `proj=False`, R8 preserved
+  (iters=8, γ=0.8), lr 1e-5, 32 GPUs, no new-code paths active. Both are armed
+  and will score automatically. Their configs are still UNTRACKED:
+  `src/CUT3R/config/captain_gru_v3_a4_g3_f1{r,d}_r8_noproj_finetune.yaml`.
+  Also running: `p43_premise` (44536126), a P4.3 diagnostic, not an arm.
+- **`f1c` / `f1d` / `f1r` are FINISHED — this file said "training now" until
+  2026-08-12 and was wrong.** All three completed 50 epochs in a SINGLE
+  contiguous segment (verified: one `Start training` line each, 51 log rows,
+  a `Training time` line each): f1r 19:46:11 and f1d 19:45:55, both ending
+  06:23 2026-08-12; f1c 19:32:45, ending 10:23 2026-08-12. All three are now
+  scored at 4292/4292 scenes.
+- **Finished and scored** (rows in `averages_table.csv`, now 12): `gru_a4g3`,
   `gru_a4g3f1`, `gru_a4g3r8`, `gru_a4g3f1r8`, `gru_a4g3f0np`, `gru_a4g3f1np`,
-  plus baselines `augfull_lr1e5` / `gtray_lr1e5` / `prevpred_lr1e5`.
+  `gru_a4g3f1rr8`, `gru_a4g3f1dr8`, `gru_a4g3f1cr8`, plus baselines
+  `augfull_lr1e5` / `gtray_lr1e5` / `prevpred_lr1e5`.
+
+  | arm | absrel | a1 | ATE | rpe_t | rpe_rot | feature source |
+  |---|---|---|---|---|---|---|
+  | `gru_a4g3f1rr8` | 0.1979 | 0.7609 | 0.0822 | 0.0089 | 1.2566 | ResNet-18 |
+  | `gru_a4g3f1dr8` | 0.2000 | 0.7577 | 0.0812 | 0.0087 | 1.2334 | DINOv2-S |
+  | `gru_a4g3f1cr8` | 0.1989 | 0.7579 | 0.0799 | 0.0090 | 1.2016 | corr stats |
+
+  All three: 4292/4292 scenes, 0 orphan claims, all workers rc=0,
+  `conditioning=prev_pred_gru`, no falsifier env leakage.
+
+  **READ BOTH CONFOUNDS BEFORE USING THIS TABLE.** (1) The total ATE spread
+  across all three feature sources is ≤0.0023 — at or below the median
+  arm-to-arm scatter of 0.00281, so per the noise-floor warning these three
+  rows do NOT rank their feature sources. (2) None of the three configs sets
+  `pose_gru_img_feat_proj`, so all inherited the default `True` and every
+  encoder was squeezed through the zero-init 32-D projector (DINOv2
+  2×384→32 is a 24:1 bottleneck). "DINOv2 is no better than pooled" therefore
+  does NOT separate feature quality from the bottleneck — that is what the two
+  running noproj arms exist to test.
+
+- **Trainer-side test loss, same three arms** (`loss_avg`, best epoch and
+  epochs 41–50 mean). This is the trainer's 4-view test metric and is a
+  DIFFERENT quantity from the 4292-scene harness ATE above — do not
+  cross-read the two:
+
+  | arm | best `loss_avg` | @epoch | tail-10 mean |
+  |---|---|---|---|
+  | `f1r` (resnet18) | 2.6009 | 47 | 3.065 |
+  | `f1d` (dinov2) | 2.6673 | 47 | 3.116 |
+  | `f1_r8` (pooled, proj) | 2.8281 | 47 | 3.140 |
+  | **`r8` (F-OFF control)** | **2.5725** | 27 | **2.794** |
+
+  Within R8 — identical iters, γ, LR, schedule, criterion strings and test set
+  — **the F-off control beats all three projected image-feature arms** on both
+  best-epoch and tail-10 mean. Adding a projected image feature at R8 cost
+  ~0.27–0.35 test loss. resnet18 vs dinov2 are indistinguishable: 7/6
+  metric-by-metric split, and the e47 gap of 0.066 sits well inside either
+  run's tail-10 stdev (±0.261, ±0.296).
+
+- **THREE LOG-READING HAZARDS, verified, that corrupt any naive arm
+  comparison** (found 2026-08-12):
+  1. `f0_noproj` (FOUR `Start training` lines, i.e. 3 restarts; duplicate
+     epoch rows at 2 and 50), `f1_finetune` and base `_finetune` (2 segments
+     each, duplicate at 40) have RESTARTS in `log.txt`. Their `Training time`
+     line covers only the FINAL segment. Resolve duplicates by taking the LAST
+     row per epoch, or you double-count and mix segments.
+  2. **`best loss_avg` is not a like-for-like statistic across arms.** `base`
+     (2.121), `f0_noproj` (2.293) and `oracle32` (1.825) all have their best at
+     **epoch 1** — an early-training value, not a converged one. Any arm-to-arm
+     gap computed off best-epoch inherits this, independent of seed variance.
+  3. **`orig/loss_avg` does not discriminate and must not be used to score the
+     F lever.** It moves the WRONG WAY in every arm — roughly doubles over 50
+     epochs, minimum always at epoch 1–5 — including both F-off controls and
+     the oracle. At e50 all nine arms land in 18.3–20.5, a spread comparable to
+     one arm's own tail-10 stdev.
+- **Within-run epoch scatter, as a LOWER bound on run-to-run variance**:
+  tail-10 stdev of `loss_avg` is ±0.261 (f1r) and ±0.296 (f1d). A single-epoch
+  arm-vs-arm comparison already carries ~±0.28 from temporal scatter alone,
+  before any seed effect. This is a floor, NOT the run-to-run number the
+  program still lacks.
 - **Finished but NEVER scored at 4292 scenes**:
   `captain_gru_v3_a4_g3_oracle_finetune_32gpu` (idle since 08-07). Rung 0.
 - **Baselines A/B/C live in
