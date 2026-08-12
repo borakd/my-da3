@@ -23,9 +23,18 @@
 # GRU's correction (P2b) makes its a->0 floor plain feed_prev_pred -- arm C --
 # and C itself loses to the pose-free arm A on 63.0% of scenes, so no
 # correction gate can clear this program's promotion bar. Gating the RAY makes
-# the a->0 floor the pose-free construction view 0 already takes (the same
-# masked_ray_map_token, model.py `full_out[i][:batch_size] += ...`), i.e. arm
-# A. "Stop losing to A" becomes reachable by construction rather than by luck.
+# the a->0 floor the pose-free construction VIEW 0 takes (the same
+# masked_ray_map_token, model.py `full_out[i][:batch_size] += ...`).
+#
+# CORRECTION 2026-08-12: that is NOT arm A. Arm A sets no feed_* key, so
+# _encode_views takes the else branch whose adds are both *0.0 -- arm A's
+# mid-sequence tokens are bare `feat`, with NO masked token. Three distinct
+# constructions: arm A `feat`; a->0 `feat + masked_token`; normal
+# `feat + ray_out`. verify_gru_ray_gate.py check 4 is right; the claim layered
+# on it was not. The floor IS a well-trained regime -- the masked token is
+# pretrained via raymap_mask p~0.20 (base_multiview_dataset.py:281) and is what
+# view 0 sees every sequence -- but "stop losing to A by construction" is an
+# empirical hope about an unmeasured regime, not a guarantee.
 # verify_gru_ray_gate.py proves both limits BIT-FOR-BIT against the real call
 # site; run it before launching.
 #

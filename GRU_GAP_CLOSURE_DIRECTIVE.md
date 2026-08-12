@@ -628,9 +628,40 @@ entirely, i.e. at the ray add (`model.py:2033`):
 feat_group = [feat_group[0] + a * ray_out[-1].to(...) + (1 - a) * self.masked_ray_map_token]
 ```
 
-`a → 0` reproduces the pose-free path view 0 already takes (the same
-`masked_ray_map_token` added at model.py:1555), which is arm A's regime — so
-the floor becomes A, and "stop losing to A" becomes reachable. Implement `a`
+`a → 0` reproduces the pose-free construction **view 0** takes (the same
+`masked_ray_map_token` added at model.py:1555).
+
+**CORRECTION 2026-08-12 — that is NOT arm A's regime, and this section
+previously claimed it was.** Verified in code: DL3DV sets `ray_mask=False`
+for every view (dl3dv.py:339) and flips it True only under the GT-ray flags
+(dl3dv.py:356); arm A's config sets no `feed_*` key at all, so
+`selected_ray_maps.size(0) > 0` is False and `_encode_views` takes the else
+branch, whose two adds are **both multiplied by 0.0** (model.py:1541-1542) —
+that branch exists to keep the ray encoder in the graph, not to add a token.
+The `+= masked_ray_map_token` at model.py:1555 sits inside
+`if feed_prev_pred` and applies to `[:batch_size]`, i.e. **view 0 only**.
+Three distinct mid-sequence constructions:
+
+| arm | mid-sequence tokens |
+|---|---|
+| A (no conditioning) | `feat` |
+| GRU arm, `a → 0` | `feat + masked_ray_map_token` |
+| GRU arm, normal | `feat + ray_out` |
+
+So "the floor is arm A by construction" is FALSE. `verify_gru_ray_gate.py`
+check 4 is still correct — `a=0` really does equal `feat + masked_token`
+bit-for-bit — it is the interpretation on top that was wrong.
+
+Mitigating, and why the design is still sound: `feat + masked_ray_map_token`
+is base CUT3R's NATIVE pose-free signal. `get_img_and_ray_masks`
+(base_multiview_dataset.py:281) draws `raymap_mask` True with p ≈ 0.20 on
+metric data, and any ray-less view in such a batch takes the masked-token
+path — so the token is heavily trained in pretraining, and it is what view 0
+of every GRU sequence sees. The floor is a well-trained regime; it is simply
+not arm A's *finetuned* regime, which drifted toward "nothing added" over 50
+epochs of never seeing the token. **Whether the two behave alike is
+measurable and unmeasured.** Treat "stop losing to A" as an empirical hope
+about an unmeasured regime, not a structural guarantee. Implement `a`
 as a scalar per sample from a 1-unit head off the GRU hidden (or off the
 pooled tokens when the GRU is off), sigmoid, bias-init +4 so it starts open
 and init-equivalence holds to within 2%. The `pose_gru_e2e` tape already
@@ -1045,6 +1076,47 @@ loss-scale sweep.
 **Not independent of P2.** The ray gate reads the POST-update hidden, which
 under P4.3 has consumed the probe observation. **The first refine arm must
 run gate-off**; a refine-vs-raygate A/B would confound the two.
+
+**THE PREMISE IS TESTABLE BEFORE THE 8-NODE LAUNCH.** The entire bet is that
+a pose-free readout of the CURRENT frame beats the stale fed-back pose. That
+needs no trained refine arm: run the ordinary conditioned rollout on the
+already-scored `gru_a4g3r8` checkpoint and additionally decode pose-free at
+each view, logging the error and feeding it to nothing. One GPU, dozens of
+scenes, minutes. Design rules, all learned the hard way:
+
+- **One-sided.** The probe on r8 is OUT OF DISTRIBUTION — that model was
+  trained with a ray token on every view x>0, and "rich state, no ray token"
+  is a condition it never saw (view 0 has no accumulated state, so it is not
+  the same case). So `e_probe < e_lag` ⇒ STRONG GO; `e_probe ≥ e_lag` ⇒
+  SUGGESTIVE, NOT REFUTED — you measured that an untrained-for probe fails.
+- **Bracket it with arm A**, which is trained ENTIRELY pose-free and shows
+  what the readout achieves when optimized for. Do NOT add the masked token
+  when probing arm A — that would measure it outside its own distribution,
+  the mirror of the OOD error above. No probe code is needed at all: every
+  arm-A view is already pose-free, so its ordinary forward IS the readout.
+- **Normalize within each model.** Arm A and r8 have different absolute head
+  scales, so cross-model error comparison is a units comparison. Report the
+  per-view RATIO `e_readout / e_lag` computed inside each model's own
+  rollout — scale-free, and the convention the PoseGRU docstring already uses
+  ("1.00 means the module learned nothing").
+- **The real bar is velocity extrapolation, not lag.** `e_lag` contains the
+  true inter-frame MOTION, so anything modelling motion beats it — including
+  a pure trajectory extrapolator that never looks at an image (§0.3: a
+  perfect one takes 1.09 → 0.84, ~23% below lag). The claim P4.3 rests on is
+  that the probe observes DRIFT, which is precisely **`e_probe < e_vel`**
+  where `e_vel = err(P̂(x−1) ∘ Δ, GT(x))`. Δ is already computed at the call
+  site; composing is one matmul in `utils.camera`. Beating `e_lag` alone is
+  consistent with the probe merely re-deriving motion the cell already has —
+  i.e. the ≤20–25% trajectory-only ceiling restated.
+- **The discriminator is the SLOPE over view index, not the mean.** The claim
+  is that the probe sees ACCUMULATED drift, so `e_lag` should grow with x
+  while `e_probe` grows more slowly. A sequence mean destroys exactly that.
+  Log per view. (`e_lag`'s slope is also a measurement of head drift nobody
+  has logged, worth having whether or not this arm runs.)
+- Free assertion: at step 0 the zero-init residual head makes
+  `P_committed = P̂(x−1)` exactly, so `e_gru` must EQUAL `e_lag` bit-for-bit.
+- Caveat: these are RAW errors, not the per-batch-normalized quantities
+  `PoseGRULoss` reports as `gru_trans_err_gtscale`. Never cross-read the two.
 
 **Scoreability:** `pose_gru_refine_passes` / `pose_gru_probe_every` must be
 registered in `preflight_ckpt.py`'s lever list — but only AFTER the load path
