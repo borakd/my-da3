@@ -221,6 +221,39 @@ Do NOT read a reproducing re-score as evidence that any arm result is real. It
 bounds harness noise only; the training-variance term stays unmeasured until
 the replicate runs.
 
+#### PARTIALLY ANSWERED ALREADY, FOR FREE (measured 2026-08-12, this window)
+
+Before spending the node-hour, the question was checked against evidence
+already on disk, and most of it was already answered.
+
+`diag_r8_iters8` (2026-08-12 14:15, forced `POSE_GRU_FORCE_ITERS=8`) and the
+native `gru_a4g3r8` scoreboard run (2026-08-10 20:05) score the SAME checkpoint
+on 32 common scenes. Their per-scene `eval_depth_pose_metrics.csv` files are
+**BYTE-IDENTICAL on 32/32 scenes** — verified by direct byte comparison in this
+window, not relayed. Two separate invocations, two days apart, different job,
+different label.
+
+**What that establishes:** the forward pass, the data loading, and the metric
+computation are deterministic. Whatever produces the 0.00281 arm-to-arm scatter
+is NOT in any of them. It also independently reproduces the bit-identity claim
+in 0634c97 rather than taking it on trust.
+
+**What it does NOT establish, and this is the precise residual the full
+re-score still buys:** the diag run has **no `claims/` directory** — it
+bypassed the distributed claim queue entirely, while every scoreboard run
+shards 4292 scenes across 32 GPUs through a 4292-entry claim queue. So
+multi-node sharding and claim ORDER remain untested. A priori the risk is low,
+because scenes are scored independently and written to their own directories,
+so claim order should not be able to affect a per-scene number. But "should not
+by construction" is exactly the class of reasoning that has failed five times
+on this program (the oracle bound, 70x starvation, input scales,
+expected-value bands, the 20-25% velocity ceiling), which is why it is worth an
+hour rather than an assumption.
+
+**Consequence for sequencing:** the re-score is now CONFIRMATORY on a narrow
+residual rather than an open question. The dominant unmeasured term is
+training variance, and only the seed replicate addresses it.
+
 **Correction to an earlier framing in this document:** the 4.1611 aux-weight
 factor was NOT "silent". The `captain_gru_v3_a4_g3_r8_finetune.yaml` header
 already documents it and even names `pose_gru_loss_weight=0.2403` as the
