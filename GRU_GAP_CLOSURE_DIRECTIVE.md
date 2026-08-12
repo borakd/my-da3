@@ -22,6 +22,43 @@ item the analysis identified — full `ddp_grad_sync` for the trunk — is
 variant (§1). Any future proposal that violates this constraint must be
 listed as deferred, not silently folded into a run.
 
+**GOVERNING CONSTRAINT 2 — BACKWARD COMPATIBILITY IS NON-NEGOTIABLE.**
+Every change must remain *isolatable* and *negatable*: if a run goes wrong,
+you must be able to identify which single change caused it and switch that one
+off, without editing code and without losing anything else. Concretely:
+
+1. **Config-revertable.** Every change rides its own default-off key. Setting
+   that key absent (or `null` on the CLI) restores the exact previous
+   behavior — not "approximately", byte-identical. No change may be reachable
+   only by editing source.
+2. **One key, one mechanism.** Never fold two mechanisms behind one key. If
+   two changes ship together and the arm regresses, you must be able to
+   bisect them by flipping keys, not by re-reading diffs.
+3. **Old checkpoints load under new code**, strict — `All keys matched
+   successfully`, never `strict=False` and never a silent drop. A new
+   parameter or buffer must be ABSENT when its key is absent, not present-
+   and-neutral: an all-ones buffer still adds a state-dict key that every
+   earlier checkpoint lacks, and the loader hard-fails on that.
+4. **New state must be recoverable from the checkpoint itself**, via
+   `_sniff_pose_gru_config`, so an eval never silently scores a differently-
+   configured module. Levers invisible in weight shapes (iteration counts,
+   modes, gains) are the dangerous ones — they fail silently rather than
+   loudly.
+5. **Total kill-switch.** With every new key absent, the tree must reproduce
+   the pre-program baseline exactly. That is the escape hatch: one revert
+   path back to known-good, always available.
+6. **Each proposal ships its own falsifier** proving (1) and (3) for itself —
+   absent-key byte-identity, presence-changes-output, and checkpoint
+   round-trip. `verify_gru_input_gain.py` is the reference implementation.
+
+Enforcement: `python verify_backward_compat.py` loads a fixed set of
+reference checkpoints spanning every era (no-GRU baseline, pre-program GRU
+arms, post-change arms) and asserts strict key-match plus correct lever
+recovery. **Run it before every commit.** Verified green 2026-08-12 on the
+R1 arm, the R8 arm, and the no-GRU baseline.
+
+---
+
 ### Reference ladder — FULL BENCHMARK (source of truth)
 
 All 4292 DROID test scenes, `checkpoint-final.pth` (epoch 50), from
@@ -57,13 +94,88 @@ Read this table before anything else:
 The analysis' own 50-sequence subset ladder (A 0.001745/0.574°, B
 0.000822/0.177°, C 0.001866/0.609°, D 0.001982/0.633°, E 0.002031/0.606°,
 F oracle 0.000996/0.235°) is a DIFFERENT normalization and scene count — the
-two are not comparable numerically, but every ordering above matches it. The
-oracle arm F has no row in the full-benchmark table: it was never evaluated at
-4292 scenes. **Evaluating the oracle checkpoint on the full benchmark is the
-cheapest missing measurement in this whole program** — it is the only number
-that sets the real upper bound for the fix ladder, its checkpoint is finished
-and idle (`captain_gru_v3_a4_g3_oracle_finetune_32gpu`, untouched since
-08-07), and it is one `arm_eval_for_run.sh` call.
+two are not comparable numerically, but every ordering above matches it.
+
+**The upper bound is already in the table — it is arm B, not the oracle.**
+An earlier draft of this directive called for scoring
+`captain_gru_v3_a4_g3_oracle_finetune_32gpu` at 4292 scenes as "the cheapest
+missing measurement". That was **refuted on 2026-08-11**, on three
+independently verified grounds:
+
+1. **It duplicates arm B.** Under `--oracle gt` the GRU input becomes the
+   CURRENT view's GT pose (model.py:1668), which flows to the ray build — the
+   same information `feed_gt_ray_map` already encodes. B is measured:
+   ate 0.013445, rpe_rot 0.337232.
+2. **It is not a perfect-pose ceiling anyway.** That run's own final-epoch
+   `log.txt` reads `gru_in_trans_err_gtscale = 0.0` (injection is real and
+   exact) but `gru_trans_err_gtscale = 3.028` with `gru_gain_trans = 0.332` —
+   handed an exact pose, the GRU shrinks the translation ~3× and emits one
+   that is 3 GT-scales wrong. Its rotation is near pass-through
+   (`gru_quat_loss = 0.00017`). The run's own training log states outright
+   that its "recon/pose metrics are not comparable to an honest arm."
+3. **10× LR confound.** That run used `lr 1.0e-06 / min_lr 1.0e-07` against
+   `1.0e-05 / 1.0e-06` for every arm in the table, at identical batch, epochs
+   and steps.
+
+A fourth fact worth carrying: **perfect poses do not lift depth.** B's absrel
+(0.188603) is *worse* than A's (0.179384) — the conditioning gap is a pose
+gap, so do not expect §4's observability work to move the depth columns.
+
+Two corollaries for the oracle's 83–93% figure: it is a 50-scene number, and
+point 2 means the oracle's benefit comes almost entirely from ROTATION (its
+translation is badly corrupted and it still recovers most of the gap). That
+strengthens P3.1's rotation re-weighting considerably.
+
+### RUNG 0 RESULT (job 44514478, 2026-08-11, 40 scenes) — GT AT THE GRU INPUT MAKES THINGS WORSE
+
+`--oracle gt` on the **honest** `captain_gru_v3_a4_g3_finetune` checkpoint
+(lr 1e-5 — no LR confound, no circular training). All four shards logged the
+GT-injection banner; 40 scenes, zero errors. Means over those same 40 scenes:
+
+| arm | ATE | rpe_rot | rpe_trans | absrel |
+|---|---|---|---|---|
+| B truth-conditioned | **0.014706** | **0.4951** | **0.004188** | 0.2055 |
+| A no conditioning | 0.077676 | 1.1956 | 0.008877 | **0.1810** |
+| C prev-pred, no GRU | 0.080295 | 1.3105 | 0.009189 | 0.2005 |
+| D GRU honest (same ckpt) | 0.088764 | 1.2999 | 0.009430 | 0.2101 |
+| **PROBE: same ckpt, GT at GRU input** | **0.116545** | **1.7682** | 0.009034 | 0.2222 |
+
+Per-scene ATE win rates for the probe: **0/40 vs B**, 4/40 vs A, 3/40 vs C,
+**6/40 vs its own honest self (D)**. On the C→B gap it scores **−55.3%** ATE
+and **−56.1%** rotation: handing the module the right answer moves it
+backwards by more than half the gap width.
+
+**Reading it honestly — this is NOT a clean "the GRU wrecks perfect
+information" result.** The injected GT comes from `demo_ray` raw `cam["pose"]`
+with no scene-scale normalization, while the GRU's residual anchor P(x−1)
+lives in the model's own head scale (round-2 forward math: head scale ≈ 4× GT;
+`verify_gru_oracle.py` carries `HEAD_SCALE = 0.37`; the oracle-TRAINED arm
+learned `gru_gain_trans = 0.332` to compensate and still had
+`gru_trans_err_gtscale = 3.028`). So the probe is a pure **out-of-distribution
+scale shock**, and what it proves is:
+
+> The GRU and the conditioning path have **no scale invariance whatsoever**.
+> An input that is numerically correct but in the wrong scale is worse than a
+> stale input in the right scale.
+
+Three consequences, all of which change the plan:
+
+1. **No GT-injection diagnostic is trustworthy until scale is handled.** That
+   retroactively undermines the oracle arm's 83–93% figure from the analysis
+   (already flagged for its 10× LR confound) — do not plan against it.
+2. **P3.4 is promoted from a minor lever to a PREREQUISITE.** The round-2
+   evidence already prescribed exactly the fix: a per-sequence running scale
+   on `absT`/`delta_t` with the emitted translation correction multiplied back
+   by the same scale, motivated by the 11.6× per-chunk factor spread. This
+   probe is direct confirmation that the module cannot survive a scale it was
+   not trained on.
+3. **P2 (ray-level abstention) is validated as the milestone-1 route.** A
+   module this brittle needs a way to be switched off; its floor must be A.
+
+Cheapest follow-up that would separate scale from competence: rescale the
+injected GT into head scale before the `torch.where` in the oracle block, and
+re-run this exact probe. If the probe then lands near B, the GRU is fine and
+scale is the whole story; if it stays bad, the emitter is genuinely broken.
 
 ---
 
@@ -150,7 +262,7 @@ retargeting changes its CONTENT.
 carry the same drift, so differencing cancels it and prices the learnable
 velocity skill at 100% instead of ~6%:
 
-- `PoseGRULoss.__init__` (losses.py:1103): add `target="absolute"`,
+- `PoseGRULoss.__init__` (losses.py:1154): add `target="absolute"`,
   accepting `"relative"`.
 - In `compute_loss`, under `target="relative"`, replace the per-view pair
   (`gru_pose[i]`, `gt_poses[i]`) with
@@ -159,7 +271,7 @@ velocity skill at 100% instead of ~6%:
   relative to the head's own previous pose, against the GT motion. Skip the
   first graded view of each chunk (no `i-1` inside the window) rather than
   reaching across a TBPTT boundary.
-- `pose_delta_encoding` already exists at **model.py:459** and is NOT
+- `pose_delta_encoding` already exists at **model.py:488** and is NOT
   currently imported by `losses.py` — add the import (losses.py already
   imports from `dust3r.utils.camera`, so follow that pattern and avoid a
   circular import by importing inside the method if needed).
@@ -338,9 +450,9 @@ list is walked the same way.
                        "exclusive — the GRU params would be averaged twice")
   ```
 
-- Construct the scaler as today (line 363), then attach the parameter list
+- Construct the scaler as today (line 395), then attach the parameter list
   **after** `accelerator.prepare` — `base_model` is already unwrapped at
-  line 372, and this avoids any doubt about whether `prepare` rebound the
+  line 404, and this avoids any doubt about whether `prepare` rebound the
   module:
 
   ```python
@@ -441,20 +553,83 @@ uninterpretable.
 
 The GRU must be able to abstain per-step instead of injecting noise.
 
-### P2 — abstention, at the RAY level (the head-level gate cannot clear §0)
+### P2 — abstention: DEMOTED TO AN INSTRUMENT, NOT A SHIPPED FEATURE
+
+**STRATEGY DECISION 2026-08-12 (user).** The objective is to win ACTIVELY on
+essentially every scene, using our own predictions. Abstention wins by
+declining to play, so it is not that objective and must not stand in for it.
+It is deferred until everything else has been tried. Four reasons, and the
+first two are the load-bearing ones:
+
+1. **It masks the defect.** A gate improves the headline number while the
+   corrector stays exactly as broken, removing the pressure that produces the
+   real fix and creating a result that needs caveating forever.
+2. **Its value evaporates on success.** The 17.4% below exists BECAUSE the
+   corrector is right on half the scenes and wrong on the other half. Fix the
+   corrector and the gate's prize collapses toward zero. It is a measure of
+   today's brokenness, not a durable asset.
+3. **It forecloses nothing.** A bolt-on requiring no architectural commitment,
+   attachable to any corrector at any time, dormant behind a default-off key
+   under GOVERNING CONSTRAINT 2. Deferring it is free.
+4. **It muddies attribution.** An always-on arm measures corrector quality; a
+   gated arm's number conflates corrector quality with gate quality.
+
+**But run it ONCE, as an instrument.** A learned gate is a free map of exactly
+WHERE the corrector fails — information the always-on arm destroys by
+averaging good and bad scenes into one number. Its open/close pattern is the
+highest-value input to the §4 refinement design. Rules: never in the headline,
+never claimed as a result, telemetry only.
+
+The implementation and its pricing follow.
+
+### P2 implementation — at the RAY level (a head-level gate cannot clear §0)
+
+**PRICED 2026-08-12 — this is the highest-leverage proposal in the plan.**
+An ORACLE gate (per scene, pick the better of {arm, A} using the realized
+metric) computed over all 4292 scenes from `summary/per_scene_*.csv`:
+
+| arm | always-on ATE | oracle gate vs A | C→B closure, gated | always-on |
+|---|---|---|---|---|
+| `gru_a4g3r8` | 0.079918 | **0.070125** | **17.4%** | 3.1% |
+| `gru_a4g3` | 0.083699 | 0.071401 | 15.6% | −2.6% |
+| `gru_a4g3f1np` | 0.080817 | 0.070577 | 16.8% | 1.8% |
+| `gru_a4g3f1` (worst arm) | 0.088054 | 0.072200 | 14.4% | −8.7% |
+
+(A = 0.075869, C = 0.082068, B = 0.013445. rpe_rot behaves the same:
+r8 gated 14.5% vs 0.5% always-on.)
+
+Three consequences:
+
+1. **Every arm — including the worst — beats A under gating.** The GRU emits
+   genuinely useful conditioning on a large subset of scenes and harmful
+   conditioning elsewhere; always-on averages them to ~zero. The information
+   is there; the failure is deployment, not capability.
+2. **The gate dominates the lever grid.** All six arms land within ~0.002 of
+   each other when gated. The entire A/G/F/R grid moved always-on ATE by 3.1%
+   of the gap; gating unlocks 17.4% from checkpoints that already exist.
+3. **P2 alone cannot approach B.** 17.4% is the perfect-gating ceiling — it
+   clears milestone 1 (beat A) and stops. Milestone 2 needs P4.3.
+
+**Caveat, state it in any writeup:** this is an oracle gate (it uses the
+realized metric to choose) and it switches between two separately trained
+models per scene, whereas P2 gates per-view inside one model. Per-view is
+finer-grained — more headroom — but harder to learn. 0.070125 is a ceiling,
+not a forecast; a learned gate capturing half the available margin still
+beats A.
+
 
 **Design correction.** Gating the GRU's *correction* makes its floor plain
 `feed_prev_pred` — arm C — and C is itself net-negative (A beats C on 63.0%
 of scenes). A correction gate therefore cannot satisfy this directive's own
 promotion bar. The gate has to sit where it can switch the conditioning OFF
-entirely, i.e. at the ray add (`model.py:1758`):
+entirely, i.e. at the ray add (`model.py:2033`):
 
 ```python
 feat_group = [feat_group[0] + a * ray_out[-1].to(...) + (1 - a) * self.masked_ray_map_token]
 ```
 
 `a → 0` reproduces the pose-free path view 0 already takes (the same
-`masked_ray_map_token` added at model.py:1318), which is arm A's regime — so
+`masked_ray_map_token` added at model.py:1555), which is arm A's regime — so
 the floor becomes A, and "stop losing to A" becomes reachable. Implement `a`
 as a scalar per sample from a 1-unit head off the GRU hidden (or off the
 pooled tokens when the GRU is off), sigmoid, bias-init +4 so it starts open
@@ -472,12 +647,12 @@ confirmation of the misapplied-tail-correction finding in P3.2.
 **`src/CUT3R/src/dust3r/model.py` — `PoseGRU`:**
 
 - `__init__` (line 639): new kwarg `gate=False`. When true, after
-  `self.head` (line 751): `self.gate = nn.Linear(hidden_dim, 2)` — one logit
+  `self.head` (line 876): `self.gate = nn.Linear(hidden_dim, 2)` — one logit
   for the translation correction, one for rotation — with
   `nn.init.zeros_(self.gate.weight)` and `self.gate.bias.data.fill_(4.0)`
   (sigmoid ≈ 0.982: the gate starts open, preserving init-equivalence to the
   ungated module to within 2%, and learns to CLOSE where the correction hurts).
-- `forward` (line 796): after `raw = self.head(hidden)`:
+- `forward` (line 977): after `raw = self.head(hidden)`:
 
   ```python
   if self.gate is not None:
@@ -489,14 +664,14 @@ confirmation of the misapplied-tail-correction finding in P3.2.
   term uniformly; in `residual` mode g→0 reproduces plain `feed_prev_pred`
   exactly — the abstention semantics we want).
 - **Checkpoint sniffing** — `_sniff_pose_gru_config` (line 77): detect
-  `gate` from key presence, mirroring the `img_norm` pattern at line 120:
+  `gate` from key presence, mirroring the `img_norm` pattern at line 121:
   `gate = _get("gate.weight") is not None`, pass through to `enable_pose_gru`.
 - **Config plumbing**: `pose_gru_gate: true` key, added to the
   `enable_pose_gru(...)` kwargs assembled at `train_cut3r_baseline.py:245–250`. Default absent→False so every existing
   config and checkpoint is untouched.
 - **Diagnostics**: log `g` means into the loss details — in `PoseGRULoss`
   this is not visible, so instead have the call site stash
-  `res_group[-1]["gru_gate"] = g.detach()` (model.py:1856, next to the
+  `res_group[-1]["gru_gate"] = g.detach()` (model.py:2131, next to the
   `res_group[-1]["gru_pose"]` write) and
   add `gru_gate_t/gru_gate_q` means in `PoseGRULoss.compute_loss` details
   when the key exists. A trained gate sitting at ~0 for rotation is the
@@ -511,7 +686,7 @@ v4a); none changes any default.
 
 ### P3.1 — rotation re-weight (+ optional geodesic) in PoseGRULoss
 
-**`src/CUT3R/src/dust3r/losses.py:1084–1217`:**
+**`src/CUT3R/src/dust3r/losses.py:1091–1217`:**
 
 - `__init__` (1103): add `rot_weight=1.0, rot_geodesic=False`.
 - Line 1164: with `rot_geodesic`, replace the chordal norm by the sign-safe
@@ -519,7 +694,7 @@ v4a); none changes any default.
   — the actual rotation angle in radians (the analysis' θ = 4·asin(L/2)),
   removing the q/−q double-cover ambiguity the chordal form has.
 - Line 1177: `loss = t_loss + self.rot_weight * q_loss`; apply the same
-  weight inside the `iter_gamma` branch (line 1211).
+  weight inside the `iter_gamma` branch (line 1303).
 - `get_name` (1126): include `rot_weight`/`rot_geodesic` when non-default so
   train/test criterion strings stay comparable in logs.
 - **Config**: add `pose_gru_rot_weight: 1.0` and interpolate into BOTH
@@ -606,18 +781,75 @@ so trunk-driven clipping rescales the already 348×-starved GRU gradient.
   empty → both branches noop).
 - **Config**: `pose_gru_clip: 5.0` for v4a (an order looser than the trunk's
   1.0; the GRU group already runs at 100× LR — `split_pose_gru_param_groups`,
-  `train_cut3r_baseline.py:110`, applied at line 344).
+  `train_cut3r_baseline.py:110`, applied at line 376).
 
-### P3.4 — input gain normalization (hidden throttled: rms 0.005, z≈0.89)
+### P3.4 — scale normalization ← PREREQUISITE (promoted by the rung-0 result)
 
-Measured, not assumed (round-2 forward-math audit): fed-back `absT` runs
-**0.5–0.8 head-units** at supervised views (full range 0.01–3.1), while
-`delta_t` is **0.018–0.068** — the informative velocity channel sits ~**70×
-below** the nuisance pose columns, and its gate pre-activation std is 0.0007
-vs ~0.08 for the pose block. The velocity columns must grow ~50–70× before
-the hidden state is velocity-dominated. (An earlier draft said "~1e-2/1e-3
-scale" — that was the pre-activation std, not the input scale. A `1/std`
-probe still lands in the right place.)
+**Status: this is no longer a tuning lever.** The rung-0 probe showed the
+module is not scale-invariant at all (ATE 0.1165 with a numerically PERFECT
+input, vs 0.0888 with its own stale one). Everything that feeds the GRU a
+better pose — P0, corr, xattn, the probe pass — assumes the module can
+consume a pose whose scale it was not trained on. It cannot. Do this before
+trusting any of them.
+
+**MEASURED 2026-08-12 by `probe_gru_input_stats.py`** (200 batches × 4 × 64
+views = 50,400 rows, 800 sequences, real `a4_g3` checkpoint, run on BOTH
+splits). These numbers SUPERSEDE the round-2 audit estimates this section
+previously carried:
+
+| quantity | train split | test split | old directive value |
+|---|---|---|---|
+| `absT` mean @ graded views (48–63) | **0.9947** | 0.9374 | 0.5–0.8 |
+| `delta_t` p50 | **0.04125** | 0.03194 | 0.018 |
+| `delta_t` p95 | **0.13686** | 0.11835 | 0.068 |
+| `absT` / `delta_t` median ratio | **12.86** | 16.86 | ~70× |
+| per-sequence scale spread p99/p5 | **17.24** | 12.74 | 11.6× |
+
+Provenance, so this check never becomes circular: the old values were a
+SECONDARY inference — round-2 audit GT statistics (`GT_DT_P50 = 0.0045`,
+`GT_ABST_SUP_MEAN = 0.206`) multiplied by an assumed head scale of **4.0×**.
+The new ones are a PRIMARY measurement. The head-scale-invariant p95/p50 SHAPE
+check passes, so the distribution was predicted correctly and only the scale
+factor was wrong.
+
+**(Correction, 2026-08-12: an earlier revision of this section attributed the
+assumption to `HEAD_SCALE = 0.37` in `verify_gru_oracle.py` and inferred a
+"true head scale nearer 0.8". Both were wrong — that is a different quantity.
+The probe's constant is `ASSUMED_HEAD_SCALE = 4.0`.)**
+
+The measured factors are NOT a single constant, and the discrepancy is
+informative:
+
+| channel | GT value | measured | implied factor |
+|---|---|---|---|
+| `absT` @ views 48–63 | 0.206 | 0.99473 | **4.83×** |
+| `delta_t` p50 | 0.0045 | 0.04125 | **9.17×** |
+
+So the head's frame-to-frame motion is inflated **1.90× more** than its
+absolute displacement, relative to GT. That is the signature of per-frame
+prediction NOISE adding on top of true motion: the fed-back trajectory jitters.
+Two consequences worth carrying:
+
+- The velocity channel the A4 lever hands the GRU is proportionally noisier
+  than the pose channel — it is not a clean motion signal.
+- **This bears directly on P0.** A relative-motion target supervises exactly
+  this jitter-inflated quantity, so P0's gain may be smaller than its
+  drift-cancellation argument suggests. Log `delta_t` magnitude alongside the
+  P0 A/B rather than assuming the target is clean.
+
+Two corrections that change the prescription:
+
+- **The velocity channel sits ~13× below the pose columns, not ~70×.** The
+  "must grow 50–70×" figure was overstated ~5×; the measured-optimal delta
+  gain is 20–30.
+- **The per-sequence spread is WORSE than the dossier's 11.6×** (17.2× on
+  train). That strengthens, not weakens, the case that a static buffer is
+  only a partial fix.
+
+Caveat to carry: the rung-0 "scale shock" reading leaned on `HEAD_SCALE=0.37`.
+With the real head scale ~2× larger, the GT-vs-head mismatch is smaller than
+stated there, so the "GRU is genuinely brittle" explanation gains relative
+weight. The rescaled-GT re-probe settles it.
 
 **A frozen per-dimension buffer is only a partial fix.** The per-chunk
 supervision factor spans **11.6×** across batches (p5 0.0295 → p99 0.344), so
@@ -630,9 +862,9 @@ log the per-sequence factor so the dynamic version can be priced.
 - **Probe first**: new 30-line script `probe_gru_input_stats.py` (repo root,
   pattern-copy `probe_gru_hidden_falsifier.py`): load a D-arm checkpoint,
   run 200 batches, dump per-dimension std of `gru_in` (built at
-  model.py:1685) to JSON.
+  model.py:1923) to JSON.
 - **`model.py` `PoseGRU.__init__`**: `self.register_buffer("input_gain",
-  torch.ones(self.input_dim))`; in `forward` at model.py:783: `cell_in = gru_in *
+  torch.ones(self.input_dim))`; in `forward` at model.py:952: `cell_in = gru_in *
   self.input_gain` (before the img_feat concat — image features are already
   LayerNormed). Buffer serializes with the checkpoint, so eval rebuilds
   bit-exact; all-ones default keeps every existing checkpoint loadable
@@ -640,15 +872,25 @@ log the per-sequence factor so the dynamic version can be priced.
   key, load with `strict=False` handled by the existing hard-fail sniff —
   simplest: only build the buffer when a new `pose_gru_input_gain` config
   key is present, mirroring the gate's presence-gating).
-- **Config**: `pose_gru_input_gain` filled from the probe's `1/std` values,
-  rounded to one significant digit; quaternion dims stay 1.0. **Length must
+- **Config**: use the TRAIN-split gains (gradients flow there), measured
+  2026-08-12:
+
+  ```yaml
+  pose_gru_input_gain: [2, 2, 2,  1, 1, 1, 1,  30, 30, 20,  1, 1, 1, 1]
+  #                    |absT(3)| |  quat(4) | | delta_t(3)| | delta_q(4) |
+  ```
+
+  Quaternion dims stay 1.0 (already unit-norm). The test split independently
+  gives [2,2,2, 1,1,1,1, 30,30,30, 1,1,1,1] — agreement to one digit. **Length must
   be `self.input_dim`, which is NOT always 14**: A4×F0 is 14, but the F1 arms
   widen the cell input to 46 (pose 14 + appended 32). Gate the buffer on the
   pose block only, or build it at `self.input_dim` and pad with ones —
   a 14-long vector will not broadcast on any F arm.
-- **Probe validation**: the probe must reproduce the known numbers before its
-  output is trusted — `absT` ≈ 0.5–0.8 at views 48–63, `delta_t` p50 ≈ 0.018 /
-  p95 ≈ 0.068. If it does not, the probe is wrong, not the model.
+- **Probe validation**: `all_checks_passed=False` on both splits is EXPECTED
+  and already resolved — the three failing gates compared against the
+  superseded estimates above, while the shape gate passed. Do NOT relax the
+  bands to make the gate green; re-point them at the measured values and keep
+  the old ones recorded as superseded, or the check becomes circular.
 
 ---
 
@@ -664,7 +906,7 @@ strictly increasing cost.
 correlation/flow statistics BETWEEN current and previous token sets) is the
 only existing F source carrying explicit relative-motion evidence — exactly
 what the analysis says pooled F1 destroys (shift-invariant mean over tokens,
-model.py:1559).
+model.py:1797).
 
 **Status as of 2026-08-11 19:00: `captain_gru_v3_a4_g3_f1c_r8_finetune` is
 TRAINING** — job 44504130, 8 nodes, started 14:49, epoch 10/50, run dir clean
@@ -674,11 +916,14 @@ source siblings are also running: `f1d` (DINOv2, job 44496323, epoch 21) and
 
 1. **Do not resubmit and do not touch those run dirs.** ~2.5 days remain on
    each 3-day walltime; f1c needs ~40 more epochs.
-2. **Arm the evals** so they score the moment they land: add the three labels
-   to `$OUT/armed/registry.txt` and keep `armed_eval_watcher.sh` running
-   (a standing watcher log already exists from 15:04 today). Verify each
-   arm's `.submitted` marker appears; a `FAILED` marker means re-gate, not
-   re-train.
+2. **The evals are ALREADY ARMED — do not arm them again.** Verified
+   2026-08-11 19:44: watcher PID 374785 is live on glogin1, and
+   `$OUT/armed/registry.txt` already carries all three rows
+   (`44504130|…f1c_r8_finetune|gru_a4g3f1cr8|…`, and the f1d/f1r twins),
+   auto-discovered at 15:04. Starting a second watcher would give every arm
+   two submitters that both pass the gates — 16 eval nodes per arm. Just
+   check for the `.submitted` marker after each job lands; a `.failed`
+   marker means re-gate, not re-train.
 3. **Read them against the R8 column, not against D.** All three are R8 arms,
    so the correct control is `gru_a4g3r8` (ATE 0.079918, 54.2% win vs C) —
    comparing f1c to `gru_a4g3` would confound the F source with the R lever.
@@ -697,7 +942,7 @@ falsifier / sniff plumbing is inherited:
 
 - **`dust3r/img_encoders.py`**: new `XAttnRelPose(nn.Module)` — inputs the
   current and previous views' pre-ray token sets (B, N, 1024) (the same tensors corr
-  consumes — the full-token stash at model.py:1564 and the previous-view
+  consumes — the full-token stash at model.py:1802 and the previous-view
   read at 1572); two blocks of
   cross-attention (dim 256, 4 heads, queries = current tokens projected,
   keys/values = previous) → mean-pool → MLP(256→256→64). Output: a 64-d
@@ -729,20 +974,20 @@ falsifier / sniff plumbing is inherited:
 Give the GRU a measurement of the CURRENT view's pose (which contains the
 drift) before the conditioning ray is built: run the decoder group step once
 WITHOUT pose conditioning (view gets `masked_ray_map_token`, exactly the
-view-0 path at model.py:1318) on a THROWAWAY copy of
+view-0 path at model.py:1555) on a THROWAWAY copy of
 `(state_feat, mem)`, read the probe's `res["camera_pose"]` — this is
 P̂_probe(x), an observation the oracle proved sufficient — then run the real
 pass with the ray built from the GRU's refinement of
 `[P(x−1), Δ, P̂_probe(x)]`.
 
-- **`model.py` `_forward_decoder_group_step`** (def at line 1443): under flag
+- **`model.py` `_forward_decoder_group_step`** (def at line 1797): under flag
   `pose_gru_probe_pass`, before the GRU island: clone `state_feat`/`mem`
   (NOT `.detach().clone()` on the graph path — probe runs under
   `torch.no_grad()` entirely), call the inner decode once with the masked
   token, extract the pose, discard the cloned state. Feed the GRU a widened
   input: `gru_in = cat([est, delta_static, probe_pose])` — input width 21,
   which the sniff already generalizes over via `base_width`
-  (line 232–238: extend the accepted set {7, 14} with 21 → mode
+  (line 233–238: extend the accepted set {7, 14} with 21 → mode
   `"pose_delta_probe"`).
 - Cost: ~2× decoder FLOPs per view. Mitigation if needed: probe every k-th
   view and hold the last observation (the drift is slow — that's why it's
@@ -762,18 +1007,40 @@ would start 2.2% of the gap further back for no reason. Its config is
 
 | # | run | training cost | contents | measures | baselines retrained? |
 |---|---|---|---|---|---|
-| 0 | **oracle-eval** | **none** | score the finished, idle `captain_gru_v3_a4_g3_oracle_finetune_32gpu` on the 4292-scene benchmark | the REAL upper bound for every rung below; currently unmeasured at full scale | no |
-| 1 | f1c / f1d / f1r | **already running** | nothing to build (P4.1) | whether any existing image source carries drift evidence | no |
+| 0 | **gru-noise-floor probe** | 1 node, ~5 min | `--oracle gt` on the **honest** `captain_gru_v3_a4_g3_finetune` ckpt, `LIMIT=20`, `diag_` label, scratch OUT_ROOT | how much the GRU DEGRADES a perfect input — the noise floor P2's abstention gate has to beat. NOT a bound (arm B already is the bound) | no |
+| 1 | f1c / f1d / f1r | **already running, already armed** | nothing to build, nothing to arm (P4.1) | whether any existing image source carries motion evidence | no |
 | 2 | **v4-reltarget A/B** | 8 nodes × 2 | P0 (§0b): `pose_gru_loss_target` absolute vs relative, on R8 | whether the module can learn at all once the unlearnable drift term leaves the objective | no |
 | 3 | v4-grusync ×2 | 8 nodes × 2 | §1, on top of the P0 winner, at `pose_gru_lr_scale` 100 AND 10 | GRU gradient noise; the lr arm is required because the evidence's gate-saturation fix is lr_scale 100→10 | no |
-| 4 | v4a | 8 nodes | §2 (ray gate) + §3 | non-harm floor at A, plus repaired training signal; gate telemetry | no |
-| 5 | v4c | 8 nodes | v4a + `img_feat_src=xattn` (P4.2) | **motion-term** observability (still under the trajectory-only ceiling) | no |
-| 6 | v4d | 8 nodes | v4c + probe pass (P4.3) | the only rung that changes the ceiling — a real drift OBSERVATION | no (GRU-input change only; trunk weights and forward unchanged) |
+| 4 | **v4-refine** ← MAIN LINE | 8 nodes | **P4.3 iterative refinement** (§4): image-grounded pose observation, refinement count as a lever | the ONLY rung whose ceiling is the stated objective — winning actively, not abstaining | no (GRU-input change only; trunk weights and forward unchanged) |
+| — | v4-raygate | 8 nodes | §2 gate, **as an instrument** | a map of WHERE the corrector fails; feeds the v4-refine design. Never a headline result | no |
+| 5 | v4c | 8 nodes | v4-refine + `img_feat_src=xattn` (P4.2) | whether learned motion evidence adds anything on top of a real observation | no |
 | — | *(deferred)* v5-ddp | 8 nodes ×4 | full `ddp_grad_sync` for the trunk | the common-mode effective-batch-4 defect | **YES — A/B/C all re-run. Do not launch under the current constraint.** |
 
-Rung 0 costs one command and no GPU-hours of training, and it is the number
-every later decision is measured against — do it first, regardless of where
-the code work stands.
+Rung 0 replaces the refuted oracle-benchmark idea (see the ladder section).
+It runs on the HONEST checkpoint — same LR family as every table arm, no
+circularity — and answers a question nothing else answers: given a perfect
+pose at its input, how much does this GRU still wreck the conditioning?
+`gru_gain_trans = 0.332` from the oracle run says the answer is "a lot", and
+20 scenes is enough to confirm it. Requires the `ORACLE` passthrough in
+`eval_pipeline/run_captain_ray_eval_node.sh` (landed 2026-08-11, defaults to
+`off` so every existing caller is byte-identical).
+
+**Two hazards that apply to ANY hand-rolled eval submission:**
+
+- `eval_pipeline/mn5_paths.sh:33` defaults `OUT_ROOT` to
+  **`/gpfs/projects/...`**, which has only ~381 GB free against a ~332 GB
+  prediction footprint — and that volume holds the live `output_dir` of the
+  three running training jobs. `arm_eval_for_run.sh:28` forces scratch;
+  a bare `sbatch run_captain_ray_eval_node.sh` does NOT. **Always export
+  `OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs` explicitly**, and pass
+  `--output/--error` so the 8 `#SBATCH` log lines do not land on projects
+  either.
+- Bypassing `arm_eval_for_run.sh` also drops its `unset` of the falsifier env
+  vars (it submits with `--export=ALL`). `POSE_GRU_FORCE_ITERS` would
+  override the R lever and `PREV_PRED_RAY_SHUFFLE` is re-applied *after* the
+  oracle substitution — it would silently roll the injected GT. Run
+  `env | grep -E 'PREV_PRED_RAY_SHUFFLE|GT_RAY_MAP_SHUFFLE|POSE_GRU_'`
+  before submitting anything by hand.
 
 Every rung leaves arm C a valid control, so the closure fraction (C−X)/(C−B)
 stays meaningful throughout. Each run passes the §0 gates before promotion.
@@ -797,13 +1064,35 @@ run dirs.
    pushed. Every other §3 lever is a multiplier on a signal that is 94%
    unlearnable until this lands, so doing it first changes how the rest
    should be tuned.
-0b. **Rung 0 before any GPU-hours**: `bash eval_pipeline/arm_eval_for_run.sh
-   /gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_oracle_finetune_32gpu
-   gru_a4g3oracle`. Zero training, and it converts "the oracle recovers
-   83–93%" from a 50-scene claim into a full-benchmark bound. If the oracle
-   turns out NOT to dominate at 4292 scenes, the §4 observability program
-   loses its justification and the whole plan should be re-scoped — so this
-   is a genuine go/no-go, not a formality.
+0b. **Rung 0 before any GPU-hours** — the GRU noise-floor probe (1 node,
+   ~5 min). NOT the 8-node oracle benchmark, which was refuted (see the
+   ladder section: it duplicates arm B, its GRU emits a translation 3
+   GT-scales wrong, and it carries a 10× LR confound).
+
+   ```bash
+   env | grep -E 'PREV_PRED_RAY_SHUFFLE|GT_RAY_MAP_SHUFFLE|POSE_GRU_'   # must be empty
+   CR=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full
+   OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs \
+   sbatch --nodes=1 --gres=gpu:4 --cpus-per-task=80 \
+          --job-name=diag_oracle_honest \
+          --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/diag_%j.out \
+          --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/diag_%j.err \
+          --export=ALL,OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs,\
+LABEL=diag_a4g3_oraclegt,CONDITIONING=prev_pred_gru,ORACLE=gt,\
+CKPT=$CR/captain_gru_v3_a4_g3_finetune/checkpoint-final.pth,\
+BASE_SHARD=0,NUM_SHARDS=4,LIMIT=20 \
+          eval_pipeline/run_captain_ray_eval_node.sh
+   ```
+
+   Uses the **honest** a4_g3 checkpoint (lr 1e-5, same family as every table
+   arm — no circularity, no LR confound). Compare its 20 per-scene rows
+   against the same scenes in `summary/per_scene_gtray_lr1e5.csv`. Two
+   possible readings, both informative: if it lands near B, the GRU passes a
+   perfect pose through and the whole problem is input quality; if it lands
+   far from B (which `gru_gain_trans = 0.332` predicts), the GRU degrades even
+   a perfect input and P2's abstention gate is the priority. The `diag_`
+   prefix keeps it out of the arm namespace — **never aggregate it into
+   `averages_table.csv`**.
 1. **P1 first (code)** — it is the cheapest large change to the GRU's optimization
    (effective batch 4 → 128 for 136k params), it is confined to the module by
    construction, and everything downstream is evaluated under it. Most of the
@@ -896,7 +1185,9 @@ region before editing, never edit blind.
 
 ### Conventions every proposal follows
 
-1. Default-off config key; absent key → exact previous behavior.
+1. Default-off config key; absent key → exact previous behavior. See
+   GOVERNING CONSTRAINT 2 at the top — a hard invariant, not a style
+   preference, enforced by `verify_backward_compat.py`.
 2. New `pose_gru` sub-modules must be recoverable by `_sniff_pose_gru_config`
    (model.py:77) from weight-key presence, because the loader hard-fails on
    shape mismatch and mode is otherwise invisible in weight shapes.

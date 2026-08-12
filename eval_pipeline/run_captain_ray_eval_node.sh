@@ -58,6 +58,15 @@ CLAIM_DIR=$OUT/$LABEL/claims
 BASE_SHARD=${BASE_SHARD:-0}
 NUM_SHARDS=${NUM_SHARDS:-12}
 LIMIT=${LIMIT:-0}
+# GT-injection DIAGNOSTIC passthrough (infer_and_eval_worker_ray.py --oracle).
+# 'off' (the default) is byte-identical to every previous invocation of this
+# script. 'gt' feeds the GRU the CURRENT view's GT pose at its input only; the
+# worker asserts CONDITIONING=prev_pred_gru and prints a loud banner.
+# NOT AN ARM: a run with ORACLE=gt must never be aggregated into
+# summary/averages_table.csv alongside honest arms -- see
+# GRU_GAP_CLOSURE_DIRECTIVE.md rung 0 for why (the GRU emits a translation
+# ~3 GT-scales wrong even when handed an exact pose).
+ORACLE=${ORACLE:-off}
 
 [ -n "$CKPT" ] || { echo "ERROR: CKPT is required, e.g. CKPT=\$CKPT_ROOT/captain_cut3r_finetune_aug_full/<run>/checkpoint-final.pth" >&2; exit 1; }
 mn5_require f "$CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT" s "$SCENE_LIST"
@@ -69,7 +78,7 @@ mkdir -p "$OUT/logs" "$CLAIM_DIR"
 
 NUM_GPUS=$(mn5_require_gpus) || exit 1
 echo "Node: $(hostname)  GPUs visible: $NUM_GPUS  BASE_SHARD=$BASE_SHARD  NUM_SHARDS=$NUM_SHARDS  LIMIT=$LIMIT"
-echo "Ckpt: $CKPT  conditioning=$CONDITIONING  label=$LABEL"
+echo "Ckpt: $CKPT  conditioning=$CONDITIONING  oracle=$ORACLE  label=$LABEL"
 echo "Scenes: $(wc -l < "$SCENE_LIST")   Start: $(date)"
 
 # One worker process per GPU; all share the cooperative claim queue.
@@ -80,7 +89,7 @@ for g in $(seq 0 $((NUM_GPUS - 1))); do
     echo "[$(hostname) g$g shard$SHARD] starting at $(date)"
     python "$CRAY/eval_pipeline/infer_and_eval_worker_ray.py" \
       --ckpt "$CKPT" --label "$LABEL" --size 320 \
-      --conditioning "$CONDITIONING" \
+      --conditioning "$CONDITIONING" --oracle "$ORACLE" \
       --scenes_root "$SCENES_ROOT" --scene_list "$SCENE_LIST" \
       --pred_base "$OUT/$LABEL/preds" --eval_base "$OUT/$LABEL/eval" \
       --eval_script "$EVAL_SCRIPT" --cut3r_dir "$CUT3R_DIR" \

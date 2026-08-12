@@ -51,75 +51,75 @@ ANCHORS = [
      r"if self\.ddp_grad_sync", "existing full-sync branch"),
     ("src/CUT3R/src/croco/utils/misc.py", 431,
      r"^\s*if clip_grad is not None", "clip site (sync must precede it)"),
-    ("src/CUT3R/src/train_cut3r_baseline.py", 356,
+    ("src/CUT3R/src/train_cut3r_baseline.py", 388,
      r"ddp_grad_sync = bool\(getattr", "flag read (add pose_gru_grad_sync)"),
-    ("src/CUT3R/src/train_cut3r_baseline.py", 363,
+    ("src/CUT3R/src/train_cut3r_baseline.py", 395,
      r"loss_scaler = NativeScaler\(", "scaler construction"),
-    ("src/CUT3R/src/train_cut3r_baseline.py", 372,
+    ("src/CUT3R/src/train_cut3r_baseline.py", 404,
      r"base_model = accelerator\.unwrap_model", "unwrap -> attach sync_params after"),
     ("src/CUT3R/src/train_cut3r_baseline.py", 110,
      r"^def split_pose_gru_param_groups", "GRU param set (same set as sync_params)"),
-    ("src/CUT3R/src/train_cut3r_baseline.py", 344,
+    ("src/CUT3R/src/train_cut3r_baseline.py", 376,
      r"param_groups = split_pose_gru_param_groups", "GRU param-group split call"),
     ("src/CUT3R/src/dust3r/datasets/base/batched_sampler.py", 69,
      r"_view_idxs = rng\.integers", "random per-batch view count (why padding)"),
     # ---- §2 abstention gate --------------------------------------------
-    ("src/CUT3R/src/dust3r/model.py", 641,
+    ("src/CUT3R/src/dust3r/model.py", 730,
      r"^\s*pose_dim=7,$", "PoseGRU.__init__ signature (add gate kwarg)"),
-    ("src/CUT3R/src/dust3r/model.py", 751,
+    ("src/CUT3R/src/dust3r/model.py", 876,
      r"self\.head = nn\.Linear\(hidden_dim, pose_dim\)", "head (gate built next to it)"),
-    ("src/CUT3R/src/dust3r/model.py", 796,
+    ("src/CUT3R/src/dust3r/model.py", 977,
      r"^\s*raw = self\.head\(hidden\)", "head output (gate multiplies here)"),
     ("src/CUT3R/src/dust3r/model.py", 77,
      r"^def _sniff_pose_gru_config", "checkpoint sniff (detect gate)"),
-    ("src/CUT3R/src/dust3r/model.py", 120,
+    ("src/CUT3R/src/dust3r/model.py", 121,
      r"img_norm\.weight exists iff", "sniff key-presence table"),
-    ("src/CUT3R/src/dust3r/model.py", 1856,
+    ("src/CUT3R/src/dust3r/model.py", 2131,
      r"res_group\[-1\]\[\"gru_pose\"\] = gru_pose_pred", "res write (add gru_gate)"),
-    ("src/CUT3R/src/train_cut3r_baseline.py", 250,
+    ("src/CUT3R/src/train_cut3r_baseline.py", 256,
      r"enable_pose_gru\(", "enable_pose_gru kwargs assembly"),
     # ---- §0b P0 retarget the loss --------------------------------------
-    ("src/CUT3R/src/dust3r/losses.py", 1132,
+    ("src/CUT3R/src/dust3r/losses.py", 1197,
      r"gru_idx = \[i for i, pred in enumerate", "PoseGRULoss.compute_loss body (retarget here)"),
-    ("src/CUT3R/src/dust3r/losses.py", 1158,
+    ("src/CUT3R/src/dust3r/losses.py", 1229,
      r"gru_pose = preds\[i\]\[\"gru_pose\"\]\.float\(\)", "per-view GRU pose (target pairing)"),
-    ("src/CUT3R/src/dust3r/model.py", 459,
+    ("src/CUT3R/src/dust3r/model.py", 488,
      r"^def pose_delta_encoding", "pose_delta_encoding (import into losses.py)"),
-    ("src/CUT3R/src/dust3r/model.py", 1758,
+    ("src/CUT3R/src/dust3r/model.py", 2033,
      r"feat_group = \[feat_group\[0\] \+ ray_out", "ray add -> P2 abstention blend"),
     # ---- §3 training-signal repair -------------------------------------
-    ("src/CUT3R/src/dust3r/losses.py", 1084,
+    ("src/CUT3R/src/dust3r/losses.py", 1091,
      r"^class PoseGRULoss", "PoseGRULoss"),
-    ("src/CUT3R/src/dust3r/losses.py", 1103,
+    ("src/CUT3R/src/dust3r/losses.py", 1154,
      r"def __init__\(self, norm_mode=\"\?avg_dis\", iter_gamma", "loss __init__ (rot_weight)"),
-    ("src/CUT3R/src/dust3r/losses.py", 1164,
+    ("src/CUT3R/src/dust3r/losses.py", 1242,
      r"q_err = torch\.norm\(gru_pose", "chordal q_err -> geodesic"),
-    ("src/CUT3R/src/dust3r/losses.py", 1177,
+    ("src/CUT3R/src/dust3r/losses.py", 1258,
      r"^\s*loss = t_loss \+ q_loss", "loss sum (apply rot_weight)"),
-    ("src/CUT3R/src/dust3r/losses.py", 1211,
+    ("src/CUT3R/src/dust3r/losses.py", 1303,
      r"term = w_k \* \(t_k\.mean", "iterate term (apply rot_weight)"),
-    ("src/CUT3R/src/dust3r/model.py", 1529,
+    ("src/CUT3R/src/dust3r/model.py", 1767,
      r"# Refine the fed-back pose with the recurrent filter",
      "GRU island START, 2 lines below (full-window wrap)"),
-    ("src/CUT3R/src/dust3r/model.py", 1729,
+    ("src/CUT3R/src/dust3r/model.py", 1988,
      r"prev_pose_enc = gru_pose_pred if pose_gru_e2e", "GRU island END"),
-    ("src/CUT3R/src/dust3r/model.py", 1685,
+    ("src/CUT3R/src/dust3r/model.py", 1923,
      r"^\s*gru_in = \($", "gru_in construction (input_gain / probe widen)"),
-    ("src/CUT3R/src/dust3r/model.py", 783,
+    ("src/CUT3R/src/dust3r/model.py", 952,
      r"^\s*cell_in = gru_in$", "cell_in (input_gain multiply)"),
     # ---- §4 observability ----------------------------------------------
-    ("src/CUT3R/src/dust3r/model.py", 1559,
+    ("src/CUT3R/src/dust3r/model.py", 1797,
      r"cur_img_feat = feat_group\[0\]\.detach\(\)\.mean", "pooled F feature (the lossy one)"),
-    ("src/CUT3R/src/dust3r/model.py", 1564,
+    ("src/CUT3R/src/dust3r/model.py", 1802,
      r"cur_img_feat = feat_group\[0\]\.detach\(\)\.float\(\)", "corr full-token stash"),
-    ("src/CUT3R/src/dust3r/model.py", 1577,
+    ("src/CUT3R/src/dust3r/model.py", 1815,
      r"from dust3r\.img_encoders import corr_motion_stats",
      "corr pair statistic (xattn slots beside it)"),
-    ("src/CUT3R/src/dust3r/model.py", 1318,
+    ("src/CUT3R/src/dust3r/model.py", 1555,
      r"full_out\[i\]\[:batch_size\] \+= self\.masked_ray_map_token", "view-0 unconditioned path"),
-    ("src/CUT3R/src/dust3r/model.py", 1443,
+    ("src/CUT3R/src/dust3r/model.py", 1680,
      r"def _forward_decoder_group_step", "decoder group step (probe pass)"),
-    ("src/CUT3R/src/dust3r/model.py", 232,
+    ("src/CUT3R/src/dust3r/model.py", 233,
      r"base_width = w_ih\.shape", "sniff base_width {7,14} -> add 21"),
 ]
 
@@ -164,6 +164,18 @@ def main():
     print("\n--- required files ---")
     for rel in REQUIRED_FILES:
         print(f"[{'ok  ' if (ROOT / rel).exists() else 'MISS'}] {rel}")
+
+    if stale and args.fix_doc:
+        # The expected line numbers live in THIS file's ANCHORS table, so a doc
+        # rewrite alone leaves the gate red forever. Rewrite our own table too,
+        # keyed on (path, old_line) which is unique per entry.
+        me = Path(__file__).read_text()
+        for path, expected, actual, _lbl in stale:
+            me = re.sub(r'(\(\s*"' + re.escape(path) + r'",\s*)' + str(expected) + r'(,)',
+                        lambda m: m.group(1) + str(actual) + m.group(2), me, count=1)
+        Path(__file__).write_text(me)
+        print(f"--fix-doc: also updated {len(stale)} expected value(s) in "
+              f"{Path(__file__).name}")
 
     if stale and args.fix_doc and DOC.exists():
         text = DOC.read_text()
