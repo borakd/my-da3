@@ -254,6 +254,48 @@ hour rather than an assumption.
 residual rather than an open question. The dominant unmeasured term is
 training variance, and only the seed replicate addresses it.
 
+#### RESULT (2026-08-12 17:45): EXACT. THE HARNESS IS DETERMINISTIC.
+
+The full re-score ran and the pre-registered **EXACT** branch fired.
+
+`gru_a4g3r8_rescore` — same checkpoint, fresh label, 8 nodes × 4 H100, 8/8
+jobs COMPLETED rc=0 in ~58 min each, 4292 claims / 4292 eval / 4292 preds, so
+the 32-GPU distributed claim queue WAS exercised (this is the precise residual
+the 32-scene diag check bypassed, since that run had no `claims/` directory).
+
+    BYTE-IDENTICAL: 4292/4292    DIFFERING: 0    UNREADABLE: 0
+    only-in-A: 0                 only-in-B: 0
+
+Every per-scene `eval_depth_pose_metrics.csv` is byte-for-byte identical to
+the original 2026-08-10 scoreboard run. Scored by
+`compare_rescore_determinism.py`, which was written and committed while the
+jobs were still PENDING, precisely so the reading could not be tuned to the
+number.
+
+**WHAT THIS SETTLES:**
+- Harness, sharding, and claim-order noise are **identically zero**. Not
+  "small" — zero, at byte granularity, across the full 4292-scene sharded path.
+- Therefore **100% of the 0.00281 median arm-to-arm scatter is attributable to
+  TRAINING**. The scoreboard is not adding variance; the runs are.
+- Re-scoring can be removed from the list of things any disagreement might be
+  blamed on. Two differing table rows differ because their TRAINING differed.
+
+**WHAT IT DOES NOT SETTLE, AND THIS IS THE POINT:** it bounds harness noise
+only. It is NOT evidence that any arm result is real, and it makes the
+noise-floor warning at the top of this document STRONGER, not weaker — the
+scatter is now confirmed to be genuine run-to-run training variance, which is
+exactly the term that makes every single-run lever attribution on this program
+unreliable. The seed replicate remains the only instrument that can calibrate
+it, and it is now unambiguously interpretable: any spread it shows is pure
+training variance with no harness component to subtract.
+
+**Calibration note:** five inherited figures have failed on contact with
+measurement (the oracle bound, 70× starvation, input scales, expected-value
+bands, the ≤20-25% velocity ceiling). This is the first pre-registered
+prediction on this program that held exactly as stated. Recorded so the
+program's track record is not read as "measurement always overturns" — it
+overturns *unverified secondary inferences*, and this was a direct measurement.
+
 **Correction to an earlier framing in this document:** the 4.1611 aux-weight
 factor was NOT "silent". The `captain_gru_v3_a4_g3_r8_finetune.yaml` header
 already documents it and even names `pose_gru_loss_weight=0.2403` as the
