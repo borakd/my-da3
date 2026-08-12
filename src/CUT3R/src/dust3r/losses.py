@@ -23,6 +23,13 @@ from dust3r.utils.camera import (
     relative_pose_absT_quatR,
 )
 
+# P0 (PoseGRULoss target='relative'): the frame-to-frame motion encoder the A4
+# GRU input already builds its delta with. Module scope is safe -- dust3r.model
+# imports nothing from dust3r.losses, and `from dust3r.inference import ...`
+# above has already pulled dust3r.model into sys.modules, so this is a cache
+# hit rather than a new edge in the import graph.
+from dust3r.model import pose_delta_encoding
+
 
 def Sum(*losses_and_masks):
     loss, mask = losses_and_masks[0]
@@ -1098,9 +1105,53 @@ class PoseGRULoss(MultiLoss):
     Views without a "gru_pose" key (view 0, non-GRU runs) are skipped; with
     no such views at all the loss is 0 (safe to keep in a baseline config).
 
+    TARGET LEVER (P0, `pose_gru_loss_target`), default "absolute" = the
+    behaviour above, bit-for-bit.
+
+      "relative" supervises the MOTION instead of the pose. The absolute
+      target above carries the head's accumulated drift, which is
+      unobservable from the GRU's inputs (it sees only the head's own poses),
+      and that drift dominates the aux translation term ~13:1 over the one
+      learnable component — so ~94% of the gradient pushes a 136k-param
+      module toward something it structurally cannot predict. Both endpoints
+      of a frame-to-frame motion carry the SAME drift, so differencing
+      cancels it:
+
+          pred := pose_delta_encoding(pr_poses[i-1], gru_pose[i])
+          gt   := pose_delta_encoding(gt_poses[i-1], gt_poses[i])
+
+      i.e. the GRU's pose read as a motion off the head's OWN previous pose,
+      against the GT motion. `pr_poses[i-1]` (not `gru_pose[i-1]`) is the
+      predecessor on purpose: it is the same detached anchor the A4 cell input
+      is built from, it keeps the term a single-view quantity, and it holds
+      the pred side in the head's scene scale — the scale `factor_pr`
+      normalizes and the scale the ray build consumes.
+
+      Two consequences worth stating up front:
+        * The absolute pose is no longer penalized AT ALL, so the pose handed
+          to the ray build may drift freely. Whether that is harmless (drift
+          is unobservable anyway) or harmful is exactly what the A/B measures.
+        * The double cover disappears for free. The absolute quaternion term
+          compares an F.normalize'd head quaternion (model.py PoseGRU.forward,
+          sign NOT canonicalized) against a standardize_quaternion'd GT, so
+          q and −q read as maximally different; both relative encodings come
+          out of matrix_to_quaternion, which standardizes to real part ≥ 0.
+
+      Normalization is unchanged and needs no adjustment: rel_t = R_prev^T
+      (t_cur − t_prev) is linear in the translations, so dividing the relative
+      translation by the per-side factor is identical to computing the motion
+      from already-normalized poses.
+
+      The predecessor must live inside the SAME chunk — reaching across a
+      TBPTT boundary would pair against a pose from a freed graph and a
+      different pair of norm factors. Chunk-local index 0 is therefore
+      skipped. In chunk 0 that view is global view 0, which carries no
+      "gru_pose" anyway, so nothing is lost there; in later chunks it costs
+      one supervised view out of chunk_size.
+
     """
 
-    def __init__(self, norm_mode="?avg_dis", iter_gamma=0.0):
+    def __init__(self, norm_mode="?avg_dis", iter_gamma=0.0, target="absolute"):
         super().__init__()
         # Same '?' convention as Regr3DPose: '?' = don't rescale metric-scale
         # samples (their pred factor := gt factor -> true-scale supervision).
@@ -1118,18 +1169,38 @@ class PoseGRULoss(MultiLoss):
         # weight gamma**(N-1-k); the final iterate keeps its existing
         # weight-1.0 term, so its gradient scale matches an iters=1 run.
         self.iter_gamma = float(iter_gamma)
+        # P0: what the module is ASKED to predict. See the class docstring.
+        # Refuse anything else rather than silently falling back to absolute —
+        # a typo in the config's ${pose_gru_loss_target} would otherwise train
+        # the control arm under the experiment's name.
+        if target not in ("absolute", "relative"):
+            raise ValueError(
+                f"PoseGRULoss target must be 'absolute' or 'relative', got {target!r}"
+            )
+        self.target = target
 
     # Reuse the main pose loss's normalization verbatim (it reads only
     # self.norm_mode / self.gt_scale off self).
     get_norm_factor_poses = Regr3DPose.get_norm_factor_poses
 
     def get_name(self):
+        # Non-default arguments only, so every pre-P0 config's criterion string
+        # (and therefore its logged loss keys) is unchanged character-for-character.
+        args = []
         if self.iter_gamma > 0.0:
-            return f"PoseGRULoss(iter_gamma={self.iter_gamma:g})"
-        return "PoseGRULoss()"
+            args.append(f"iter_gamma={self.iter_gamma:g}")
+        if self.target != "absolute":
+            args.append(f"target={self.target}")
+        return f"PoseGRULoss({', '.join(args)})"
 
     def compute_loss(self, gts, preds, camera1=None, eps=1e-3, **kw):
         gru_idx = [i for i, pred in enumerate(preds) if "gru_pose" in pred]
+        relative = self.target == "relative"
+        if relative:
+            # A motion target needs the view's predecessor INSIDE this chunk.
+            # Chunk-local index 0 has none (see the class docstring); in chunk 0
+            # it carries no "gru_pose" and is already absent from gru_idx.
+            gru_idx = [i for i in gru_idx if i >= 1]
         if not gru_idx:
             device = preds[0]["camera_pose"].device if preds else "cpu"
             return torch.tensor(0.0, device=device), {}
@@ -1156,16 +1227,26 @@ class PoseGRULoss(MultiLoss):
         t_terms, q_terms = [], []
         for i in gru_idx:
             gru_pose = preds[i]["gru_pose"].float()
+            target = gt_poses[i]
+            if relative:
+                # Only gru_pose carries a graph here; pr_poses/gt_poses are
+                # detached, so the motion encoding keeps the same gradient
+                # isolation the absolute term has.
+                gru_pose = pose_delta_encoding(pr_poses[i - 1], gru_pose)
+                target = pose_delta_encoding(gt_poses[i - 1], gt_poses[i])
             t_err = torch.norm(
                 gru_pose[:, :3] / factor_pr.clip(eps)
-                - gt_poses[i][:, :3] / factor_gt.clip(eps),
+                - target[:, :3] / factor_gt.clip(eps),
                 dim=-1,
             )
-            q_err = torch.norm(gru_pose[:, 3:] - gt_poses[i][:, 3:], dim=-1)
+            q_err = torch.norm(gru_pose[:, 3:] - target[:, 3:], dim=-1)
             # A NaN GT pose (pose-less view) also NaNs its sample's factor,
             # so base_mask already drops the sample; the isfinite term guards
             # the per-view target on samples whose factor stayed clean.
             valid = base_mask & torch.isfinite(gt_poses[i]).all(dim=-1)
+            if relative:
+                # The motion target reads TWO GT poses, so both must be clean.
+                valid = valid & torch.isfinite(gt_poses[i - 1]).all(dim=-1)
             t_terms.append(t_err[valid])
             q_terms.append(q_err[valid])
         t_all = torch.cat(t_terms)
@@ -1182,8 +1263,12 @@ class PoseGRULoss(MultiLoss):
         if self.iter_gamma > 0.0:
             # Intermediate iterates 0..N-2 only (the final iterate IS
             # gru_pose, already counted above at weight 1.0). Same norm
-            # factors and validity masks as the final term — every iterate
-            # lives in the head's scene scale.
+            # factors, validity masks AND target as the final term — every
+            # iterate lives in the head's scene scale, and retargeting the
+            # final term alone would be self-defeating: at the R8 arm's
+            # iters=8/gamma=0.8 these iterates carry 3.1611x the final term's
+            # weight, so ~76% of the aux gradient would stay absolute and the
+            # A/B would measure almost nothing.
             iter_t_terms, iter_q_terms = {}, {}
             for i in gru_idx:
                 seq = preds[i].get("gru_pose_iters")
@@ -1192,13 +1277,20 @@ class PoseGRULoss(MultiLoss):
                 seq = seq.float()
                 n_it = seq.shape[0]
                 valid = base_mask & torch.isfinite(gt_poses[i]).all(dim=-1)
+                target = gt_poses[i]
+                if relative:
+                    valid = valid & torch.isfinite(gt_poses[i - 1]).all(dim=-1)
+                    target = pose_delta_encoding(gt_poses[i - 1], gt_poses[i])
                 for k in range(n_it - 1):
+                    iter_k = seq[k]
+                    if relative:
+                        iter_k = pose_delta_encoding(pr_poses[i - 1], iter_k)
                     t_err_k = torch.norm(
-                        seq[k][:, :3] / factor_pr.clip(eps)
-                        - gt_poses[i][:, :3] / factor_gt.clip(eps),
+                        iter_k[:, :3] / factor_pr.clip(eps)
+                        - target[:, :3] / factor_gt.clip(eps),
                         dim=-1,
                     )
-                    q_err_k = torch.norm(seq[k][:, 3:] - gt_poses[i][:, 3:], dim=-1)
+                    q_err_k = torch.norm(iter_k[:, 3:] - target[:, 3:], dim=-1)
                     iter_t_terms.setdefault((n_it, k), []).append(t_err_k[valid])
                     iter_q_terms.setdefault((n_it, k), []).append(q_err_k[valid])
             iters_loss = None

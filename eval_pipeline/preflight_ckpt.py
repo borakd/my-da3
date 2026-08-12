@@ -104,6 +104,12 @@ LEVERS_RESTORED = {
 LEVERS_TRAINER_ONLY = {
     "pose_gru_bptt", "pose_gru_e2e", "pose_gru_lr_scale",
     "pose_gru_loss_weight", "pose_gru_iter_gamma", "pose_gru_iter_detach",
+    # P0: chooses WHAT PoseGRULoss supervises (absolute pose vs frame-to-frame
+    # motion). Lives entirely inside the loss -- it builds no parameters, no
+    # buffers and no state_dict keys, and PoseGRU.forward never reads it -- so
+    # the eval rebuilds the identical module either way. Whitelisted here only
+    # so check_lever_coverage stops refusing to score a reltarget arm.
+    "pose_gru_loss_target",
 }
 
 
