@@ -1211,6 +1211,67 @@ inner products put the ~4.8× head/GT mismatch straight into the numerator, and
 a scale offset along the GT direction INFLATES `<u,w>` rather than cancelling.
 That would manufacture a false positive, the worst available failure here.
 
+**ΔR² RESULT (2026-08-12, r8, 100 scenes, scene-block bootstrap 1000 draws).**
+The pre-registered negative did NOT occur. Every band's 95% CI excludes zero:
+
+| band | ΔR² trans (95% CI) | ΔR² rot | corr(u_vel, u_probe) |
+|---|---|---|---|
+| early | +0.0120 [+0.0003, +0.0505] | +0.0498 [+0.0231, +0.0936] | +0.258 |
+| mid | **+0.0400 [+0.0092, +0.0819]** | +0.0108 [+0.0000, +0.0812] | +0.105 |
+| late | +0.0287 [+0.0003, +0.1177] | +0.0154 [+0.0001, +0.0892] | **−0.013** |
+
+The redundancy trap did NOT fire: probe and velocity are near-orthogonal where
+drift dominates, so the contribution is genuinely additive. Given the probe is
+OOD, this is a LOWER bound.
+
+**Read it with four honest caveats:**
+
+1. **Magnitude is weakly determined.** ΔR² = 0.03 is a **1.5% best-case RMS
+   reduction** on the correction vector, NOT 3% — cos² is a fraction of
+   SQUARED error while the ≤20–25% ceiling is a fraction of error. Do not
+   state ΔR² as headroom against that ceiling; that mixes axes exactly as the
+   retired "60–70 points" figure did. CIs span a factor of ~4.
+2. **The thesis's distinctive prediction is UNCONFIRMED.** Point estimates go
+   0.0120 → 0.0400 → 0.0287: flat-to-declining where the thesis says the
+   effect should GROW with accumulated drift. The OOD confound (late views are
+   more OOD) makes declining ΔR² and rising OOD severity observationally
+   identical here, so this does not contradict the thesis — but "strongest
+   where drift dominates" is NOT established, and late is the weakest cell.
+3. **Six bands from 100 scenes are not six independent confirmations.** The
+   coherence argument is sign-consistency across two independent physical
+   quantities and three regimes plus a predicting mechanism — not the count.
+4. **Scale check.** The C→B ATE gap is 0.0686; a naive linear read of 1.5% is
+   ~0.001, i.e. LESS than the 0.0021 the existing R8 arm already delivers. The
+   pose→ATE map is strongly nonlinear (B has zero pose error and ~6× better
+   ATE), so this is a sanity check, not a forecast.
+
+**INDEPENDENT AND POSSIBLY BIGGER: cos²_vel COLLAPSES.** Translation
+0.0207 early → 0.0001 mid → 0.0031 late. Constant-velocity extrapolation
+explains essentially nothing of the needed correction where drift dominates.
+MEASURED consequence: the A4 `pose_delta` lever hands the cell a velocity
+block that is near-useless in the regime that matters, its usable content
+concentrated early (and small even there). INFERRED, and stated no more
+strongly: this CONTRADICTS the dossier's "a perfect velocity extrapolator
+recovers ≤20–25%" carried in §0.3 — that figure cannot describe the late
+regime. Record the contradiction and the measurement; **do not substitute a
+replacement number**, since nobody has reproduced the original computation.
+Fifth dossier figure to fail on contact with measurement.
+
+Caveat riding with every number above: one checkpoint family, 100 scenes, one
+dataset.
+
+**THE SHORT-RUN RUNG (~3 h, not 26 h).** The premise test structurally cannot
+answer whether a TRAINED-FOR probe beats an OOD one. A 5–10 epoch refine run
+can, with three pre-registered readouts:
+(1) does `||cell.weight_ih[:, 14:21]||` move off zero at all;
+(2) does ΔR² on the partially-trained checkpoint EXCEED the 0.03 OOD lower
+bound;
+(3) **does ΔR² INCREASE with view index once trained** — the thesis's
+signature, currently unconfirmed, and cleanly measurable only here because
+training removes the OOD confound. A trained probe still peaking mid and
+decaying late would mean it carries MOTION information (early/mid), not DRIFT
+— the trajectory-only ceiling wearing a new hat.
+
 **PROGRAM-LEVEL RULE — the dead-falsifier window.** EVERY zero-init channel
 this program adds has a window in which its own falsifier reports "unused"
 regardless of whether the mechanism works: a zero-weight channel is immune to
