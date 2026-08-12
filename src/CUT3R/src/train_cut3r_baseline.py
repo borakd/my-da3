@@ -243,6 +243,12 @@ def train(args):
     # (moves with the rest of the model), and BEFORE the optimizer is built
     # (its params need their own group — see split_pose_gru_param_groups).
     use_pose_gru = bool(getattr(args, "pose_gru", False))
+    # P2: the ray gate is a head ON the GRU hidden, so it cannot exist without
+    # the GRU. Refuse rather than silently training an ungated arm under a
+    # config whose name says otherwise.
+    assert use_pose_gru or not bool(getattr(args, "pose_gru_ray_gate", False)), (
+        "pose_gru_ray_gate=True needs pose_gru=True — the gate reads the GRU hidden"
+    )
     if use_pose_gru:
         assert bool(
             getattr(args, "feed_prev_pred", False)
@@ -282,6 +288,15 @@ def train(args):
             # short form is padded with ones over the appended F block, since
             # input_dim is 46 on the F1 pooled arms, not 14.
             input_gain=getattr(args, "pose_gru_input_gain", None),
+            # P2 abstention gate: a 1-unit head off the hidden emits a
+            # per-sample a in (0,1) that the call site blends into the RAY add
+            # (a*ray_token + (1-a)*masked_ray_map_token), so a->0 reproduces
+            # the pose-free path view 0 takes and the arm's floor becomes the
+            # no-conditioning arm rather than plain feed_prev_pred. Trained by
+            # the main reconstruction loss, logged per view as gru_ray_gate_v*.
+            # ABSENT KEY -> False -> no head, no state_dict key, byte-identical
+            # to every existing arm.
+            ray_gate=bool(getattr(args, "pose_gru_ray_gate", False)),
         )
         # Split the param count: the encoder sources hang a frozen network
         # under pose_gru.img_encoder (11.2M resnet18 / 21M dinov2), and a
@@ -713,6 +728,16 @@ def train_one_epoch(
                 )
             loss, loss_details = result["loss"]  # criterion returns two values
 
+            # P2 telemetry. The gate lives in the forward, not in the
+            # criterion, so its scalars cannot arrive through loss_details on
+            # their own — drain them here, AFTER the TBPTT chunk merge (the
+            # keys already carry global view indices and must not be
+            # renumbered by merge_chunk_dict). Empty dict whenever the gate is
+            # off, so every other arm is untouched.
+            gru_host = accelerator.unwrap_model(model)
+            if hasattr(gru_host, "pop_ray_gate_stats"):
+                loss_details.update(gru_host.pop_ray_gate_stats())
+
             loss_value = float(loss)
 
             if not math.isfinite(loss_value):
@@ -1045,6 +1070,12 @@ def test_one_epoch(
         )
 
         loss_value, loss_details = result["loss"]  # criterion returns two values
+        # P2 gate telemetry on the test side too — and NOT optional: this
+        # forward records into the same accumulator, so leaving it undrained
+        # would fold test views into the next train step's gru_ray_gate means.
+        gru_host = accelerator.unwrap_model(model)
+        if hasattr(gru_host, "pop_ray_gate_stats"):
+            loss_details.update(gru_host.pop_ray_gate_stats())
         metric_logger.update(loss=float(loss_value), **loss_details)
 
         # Extra diagnostic criteria on the SAME preds/views (no extra forward).

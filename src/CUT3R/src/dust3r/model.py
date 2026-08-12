@@ -247,6 +247,22 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
     # self.input_dim by construction, and a disagreement there would already
     # have failed on cell.weight_ih.
     input_gain = True if g("input_gain") is not None else None
+    # P2: the ray gate is presence-gated exactly like img_norm and input_gain —
+    # pose_gru.ray_gate.weight exists iff the run set pose_gru_ray_gate. It is
+    # the one lever here that changes what the ENCODER TOKENS receive, so a
+    # checkpoint rebuilt without it would silently score a different model than
+    # the one that trained (an always-open gate instead of a learned one), and
+    # a checkpoint rebuilt WITH it that never trained one would fail the strict
+    # load. Weights are authoritative; the saved args are cross-checked and a
+    # disagreement hard-fails, mirroring img_feat_src above.
+    ray_gate = g("ray_gate.weight") is not None
+    args_ray_gate = getattr(train_args, "pose_gru_ray_gate", None)
+    if args_ray_gate is not None and bool(args_ray_gate) != ray_gate:
+        raise RuntimeError(
+            f"{where}: weights identify pose_gru ray_gate={ray_gate} but "
+            f"ckpt['args'].pose_gru_ray_gate={args_ray_gate!r} — mislabelled "
+            "checkpoint, refusing to guess which side is wrong"
+        )
     return dict(
         hidden_dim=hidden_dim,
         mode=mode,
@@ -258,6 +274,7 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
         img_feat_src=img_feat_src,
         iters=iters,
         input_gain=input_gain,
+        ray_gate=ray_gate,
     )
 
 
@@ -532,6 +549,14 @@ def gt_pose_encoding(views, idx, ref_idx=0):
     return enc.detach(), ok
 
 
+# P2 abstention gate: bias init of the 1-unit ray gate. sigmoid(4.0) = 0.98201,
+# so `a` starts open and the gated arm reproduces the ungated one to within 2%
+# of the ray token at step zero — the same init-equivalence discipline every
+# other lever here follows (zero-init head, zero-init img_proj). Named rather
+# than inlined because the falsifier asserts the 2% bound against this value.
+RAY_GATE_BIAS_INIT = 4.0
+
+
 class PoseGRU(nn.Module):
     """Recurrent filter for the feed_prev_pred pose loop.
 
@@ -716,6 +741,7 @@ class PoseGRU(nn.Module):
         img_encoder_weights=None,
         iters=1,
         input_gain=None,
+        ray_gate=False,
     ):
         super().__init__()
         assert mode in ("residual", "direct", "split_anchor"), (
@@ -859,6 +885,50 @@ class PoseGRU(nn.Module):
             with torch.no_grad():
                 self.head.weight[3:pose_dim].zero_()
                 self.head.bias[3:pose_dim].zero_()
+        # P2 abstention gate (GRU_GAP_CLOSURE_DIRECTIVE.md §2). ONE logit off
+        # the hidden -> a per-sample scalar a = sigmoid(.) in (0, 1) which the
+        # CALL SITE blends into the ray add, NOT into anything this module
+        # emits: feat + a*ray_token + (1-a)*masked_ray_map_token.
+        #
+        # Why the gate belongs to the RAY and not to the head's correction
+        # (P2b): a correction gate's a->0 floor is plain feed_prev_pred, i.e.
+        # arm C, and C already loses to the pose-free arm A on 63% of scenes —
+        # so no correction gate can clear the directive's promotion bar. Gating
+        # the ray makes the a->0 floor the pose-free path view 0 itself takes
+        # (the same masked_ray_map_token), i.e. arm A. Only that floor makes
+        # "stop losing to A" reachable by construction.
+        #
+        # Why it lives in PoseGRU rather than at the call site: the weights
+        # then serialize under the pose_gru.* namespace, so
+        # _sniff_pose_gru_config recovers the arm from key presence alone and
+        # a gated checkpoint can never be rebuilt as an ungated model.
+        #
+        # zeros_(weight) + bias=RAY_GATE_BIAS_INIT: every sample starts at
+        # a = 0.982 regardless of the hidden, so the gated arm is the ungated
+        # arm to within 2% at init and the gate has to LEARN to close. Absent
+        # kwarg -> no submodule, no state_dict keys, byte-identical to every
+        # pre-P2 checkpoint (the same presence-gating discipline as input_gain).
+        if ray_gate:
+            self.ray_gate = nn.Linear(hidden_dim, 1)
+            nn.init.zeros_(self.ray_gate.weight)
+            nn.init.constant_(self.ray_gate.bias, RAY_GATE_BIAS_INIT)
+        else:
+            self.ray_gate = None
+
+    def ray_gate_value(self, hidden):
+        """P2: the per-sample abstention scalar for THIS step's ray token.
+
+        (B, H) hidden -> (B, 1, 1) in (0, 1), already shaped to broadcast over
+        the (B, N, C) token grid the ray token is added to. Call it OUTSIDE
+        autocast: nn.Linear is on the autocast list, and a 1-unit logit sitting
+        at +-4 has no fp16 headroom to spare. The value is deliberately NOT
+        detached — the main reconstruction loss reaching `a` through the blend
+        is the gate's only training signal.
+        """
+        assert self.ray_gate is not None, (
+            "ray_gate_value() needs pose_gru_ray_gate=True — no gate was built"
+        )
+        return torch.sigmoid(self.ray_gate(hidden))[..., None]
 
     def extract_img_feat(self, img):
         """Frozen-encoder appearance of ONE view: (B, 3, H, W) in the loader's
@@ -1155,6 +1225,7 @@ class ARCroco3DStereo(CroCoNet):
         img_encoder_weights=None,
         iters=1,
         input_gain=None,
+        ray_gate=False,
     ):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
@@ -1192,10 +1263,60 @@ class ARCroco3DStereo(CroCoNet):
             # pose_gru_input_gain config key gives) builds no buffer at all,
             # so the module is byte-identical to every pre-P3.4 arm.
             input_gain=input_gain,
+            # P2 abstention gate: False (the default, and what an absent
+            # pose_gru_ray_gate config key gives) builds no head at all, so
+            # the ray add stays the plain unconditional sum.
+            ray_gate=ray_gate,
         )
         self._pose_gru_hidden = None
         self._prev_img_feat = None
+        self._ray_gate_stats = {}
         return self.pose_gru
+
+    def _record_ray_gate(self, view_idx, a):
+        """P2 telemetry: accumulate the per-view sum of the abstention scalar.
+
+        Kept as a 0-dim DEVICE tensor and turned into a float only in
+        pop_ray_gate_stats(): a per-view .item() would force a host sync on
+        every view of every step (64 syncs/iteration on the long_context arms).
+        Keyed by GLOBAL view index, so the trainer-side injection needs none of
+        merge_chunk_dict's trailing-digit renumbering. Bounded by the view
+        count, so an inference path that never drains it just carries a running
+        average instead of leaking.
+        """
+        stats = getattr(self, "_ray_gate_stats", None)
+        if stats is None:
+            stats = self._ray_gate_stats = {}
+        prev_sum, prev_n = stats.get(int(view_idx), (None, 0))
+        cur = a.detach().float().sum()
+        stats[int(view_idx)] = (cur if prev_sum is None else prev_sum + cur,
+                                prev_n + int(a.shape[0]))
+
+    def pop_ray_gate_stats(self, prefix="gru_ray_gate"):
+        """Drain the P2 gate telemetry into plain floats and reset it.
+
+        Returns {} when the gate is off (nothing was ever recorded), so the
+        caller can splice it into loss_details unconditionally. Keys:
+          <prefix>        mean of `a` over every conditioned view and sample
+          <prefix>_v<i>   the PER-VIEW mean the directive asks for — a trained
+                          gate collapsing toward 0 on mid-sequence views is the
+                          misapplied-tail-correction signature from P3.2.
+        One host sync total (the stack + .cpu() below), not one per view.
+        """
+        stats = getattr(self, "_ray_gate_stats", None)
+        if not stats:
+            return {}
+        self._ray_gate_stats = {}
+        idxs = sorted(stats)
+        sums = torch.stack([stats[i][0] for i in idxs]).cpu().tolist()
+        counts = [stats[i][1] for i in idxs]
+        out = {
+            f"{prefix}_v{i}": s / n for i, s, n in zip(idxs, sums, counts) if n
+        }
+        total = sum(counts)
+        if total:
+            out[prefix] = sum(sums) / total
+        return out
 
     def set_freeze(self, freeze):  # this is for use by downstream models
         self.freeze = freeze
@@ -1573,6 +1694,7 @@ class ARCroco3DStereo(CroCoNet):
         feed_prev_pred = bool(getattr(self, "feed_prev_pred", False))
         gru_pose_pred = None
         gru_iterates = []  # all R-lever iterates of this view (last == gru_pose_pred)
+        ray_gate_a = None  # P2: per-sample abstention scalar, set iff the gate exists
         pose_gru_e2e = False  # set True inside the GRU block when lever G2 is live
         if feed_prev_pred:
             # Condition view x on the pose the model itself predicted at step
@@ -1812,6 +1934,27 @@ class ARCroco3DStereo(CroCoNet):
                                     gru_pose_pred.detach() if iter_detach else gru_pose_pred
                                 )
                     new_hidden = hidden
+                    # getattr, not attribute access: mirrors img_feat_src above,
+                    # so a PoseGRU that predates this attribute reads as "no
+                    # gate" instead of raising.
+                    if getattr(pose_gru, "ray_gate", None) is not None:
+                        # P2 abstention gate. Read off the POST-update hidden:
+                        # the state that has just consumed THIS view's evidence
+                        # is what decides whether this view's pose is worth
+                        # conditioning on at all. fp32 outside autocast, like
+                        # the cell above.
+                        #
+                        # NOT detached, and NOT conditioned on pose_gru_e2e:
+                        # `a` multiplies the ray token in the blend below, so
+                        # the main reconstruction loss reaches the gate even
+                        # when ray_out itself is a constant (e2e off). That is
+                        # the point — the gate is trained by the objective it
+                        # is supposed to protect, not by the aux pose loss.
+                        with torch.autocast(
+                            device_type=feat_group[0].device.type, enabled=False
+                        ):
+                            ray_gate_a = pose_gru.ray_gate_value(new_hidden.float())
+                        self._record_ray_gate(view_indices[0], ray_gate_a)
                     if pose_gru.img_feat == "input":
                         # Stash the current view's (honest, unfalsified)
                         # pre-ray appearance for the next step's pair — the
@@ -1871,7 +2014,23 @@ class ARCroco3DStereo(CroCoNet):
                         rmap.permute(0, 3, 1, 2).to(feat_group[0].dtype),
                         shape_group[0],
                     )
-                feat_group = [feat_group[0] + ray_out[-1].to(feat_group[0].dtype)]
+                if ray_gate_a is not None:
+                    # P2 abstention blend. a -> 1 is the line below, bit for
+                    # bit (1.0*ray is exact, 0.0*token adds an exact zero);
+                    # a -> 0 is feat + masked_ray_map_token, which IS the
+                    # pose-free construction view 0 takes in _encode_views —
+                    # i.e. the floor of this arm is arm A, not arm C. Cast `a`
+                    # to the feature dtype rather than letting it promote: a
+                    # stray fp32 `a` under AMP would silently widen every
+                    # downstream token tensor.
+                    a = ray_gate_a.to(feat_group[0].dtype)
+                    feat_group = [
+                        feat_group[0]
+                        + a * ray_out[-1].to(feat_group[0].dtype)
+                        + (1 - a) * self.masked_ray_map_token.to(feat_group[0].dtype)
+                    ]
+                else:
+                    feat_group = [feat_group[0] + ray_out[-1].to(feat_group[0].dtype)]
         feat_cat, pos_cat, token_offsets = self._concat_group_feat_pos(feat_group, pos_group)
         debug_grouped = bool(getattr(self, "debug_grouped_updates", False))
         debug_once = bool(getattr(self, "debug_grouped_updates_once", True))
@@ -1970,6 +2129,12 @@ class ARCroco3DStereo(CroCoNet):
                 # builds its own GT target from the views — same construction
                 # as the main pose loss: camera_to_pose_encoding(inv(cam1)@gt).
                 res_group[-1]["gru_pose"] = gru_pose_pred
+                if ray_gate_a is not None:
+                    # P2 telemetry on the DATA path, next to the pose, so a
+                    # criterion or a probe can read the per-sample gate without
+                    # re-running the forward. pop_ray_gate_stats() is the
+                    # scalar-logging path; this is the raw (B, 1) value.
+                    res_group[-1]["gru_ray_gate"] = ray_gate_a.detach().reshape(-1, 1)
                 if len(gru_iterates) > 1:
                     # R lever: all iterates (final == gru_pose) for the
                     # gamma-weighted sequence loss. ONE stacked (N, B, 7)
