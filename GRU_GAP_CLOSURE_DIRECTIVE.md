@@ -1089,11 +1089,19 @@ scenes, minutes. Design rules, all learned the hard way:
   is a condition it never saw (view 0 has no accumulated state, so it is not
   the same case). So `e_probe < e_lag` ⇒ STRONG GO; `e_probe ≥ e_lag` ⇒
   SUGGESTIVE, NOT REFUTED — you measured that an untrained-for probe fails.
-- **Bracket it with arm A**, which is trained ENTIRELY pose-free and shows
-  what the readout achieves when optimized for. Do NOT add the masked token
-  when probing arm A — that would measure it outside its own distribution,
-  the mirror of the OOD error above. No probe code is needed at all: every
-  arm-A view is already pose-free, so its ordinary forward IS the readout.
+- **The arm-A bracket is DEGENERATE — my error, corrected 2026-08-12.** Arm A
+  has no conditioning loop, so its "readout" and its "trajectory" are the SAME
+  TENSOR: `e_probe_t` and `e_head_t` are bit-identical at every band in
+  `p43_premise_v3.json` (and correctly differ for r8). Comparing them tests
+  whether one estimator beats an extrapolation of its own two previous
+  outputs — i.e. temporal smoothness, guaranteed for any state-recurrent
+  model. **A model cannot observe its own error by asking itself.** So the
+  bracket does NOT close the OOD escape hatch; only the r8 end is usable, and
+  that end is pre-registered as SUGGESTIVE, NOT REFUTING.
+  What arm A DOES establish, non-degenerately: by late views its pose readout
+  is nearly predictable from its own two previous outputs (p/vel 0.985), i.e.
+  the head has become a smooth extrapolator barely reading the current image.
+  That is architectural and it is the strongest pessimistic evidence here.
 - **Normalize within each model.** Arm A and r8 have different absolute head
   scales, so cross-model error comparison is a units comparison. Report the
   per-view RATIO `e_readout / e_lag` computed inside each model's own
@@ -1117,6 +1125,60 @@ scenes, minutes. Design rules, all learned the hard way:
   `P_committed = P̂(x−1)` exactly, so `e_gru` must EQUAL `e_lag` bit-for-bit.
 - Caveat: these are RAW errors, not the per-batch-normalized quantities
   `PoseGRULoss` reports as `gru_trans_err_gtscale`. Never cross-read the two.
+
+### PREMISE TEST RESULT (2026-08-12, 100 test scenes × 64 views, both arms)
+
+Per-band ratios, normalized per side by each sequence's own `?avg_dis` factor
+(v1 of the instrument differenced head-scale against GT-scale RAW and measured
+the ~4.8× scale mismatch instead of pose error — the same class of failure as
+rung 0, caught mid-flight):
+
+| arm | band | e_probe/e_vel | e_probe/e_lag |
+|---|---|---|---|
+| r8 (OOD probe) | mid 17–47 | **1.066** | 1.077 |
+| r8 (OOD probe) | late 48–63 | **1.051** | 1.068 |
+| arm A (degenerate) | mid | 0.974 | 0.985 |
+| arm A (degenerate) | late | 0.985 | 0.990 |
+
+Not saturated: `e_probe/e_null` is 0.325–0.375 late, so every estimator is
+~3× better than predicting the origin and the ratios have real dynamic range.
+Common-mode share at late views: r8 **59%**, arm A 83%.
+
+**Verdict: SUGGESTIVE NEGATIVE, NOT A REFUTATION.** Established: an
+untrained-for probe inside a conditioned model is 5–7% worse than velocity
+extrapolation mid/late. NOT established, and untestable without training it:
+whether a TRAINED-FOR probe inside a CONDITIONED model behaves differently —
+the one configuration P4.3 proposes and the one nothing here measures.
+
+**Caveat on the slope argument.** "Advantage decays with view index" was
+offered as corroboration, but arm A cannot corroborate (degenerate above), so
+it rests on r8 alone — and OOD severity itself grows with x, since late views
+carry more conditioning-dependent state the probe was never trained to
+decode. Decaying advantage and growing OOD-ness predict the same curve; r8
+cannot separate them.
+
+**THE MAGNITUDE COMPARISON IS THE WRONG TEST.** `e_probe > e_vel` says the
+probe is a worse POINT ESTIMATE. It does not say the probe carries no drift
+information — a signal with larger error is still informative if its error is
+DECORRELATED from the trajectory's, and r8's probe is only 59% common-mode,
+i.e. ~41% independent content whose direction nothing has measured. The
+decisive quantity is the cosine between the proposed and the true correction:
+
+    u = O(x) − P̂(x−1)      w = GT(x) − P̂(x−1)      cos = <u,w>/(|u||w|)
+
+with optimal gain `a* = <u,w>/<u,u>` leaving residual `|w|²(1 − cos²)`, so
+**`cos²` is exactly the best fractional error reduction ANY corrector could
+extract from this observation** — one scalar per band, directly comparable to
+the ≤20–25% trajectory-only ceiling. `cos² ≈ 0` late ⇒ genuinely refuted, on
+the right quantity. `cos²` materially > 0 while `e_probe > e_vel` ⇒ the probe
+is informative and the premise test measured the wrong thing. Costs three
+extra logged scalars per view on the same minutes-long rollout.
+
+**OPERATIONAL — dead-falsifier window.** `POSE_GRU_PROBE_SHUFFLE` is a NO-OP
+while `cell.weight_ih[:, 14:21]` is zero-init: a zero-weight channel is immune
+to a shuffled input. Check the column norm BEFORE falsifying. This generalizes
+to every zero-init channel this program adds (same trap the R8 header flags
+for `POSE_GRU_FORCE_ITERS` under a locked zero-init head).
 
 **Scoreability:** `pose_gru_refine_passes` / `pose_gru_probe_every` must be
 registered in `preflight_ckpt.py`'s lever list — but only AFTER the load path
