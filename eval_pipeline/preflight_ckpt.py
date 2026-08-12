@@ -96,6 +96,18 @@ LEVERS_RESTORED = {
     # False (model.py:283-286) and the frozen encoder's weights come out of the
     # checkpoint, so this never reads a weight file on an offline compute node
     "pose_gru_img_encoder_weights",
+    # P3.4 (5036262) and P2 (885763f). Both are PRESENCE-GATED state that the
+    # sniff recovers from weight-key presence, not from ckpt["args"]:
+    # pose_gru.input_gain is a buffer, pose_gru.ray_gate.weight a Linear, and
+    # each is absent entirely when its config key is absent. Verified restored:
+    # load_model's banner prints "input_gain=..., ray_gate=..." for every
+    # checkpoint (demo_ray.py / infer_and_eval_worker_ray.py print the same),
+    # and verify_backward_compat.py asserts the recovery on 7 checkpoints.
+    # Registered only AFTER confirming the load path handles them -- whitelisting
+    # a key whose loader does not exist yet is precisely the silent-wrong-row
+    # failure this list guards against, which is why pose_gru_refine_passes /
+    # pose_gru_probe_every are deliberately NOT here until P4.3 lands.
+    "pose_gru_input_gain", "pose_gru_ray_gate",
     # not restored -- gated to "off" below; a GT-injection arm is unscoreable
     "pose_gru_oracle",
 }

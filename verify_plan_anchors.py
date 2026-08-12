@@ -182,7 +182,12 @@ def main():
         n = 0
         for path, expected, actual, _ in stale:
             base = Path(path).name
-            for pat in (rf"({re.escape(base)}:){expected}\b", rf"(line )({expected})\b"):
+            # ONLY the unambiguous `basename:NNN` form. A bare `line NNN`
+            # rewrite matched any prose citing that number for ANY file, and
+            # silently retargeted `_forward_decoder_group_step (def at line
+            # 1680)` to 1797 -- a different anchor in the same file. A stale
+            # number is recoverable; a confidently wrong one is not.
+            for pat in (rf"({re.escape(base)}:){expected}\b",):
                 text, k = re.subn(pat, lambda m: m.group(1) + str(actual), text)
                 n += k
         DOC.write_text(text)

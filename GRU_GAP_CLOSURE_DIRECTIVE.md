@@ -980,21 +980,76 @@ P̂_probe(x), an observation the oracle proved sufficient — then run the real
 pass with the ray built from the GRU's refinement of
 `[P(x−1), Δ, P̂_probe(x)]`.
 
-- **`model.py` `_forward_decoder_group_step`** (def at line 1797): under flag
-  `pose_gru_probe_pass`, before the GRU island: clone `state_feat`/`mem`
-  (NOT `.detach().clone()` on the graph path — probe runs under
-  `torch.no_grad()` entirely), call the inner decode once with the masked
-  token, extract the pose, discard the cloned state. Feed the GRU a widened
-  input: `gru_in = cat([est, delta_static, probe_pose])` — input width 21,
-  which the sniff already generalizes over via `base_width`
-  (line 233–238: extend the accepted set {7, 14} with 21 → mode
-  `"pose_delta_probe"`).
-- Cost: ~2× decoder FLOPs per view. Mitigation if needed: probe every k-th
-  view and hold the last observation (the drift is slow — that's why it's
-  drift).
-- This is a bigger change than everything above combined; build it ONLY
-  after P4.1/P4.2 results are in — if xattn already clears the §0 promotion
-  bar, the probe pass may be unnecessary.
+**DESIGN SETTLED 2026-08-12** by the implementing session, which read the
+code rather than trusting this section. Five corrections to the prose above
+and below — all verified here, all superseding the original prescription:
+
+1. **No state clone.** `DecoderBlock.forward` is `x = x + f(x)` with no
+   in-place op anywhere on the path; `LocalMemory.inquire` is read-only and
+   `update_mem` returns a new tensor — and the probe never calls it at all
+   (saving 3.4e10 FLOPs/view). A defensive clone would also HIDE an in-place
+   write on `mem`, which at view 0 is a stride-0 `.expand()` of a trainable
+   Parameter. Ship bitwise-unchanged ASSERTIONS instead of a clone. The probe
+   must be a separate stateless helper that never re-enters
+   `_forward_decoder_group_step` (which would rewrite the pose/hidden/img
+   stashes and double-count the ray-gate telemetry).
+2. **Cost is +24% per pass, not "~2× decoder FLOPs".** Measured with
+   FlopCounterMode at real shapes against the 3.75 s/step in
+   `logs/gru_v3_ft_44496322.out`: decoder 2.29e11, full DPT head 1.82e11,
+   `pose_head` alone 4.8e6 (0.003% of the head). Reading
+   `downstream_head.pose_head` directly costs +24%/pass; re-entering
+   `_downstream_head` costs +43%/pass because the three DPT adapters
+   (1.75e11, 96% of the head) run in FP32. N=2 → 4.65 s/step (26 h);
+   N=4 → 6.4 s/step (36 h). Both fit the 3-day walltime; eval is +39% per
+   extra pass over 4292 scenes. **Take the cheap path.**
+3. **No new `input_mode` value.** Do NOT introduce `"pose_delta_probe"`.
+   `input_mode` stays `"pose_delta"` and the width is derived from
+   `pose_gru_refine_passes` alone — one key, one mechanism, per GOVERNING
+   CONSTRAINT 2. Two parallel expressions of the same state can desync; one
+   cannot. The sniff hard-fails both directions (width 21 with passes<2, or
+   width 7/14 with passes≥2).
+4. **The sniff has FOUR edit sites, not one**: the `base_width` assert, the
+   no-projector candidate solver `for base in (7, 14)` above it,
+   `PoseGRU.__init__`'s `assert input_mode in (...)`, and the `input_dim`
+   line.
+5. **`probe_every` is not a pure cost knob.** A held observation is an
+   ABSOLUTE pose from j frames ago and the cell gets no staleness signal to
+   distinguish fresh from stale. Default k=1; measure what staleness actually
+   costs with a `POSE_GRU_PROBE_LAG` falsifier on a trained checkpoint rather
+   than assuming drift is slow enough.
+
+**Why this cannot repeat the rung-0 failure:** the observation comes out of
+the same `pose_head`, the same postprocess, and the same view-0-relative
+frame as the fed-back pose, so it is in head scale BY CONSTRUCTION. The
+scale-shock failure mode is structurally unavailable here. That is the
+strongest argument for P4.3 over anything GT-flavoured.
+
+**Init-equivalence is stronger than the F lever's:** zero-init
+`cell.weight_ih[:, 14:21]` across all three gates makes the 21-wide arm
+reproduce the 14-wide arm bit-for-bit *including the hidden trajectory*.
+
+**Lever placement:** `pose_gru_refine_passes` lives on the PoseGRU module
+(like `iters`), never as a `base_model` attribute — no eval surface sets
+model attrs, so a trainer-only attribute would be silently OFF at eval and a
+trained 21-wide cell would meet a 14-wide input. Because N is invisible in
+weight shapes (only "≥2" is), a `POSE_GRU_FORCE_REFINE` env override mirrors
+`POSE_GRU_FORCE_ITERS` and yields the anytime-refinement curve from ONE
+trained arm without retraining.
+
+**Loss-scale caution:** iterates/view = (N−1)·R, so the γ-sum moves with N.
+N=2 gives 8 iterates — identical to the scored `gru_a4g3r8` row, making N=2 a
+strict single-variable A/B. N=3 → 4.8593, N=4 → 4.9764; renormalise with
+`pose_gru_loss_weight` 0.8563 / 0.8362 if the N sweep should not also be a
+loss-scale sweep.
+
+**Not independent of P2.** The ray gate reads the POST-update hidden, which
+under P4.3 has consumed the probe observation. **The first refine arm must
+run gate-off**; a refine-vs-raygate A/B would confound the two.
+
+**Scoreability:** `pose_gru_refine_passes` / `pose_gru_probe_every` must be
+registered in `preflight_ckpt.py`'s lever list — but only AFTER the load path
+handles them. Registering a key whose loader does not exist is the exact
+silent-wrong-row failure that list guards against.
 
 ---
 
