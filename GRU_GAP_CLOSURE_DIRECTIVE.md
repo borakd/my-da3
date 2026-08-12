@@ -89,6 +89,77 @@ reproduce the number.
 Same lever. Opposite signs. Both "highly significant." An effect of ~0.004 in
 this pipeline is not distinguishable from configuration idiosyncrasy.
 
+### R-LEVER VERDICT (2026-08-12): WEIGHTING, NOT ITERATION
+
+The anytime sweep settled it. Trained r8 checkpoint, `POSE_GRU_FORCE_ITERS` =
+1/2/4/8/16, 32 scenes, all paired:
+
+| N | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| ATE | 0.078496 | 0.078881 | 0.082204 | 0.080104 | 0.080834 |
+
+No trend, no monotonicity, largest \|t\| across 20 paired contrasts = 2.1 —
+what 20 tests give by chance. **N=1 is not worse than N=8** (t = −0.9):
+running the model at ONE iteration instead of the eight it trained with costs
+nothing.
+
+Override verified three ways, so a flat curve cannot be a no-op:
+`GRUCell.forward` counts ratio exactly 8.0000; forced N=8 reproduces the
+arm's native scoreboard run **bit-identically on 32/32 scenes**; forced N=1
+differs on 32/32, per-scene ATE moving up to 0.0346.
+
+Grounds, with iteration now inert on every observable axis:
+- **Forward refinement, training distribution:** the γ-weighted mean
+  intermediate iterate is within **0.3%** of the final one at convergence
+  (rel = 0.9968) and was 0.915 early — iterating made the pose WORSE. Solving
+  through the γ mass, even iterate 0 is ~0.95× the final's error.
+- **Inference:** output independent of N over a 16× range.
+- **γ is the ONLY channel** by which intermediate iterates reach the loss, and
+  the final iterate's value is essentially independent of N — so R8−R1 IS the
+  γ term, nearly by construction.
+- **R8 is not a better pose module:** on the held-out 4-view eval (byte-
+  identical criterion in both arms) it is worse on pose loss in 44/50 epochs,
+  rotation in 48/50, and every headline metric.
+
+NOT claimed: this rules out iteration-as-refinement, not a training-DYNAMICS
+effect of iterating — which is inseparable from γ, since γ is how iterates
+reach the loss. Closing that needs `pose_gru_iter_gamma=0.0` at N=8 (objective
+bit-identical to R1, pure CLI override, 19.3h).
+
+**A third mechanism, unconfirmed and worth more attention than either
+hypothesis:** AdamW is invariant to a constant loss multiplier, so 4.16× cannot
+act by "making the objective bigger". The GRU's 136k params sit in their own
+group and the aux graph touches nothing else — so the weight can only act via
+(a) the aux:main gradient ratio on those params, or (b) `clip_grad=1.0` applied
+to ONE GLOBAL norm over `model.parameters()`, where an inflated aux term
+tightens the clip and throttles the **trunk's** effective LR. R8's trunk did
+move less and fit worse (train ConfLoss 71.21 vs R1's 66.04). Under (b), R8's
+ATE "win" is a smaller-finetuning-damage artifact, not a pose win. Unconfirmable
+as things stand: **the clip norm is returned by the scaler and discarded, never
+logged.** Logging it is a one-line change and would settle a mechanism that
+affects every arm.
+
+**Within-run jitter, a lower bound on run variance:** checkpoint-to-checkpoint
+ATE jitter over epochs 41–50 is already **35–64% of the entire R8−R1 arm gap**.
+
+### REPO TRAP — duplicate module objects (verified independently)
+
+`import dust3r.model` and `import src.dust3r.model` load the same file as
+**two module objects with two `PoseGRU` classes** (`m1 is m2` → False;
+`m1.PoseGRU is m2.PoseGRU` → False). `$CUT3R_DIR` is on `sys.path` and contains
+a `src/` package, so both spellings resolve.
+`infer_and_eval_worker_ray.py:151` imports `src.dust3r.model`; every repo
+`probe_*`/`verify_*` imports `dust3r.*`.
+
+Consequence: any in-process monkeypatch, `isinstance` check, or call counter
+**silently reads zero** for code running under the other spelling — it looks
+like "the mechanism never ran" rather than raising. A counter read 0 while the
+GRU was making 14296 calls on the other copy in the same process. No existing
+diagnostic is corrupted (the two never share an interpreter today), but it is
+live for the next one. **Patch a `torch` symbol instead** — `torch` is one
+module and `GRUCell` is instantiated exactly once — or run the probe in a
+subprocess.
+
 ### What this invalidates, and what survives
 
 **SUSPECT — do not treat as established:**
