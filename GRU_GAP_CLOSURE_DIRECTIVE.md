@@ -59,6 +59,72 @@ R1 arm, the R8 arm, and the no-GRU baseline.
 
 ---
 
+## ⚠ NOISE-FLOOR WARNING — READ BEFORE INTERPRETING ANY ARM COMPARISON
+
+**Measured 2026-08-12, verified twice independently. Run-to-run variance in
+this pipeline has NEVER been measured — there is exactly one run per arm — and
+the lever effects the whole program reasons about sit inside the arm-to-arm
+scatter.**
+
+Paired per-scene ATE over all 4292 scenes, all 28 pairs among the 8 GRU arms:
+
+| quantity | value |
+|---|---|
+| median \|ATE diff\| between arms | **0.00281** |
+| max | 0.00814 |
+| paired standard error | 0.000346 |
+| pairs "significant" at \|t\| > 3 | **25 / 28** |
+| R8 − R1 (the result the R lever rests on) | 0.00378 — **rank 10/28, mid-pack** |
+
+With 4292 paired scenes the SE is ~0.0003, so **any two runs differing by more
+than ~0.001 come out "significant."** The paired t-test controls SCENE
+sampling only; it says nothing about whether a rerun of the same config would
+reproduce the number.
+
+**The demonstration that it does not:** the F lever, measured two ways —
+
+    gru_a4g3f1   − gru_a4g3     = **+0.00436**  (t = +13.5)
+    gru_a4g3f1np − gru_a4g3f0np = **−0.00116**  (t = −3.4)
+
+Same lever. Opposite signs. Both "highly significant." An effect of ~0.004 in
+this pipeline is not distinguishable from configuration idiosyncrasy.
+
+### What this invalidates, and what survives
+
+**SUSPECT — do not treat as established:**
+- "R8 is the best arm" / "iteration is the lever that worked." The gap is
+  mid-pack in the scatter.
+- Every individual lever attribution in the A/G/F/R grid at the ~0.004 scale.
+- Any future single-arm result whose expected effect is ≲0.004 — **including
+  the P4.3 refine arm, whose ΔR²-implied effect is ~0.001, roughly 3× BELOW
+  the median scatter.** A working refine arm could not be distinguished from
+  noise by a single run.
+
+**SURVIVES — larger than the scatter, or consistent across many arms:**
+- Arm B's superiority (0.0134 vs 0.0759+, 99.9% per-scene win rate).
+- **All 8 GRU arms lose to arm A.** Eight-for-eight sign consistency is a far
+  stronger claim than any single pairwise contrast.
+- Prev-pred conditioning being net-negative vs A (63.0% win rate).
+- Within-checkpoint measurements, which do not depend on run variance at all:
+  the ΔR² partial-correlation result, the input-scale probe, the velocity
+  collapse.
+
+### The implied priority
+
+**A SEED REPLICATE IS NOW THE HIGHEST-VALUE 19h ON THE BOARD** — rerun an
+existing arm unchanged with a different seed and measure the run-to-run ATE
+spread. That single number retro-calibrates every comparison ever made here
+and decides whether any of the queued arms are worth running at all. Spending
+19h on a lever control before knowing the noise floor risks measuring nothing.
+
+**Correction to an earlier framing in this document:** the 4.1611 aux-weight
+factor was NOT "silent". The `captain_gru_v3_a4_g3_r8_finetune.yaml` header
+already documents it and even names `pose_gru_loss_weight=0.2403` as the
+matching control. It was known and not acted on — a different and more
+uncomfortable failure than an unnoticed coupling.
+
+---
+
 ### Reference ladder — FULL BENCHMARK (source of truth)
 
 All 4292 DROID test scenes, `checkpoint-final.pth` (epoch 50), from
