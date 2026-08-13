@@ -249,6 +249,13 @@ def _gt_ray_noise_xi(cfg, scene_key, view_idx, n_views):
     by sqrt(2/(T+1)) so the sequence-RMS magnitude matches a white draw of the
     same sigma (magnitude-matched curves). Increment j is a pure function of
     (scene_key, j, seed), so the walk is shard- and order-independent.
+
+    Known ~0.8% underscaling (audited, kept): averaging the walk variance over
+    the noised views 1..T-1 gives sigma^2 * T/(T+1), i.e. walk sequence-RMS is
+    sqrt(64/65) ~ 0.992 of white at matched sigma for T=64. Direction slightly
+    inflates apparent walk tolerance; the scored curve's B3 margin (0.39 vs a
+    2.0 threshold) dwarfs it, and changing the generator would invalidate the
+    already-scored curve points, so it is documented rather than fixed.
     """
     def draw(j, s_t, s_r_deg):
         key = f"{scene_key}|{j}|{cfg['seed']}".encode()

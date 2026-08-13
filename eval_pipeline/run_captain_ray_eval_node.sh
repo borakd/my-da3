@@ -52,7 +52,10 @@ conda activate cuteanything
 source "$WT/eval_pipeline/mn5_paths.sh"
 CRAY=$WT
 LABEL=${LABEL:-captain_ray_gt_last}
-CONDITIONING=${CONDITIONING:-gt}
+# No default: a hand submission that forgot CONDITIONING used to silently
+# score under GT ray-map conditioning (the privileged arm) with the GRU
+# stripped. Like CKPT below, an explicit error beats a dead default.
+[ -n "$CONDITIONING" ] || { echo "ERROR: CONDITIONING is required (preflight derives it for real arms)" >&2; exit 1; }
 CLAIM_DIR=$OUT/$LABEL/claims
 
 BASE_SHARD=${BASE_SHARD:-0}

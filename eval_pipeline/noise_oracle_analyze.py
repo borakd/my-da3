@@ -102,9 +102,17 @@ def main():
             rows = label_rows(a.out_root, lb, scenes)
             if len(rows) < 0.95 * len(scenes):
                 missing.append((lb, len(rows)))
+            if rows and len(rows) < len(scenes):
+                raise SystemExit(
+                    f"{lb}: {len(rows)}/{len(scenes)} scenes — partial coverage "
+                    "would bias the unpaired means (B2) and the gap fraction; "
+                    "re-run the missing scenes before reading the curve")
             pt = {"n_scenes": len(rows)}
+            paired_scenes = sorted(set(rows) & set(clean))
             for m in METRICS:
-                pt[f"mean_{m}"] = float(np.nanmean([r[m] for r in rows.values()])) if rows else float("nan")
+                pt[f"mean_{m}"] = (
+                    float(np.nanmean([rows[s][m] for s in paired_scenes]))
+                    if paired_scenes else float("nan"))
                 pd = paired_delta(rows, clean, m)
                 pt[f"delta_{m}"] = pd
             pt["gap_fraction_ate"] = (

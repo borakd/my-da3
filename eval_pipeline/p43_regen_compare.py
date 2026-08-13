@@ -44,6 +44,9 @@ def band_dr2(scene_terms, band, idx=None):
 
 def paired_boot(tr, pl, band, n=4000, seed=123):
     keys = sorted(tr[band], key=int)
+    assert sorted(tr[band]) == sorted(pl[band]), (
+        f"{band}: trained/placebo scene key sets differ — positional pairing "
+        "would silently misalign scenes")
     m = len(keys)
     rng = np.random.RandomState(seed)
     point = band_dr2(tr, band) - band_dr2(pl, band)
@@ -71,15 +74,19 @@ def main():
     sh10 = load("p43_regen_shuffle_e10.json")
 
     print("== (c) CAUSAL: shuffle degradation of committed e_head at e10 ==")
-    causal_ok = True
+    # Three-zone rule as pre-registered: PASS > 10%, KILL < 5%, else INCONCLUSIVE
+    # (judged on e_head_t mid+late).
+    worst = float("inf")
     for key in ("e_head_t", "e_head_r"):
         cb, sb = eh_bands(tr10, key), eh_bands(sh10, key)
         for band in ("early", "mid", "late"):
             pct = 100.0 * (sb[band] - cb[band]) / cb[band] if cb[band] else float("nan")
             print(f"  {key} {band}: clean {cb[band]:.4f} shuffle {sb[band]:.4f}  ({pct:+.1f}%)")
-            if key == "e_head_t" and band in ("mid", "late") and pct < 10.0:
-                causal_ok = False
-    print(f"  CAUSAL GATE: {'PASS' if causal_ok else 'FAIL (<10% mid/late trans)'}")
+            if key == "e_head_t" and band in ("mid", "late"):
+                worst = min(worst, pct)
+    causal = "PASS" if worst > 10.0 else ("KILL" if worst < 5.0 else "INCONCLUSIVE")
+    causal_ok = causal == "PASS"
+    print(f"  CAUSAL GATE: {causal} (worst mid/late trans {worst:+.1f}%)")
 
     print("== (d) PAIRED trained-minus-placebo dR2 (scene-block bootstrap) ==")
     verdicts = {}
