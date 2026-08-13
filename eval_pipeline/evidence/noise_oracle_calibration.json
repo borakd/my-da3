@@ -1,0 +1,22 @@
+{
+ "pred_root": "/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/prevpred_lr1e5/preds",
+ "scene_list": "eval_pipeline/noise_oracle_subset_430.txt",
+ "scenes_requested": 430,
+ "scenes_used": 430,
+ "views_used": 134018,
+ "sigma_ref_t": 0.07753853660694085,
+ "sigma_ref_r_deg": 36.67527478716412,
+ "trans_quantiles": {
+  "0.25": 0.044726845444280516,
+  "0.5": 0.07753853660694085,
+  "0.75": 0.1260705012776036,
+  "0.9": 0.18052055339503123
+ },
+ "rot_deg_quantiles": {
+  "0.25": 22.416596657976918,
+  "0.5": 36.67527478716412,
+  "0.75": 59.62861715278742,
+  "0.9": 98.83795150438921
+ },
+ "note": "sim3(Umeyama+scale) per-scene alignment of pred camera centers to GT; per-view trans L2 in GT units and rotation geodesic deg for views>0; medians define sigma_ref for the noise grid."
+}

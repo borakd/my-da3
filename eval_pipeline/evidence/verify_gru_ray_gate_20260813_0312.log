@@ -1,0 +1,5 @@
+  [PASS] both train and test loops drain the gate telemetry
+
+======================================================================
+all checks passed — pose_gru_ray_gate is default-off, on the ray-add compute path, floors at the pose-free arm, trainable by the main loss, logged per view, and checkpoint-round-trippable
+EXIT=0

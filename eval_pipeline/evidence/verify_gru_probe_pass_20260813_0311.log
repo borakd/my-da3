@@ -1,0 +1,9 @@
+  [PASS] trainer threads probe_every into enable_pose_gru
+  [PASS] trainer guards refine_passes>=2 against pose_gru=False
+  [PASS] trainer logs the pass count (it is invisible in weight shapes)
+  [PASS] the pose-free construction is still `+= self.masked_ray_map_token`
+  [PASS] the probe reads the pose head directly, not through _downstream_head
+
+========================================================================
+all checks passed — the probe observes the current frame, the cell consumes it, and an absent key is byte-identical
+EXIT=0

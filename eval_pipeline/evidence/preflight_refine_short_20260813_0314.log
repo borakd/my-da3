@@ -1,0 +1,13 @@
+<All keys matched successfully>
+  load_model: trained_conditioning='prev_pred_gru' trained_pose_gru_oracle='off'
+  OK   load_model's own trained_conditioning 'prev_pred_gru' agrees with 'prev_pred_gru'
+  OK   pose_gru module restored (NOT identity-init)
+  restored: {'mode': 'residual', 'input_mode': 'pose_delta', 'hidden': 128, 'iters': 8, 'img_feat': 'none', 'frames': 0, 'proj': False, 'appended': 0, 'src': 'pooled', 'enc_params': 0, 'n_params': 58887}
+  OK   restored mode 'residual' == config 'residual'
+  OK   restored input 'pose_delta' == config 'pose_delta'
+  OK   restored hidden_dim 128 == config
+  OK   restored iters 8 == config 8 (R lever)
+  OK   restored img_feat 'none' == config 'none' (F lever)
+------------------------------------------------------------------------------
+PREFLIGHT_OK ARM=prev_pred_gru CKPT=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_r8_refine_short_finetune/checkpoint-final.pth
+EXIT=0

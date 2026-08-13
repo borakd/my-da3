@@ -1,0 +1,5 @@
+keys: ['module.pose_gru.cell.weight_ih']
+weight_ih shape: (384, 21)
+||weight_ih[:,14:21]|| = 8.2623  (probe block)
+||weight_ih[:,0:14]||  = 10.8234  (pose|delta block)
+GUARD: PASS (probe block alive)
