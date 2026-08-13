@@ -1,0 +1,15 @@
+== GATE (ii): shuffle degradation at checkpoint-10 ==
+  e_head_t early: clean 0.3081 shuffle 0.3325 (+7.9%)
+  e_head_t mid: clean 0.5923 shuffle 0.7486 (+26.4%)
+  e_head_t late: clean 0.9202 shuffle 1.1203 (+21.7%)
+  e_head_r early: clean 3.5611 shuffle 4.3360 (+21.8%)
+  e_head_r mid: clean 10.0274 shuffle 11.6113 (+15.8%)
+  e_head_r late: clean 13.9325 shuffle 16.8043 (+20.6%)
+  GATE(ii): PASS
+== GATE (iii): committed error vs honest-head reference (same instrument/units) ==
+  e_head_t early: refine_ck10 0.3081 | armA_head 0.1447 | refine_short_e10 0.1909  ratio_vs_A 2.129
+  e_head_t mid: refine_ck10 0.5923 | armA_head 0.3112 | refine_short_e10 0.4299  ratio_vs_A 1.903
+  e_head_t late: refine_ck10 0.9202 | armA_head 0.5197 | refine_short_e10 0.7441  ratio_vs_A 1.771
+  e_head_r early: refine_ck10 3.5611 | armA_head 1.8508 | refine_short_e10 2.3922  ratio_vs_A 1.924
+  e_head_r mid: refine_ck10 10.0274 | armA_head 5.1892 | refine_short_e10 7.4221  ratio_vs_A 1.932
+  e_head_r late: refine_ck10 13.9325 | armA_head 8.0754 | refine_short_e10 11.2805  ratio_vs_A 1.725
