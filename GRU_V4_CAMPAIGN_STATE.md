@@ -144,3 +144,8 @@ anneal vs annealed references, inconclusive by construction; kill branch
 (B2 poison) never armed since no poison region exists. Risk carried: error
 must anneal below sigma_ref-equivalent by e50; checkpoint-30 trend probe
 scheduled (~19:30) to confirm the anneal slope before completion.
+
+## Checkpoint-30 trend (2026-08-13 18:25): SLOPE CONFIRMS
+e_head_t mid 0.592->0.383 (-35%), ratio vs arm A 1.90->1.23; all six bands
+-27..-42%. 20 steepest-anneal epochs remain. Gate-(iii) risk retired.
+Training ETA ~03:15 2026-08-14 (27 min/epoch); eval auto-arms on completion.
