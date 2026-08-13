@@ -65,6 +65,66 @@ jobs, no training.
   4 grounding readers → 3 designers → 3 adversarial judges → synthesizer.
   Output = ordered execution plan with pre-registered pass/kill criteria.
 
+## Execution log 2026-08-13 (early morning)
+Plan of record = design-lock workflow synthesis (wf_9e736a0c-4cd, full plan in
+scratchpad tasks/wjnpaguic.output): Refine-50 backbone (r8 + refine_passes=2,
+probe_every=1, single-variable vs scored gru_a4g3r8) behind the noise oracle.
+Baseline table (4292 scenes): A ate .0759 rpet .00794 rper 1.101 absrel .1794
+a1 .7863 | B ate .0134 rpet .00373 rper .337 absrel .1886 a1 .7866 | C ate
+.0821 | gru_a4g3r8 ate .0799. Win rule: per-scene win% vs C on ATE AND
+rpe_rot, >54.2% = progress, >63.0% = beats A; depth inside family band.
+- Commits: 49f5819 (noise hook, unit-checked), d1b9828 (P4.3 mechanism +
+  configs + instruments), 0cd7e83 (eval registration: refine levers
+  whitelisted, unset-list extended, grad_norm logged, watcher .ignored),
+  94ec8a5 (noise-oracle instruments + evidence).
+- Verify battery: verify_gru_probe_pass + verify_gru_ray_gate exit 0
+  (archived); preflight PASS on refine_short final; probe-block weight norm
+  8.26 (alive).
+- sigma_ref calibrated (zero GPU, from C's saved preds): t=0.0775 GT units,
+  r=36.68 deg median per-view. Injection scaled /1.5382 so realized median
+  matches grid.
+- IN FLIGHT: 10 curve jobs 44547303-312 (diag_noise_*, 1 node each, subset
+  430); smoke 44547317 (debug); p43 regen 44547322-326 (trained/placebo
+  e5+e10, shuffle e10 on refine_short; acc_ehpc 1-GPU); f1r/f1d twins
+  44521973/74 finish ~06:00, watcher auto-evals, then MANUAL:
+  aggregate_and_merge.sh gru_a4g3f1rr8np gru_a4g3f1dr8np + build table.
+- Analysis TODO when curve lands: B1-B4 readouts per plan Step 1 (shape,
+  sigma_poison, walk/white D_ATE vs D_RPEt, exposure-bias note); sig0check
+  must byte-match diag_noise_clean preds; then Step-6 GO/NO-GO.
+
+## Gate results so far (2026-08-13 ~03:50)
+- Step 5 smoke: ALL PASS (startup line refine_passes=2 probe_every=1 dim 21;
+  probe block learned 0.0297; purity assert run exit 0 = throwaway probe holds
+  in real train steps).
+- Step 2c causal: PASS — probe shuffle degrades committed e_head_t
+  +27/+49/+42% (early/mid/late), e_head_r +50/+41/+40%.
+- Step 2d paired: PASS — trained-minus-placebo ddR2_t e5: early +0.112
+  CI[+0.056,+0.172], mid +0.157 CI[+0.090,+0.223], late +0.137 CI[+0.009,
+  +0.217]. Rotation ddR2 ~0 (known risk). At e10 ddR2_t collapses while
+  shuffle-dependence + committed-error improvement persist = ABSORPTION
+  (pre-registered Step-11 signature), not probe overfit.
+- Step 1 curve: 10 diag jobs running since ~03:22 (44547303-312), ETA ~04:15.
+  Analyzer + bytecheck ready (noise_oracle_analyze.py / _bytecheck.sh).
+- REMAINING before Step-7 launch: byte-identity PASS, B1-B4 readouts,
+  Step-6 GO/NO-GO record, wipe stale refine output dir, watcher registration.
+
+## LAUNCH (2026-08-13 ~04:45)
+- sigma=0 byte-identity: PASS (134,448 camera + 7,626 depth files, 0
+  mismatches). Last Step-6 blocker cleared.
+- STEP 7 LAUNCHED: job 44548347, 8 nodes/32 GPUs,
+  captain_gru_v3_a4_g3_r8_refine_finetune (lr 1e-5, 50 ep, full set,
+  single-variable vs gru_a4g3r8). ETA ~26h -> ~2026-08-14 ~07:00.
+- Startup-line monitor armed (abort if "refine_passes=2 (probe_every=1)"
+  absent). Step-8 kill gate due at checkpoint-10 (~5.5h in, ~10:15):
+  (i) probe-block weight norm >0.01; (ii) paired clean-vs-shuffle e_head_t
+  degradation >10% (100-scene probe set, 1 GPU); (iii) e_head trend at or
+  below sigma_ref-equivalent. Fail => scancel 44548347.
+- Watcher will auto-arm the eval (label gru_a4g3r8refine) on completion;
+  then aggregate_and_merge.sh + build_gru_v3_table.sh + Gate 2 falsifiers
+  + Gate 3 win% vs C (54.2%/63.0% tiers) + curve-consistency check.
+- f1r/f1d twins finish ~07:00; their evals auto-submit; manual aggregate
+  after (context rows, 0.00281 floor read).
+
 ## Next action on wake
 Read the design-lock workflow result; execute its step list (implementation →
 smoke → short arms → score vs gates → full 32-GPU launch). Keep this file
