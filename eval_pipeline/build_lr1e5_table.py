@@ -111,6 +111,12 @@ def main():
     ap.add_argument("--title", default="CUT3R conditioning arms on DROID "
                                        "(lr $10^{-5}$, 4292 test scenes)")
     ap.add_argument("--subtitle", default="")
+    ap.add_argument("--no_rank", action="append", default=[], metavar="LABEL",
+                    help="repeatable: display this row but EXCLUDE it from the "
+                         "top-3 shading. For diagnostic rows that are not arms "
+                         "(e.g. an ORACLE=gt GT-injection run), which would "
+                         "otherwise take colours away from the honest arms and "
+                         "read as if they had won the comparison.")
     ap.add_argument("--from_per_scene", action="store_true",
                     help="re-reduce per_scene_<label>.csv instead of reading "
                          "averages_table.csv (cross-check; must agree)")
@@ -137,11 +143,18 @@ def main():
                      f"Reconcile claims/failures before publishing (or pass --expect_scenes 0).")
 
     # Per-column top-3 shading over distinct displayed (rounded) values.
+    # --no_rank rows are fed in as nan, which rank_colors already drops, so they
+    # render uncoloured and do not shift anyone else's rank.
+    unknown_norank = [lb for lb in args.no_rank if lb not in labels]
+    if unknown_norank:
+        sys.exit(f"ERROR: --no_rank names rows that are not in the table: "
+                 f"{unknown_norank}")
     global RANK_HIGHER
     shade = {}
     for m in METRICS:
         RANK_HIGHER = m in HIGHER
-        disp = [round(data[lb][m], DECIMALS) for lb in labels]
+        disp = [float("nan") if lb in args.no_rank else round(data[lb][m], DECIMALS)
+                for lb in labels]
         shade[m] = rank_colors(disp)
 
     n_all = sorted({d["n_scenes"] for d in data.values()})

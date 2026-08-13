@@ -55,7 +55,8 @@ unset PREV_PRED_RAY_SHUFFLE GT_RAY_MAP_SHUFFLE \
       POSE_GRU_IMG_FEAT_ZERO POSE_GRU_IMG_FEAT_SHUFFLE POSE_GRU_FORCE_ITERS \
       POSE_GRU_PROBE_SHUFFLE POSE_GRU_PROBE_LAG POSE_GRU_FORCE_REFINE \
       POSE_GRU_PROBE_ASSERT_PURE \
-      GT_RAY_NOISE_MODE GT_RAY_NOISE_T GT_RAY_NOISE_R_DEG GT_RAY_NOISE_SEED
+      GT_RAY_NOISE_MODE GT_RAY_NOISE_T GT_RAY_NOISE_R_DEG GT_RAY_NOISE_SEED \
+      ORACLE
 
 [ -d "$RUN_DIR" ] || die "no such run dir: $RUN_DIR"
 [ -f "$CKPT" ]    || die "no checkpoint-final.pth in $RUN_DIR"
@@ -112,7 +113,7 @@ for B in 0 4 8 12 16 20 24 28; do
     --job-name="ev_${LABEL}_b${B}" \
     --output="$OUT/logs/slurm_${LABEL}_b${B}_%j.out" \
     --error="$OUT/logs/slurm_${LABEL}_b${B}_%j.err" \
-    --export=ALL,OUT_ROOT="$OUT_ROOT",LABEL="$LABEL",CONDITIONING="$ARM",CKPT="$CKPT",BASE_SHARD="$B",NUM_SHARDS=32,LIMIT=0 \
+    --export=ALL,OUT_ROOT="$OUT_ROOT",LABEL="$LABEL",CONDITIONING="$ARM",CKPT="$CKPT",BASE_SHARD="$B",NUM_SHARDS=32,LIMIT=0,ORACLE=off \
     eval_pipeline/run_captain_ray_eval_node.sh || die "sbatch failed at BASE_SHARD=$B"
 done
 say "armed and submitted"
