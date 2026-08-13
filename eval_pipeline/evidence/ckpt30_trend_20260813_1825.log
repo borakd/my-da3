@@ -1,0 +1,7 @@
+== committed e_head trend, refine full run (same instrument/units) ==
+  e_head_t early: ck10 0.3081 -> ck30 0.1794 (-41.8%) | armA 0.1447 | ratio_vs_A 1.240
+  e_head_t mid: ck10 0.5923 -> ck30 0.3832 (-35.3%) | armA 0.3112 | ratio_vs_A 1.231
+  e_head_t late: ck10 0.9202 -> ck30 0.6746 (-26.7%) | armA 0.5197 | ratio_vs_A 1.298
+  e_head_r early: ck10 3.5611 -> ck30 2.4985 (-29.8%) | armA 1.8508 | ratio_vs_A 1.350
+  e_head_r mid: ck10 10.0274 -> ck30 6.6999 (-33.2%) | armA 5.1892 | ratio_vs_A 1.291
+  e_head_r late: ck10 13.9325 -> ck30 9.8933 (-29.0%) | armA 8.0754 | ratio_vs_A 1.225
