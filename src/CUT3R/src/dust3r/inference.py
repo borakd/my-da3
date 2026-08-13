@@ -114,6 +114,7 @@ def loss_of_one_batch_tbptt(
         batch = make_batch_symmetric(batch)
     all_preds = []
     all_loss = 0.0
+    all_grad_norms = []
     all_loss_details = {}
     base_model = accelerator.unwrap_model(model)
     views_per_step = max(1, int(getattr(base_model, "views_per_step", 1)))
@@ -223,19 +224,23 @@ def loss_of_one_batch_tbptt(
                         all_loss_details, loss_details, seen_views
                     )
                     seen_views += len(chunk)
-                    loss_scaler(
+                    norm = loss_scaler(
                         loss,
                         optimizer,
                         parameters=model.parameters(),
                         update_grad=True,
                         clip_grad=1.0,
                     )
+                    if norm is not None:
+                        all_grad_norms.append(float(norm))
                     optimizer.zero_grad()
                     del loss
     result = dict(
         views=batch,
         pred=all_preds,
         loss=(all_loss / num_chunks, all_loss_details),
+        # pre-clip gradient norm, max over this batch's TBPTT chunks
+        grad_norm=(max(all_grad_norms) if all_grad_norms else None),
         already_backprop=True,
     )
     return result[ret] if ret else result

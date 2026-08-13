@@ -105,9 +105,14 @@ LEVERS_RESTORED = {
     # and verify_backward_compat.py asserts the recovery on 7 checkpoints.
     # Registered only AFTER confirming the load path handles them -- whitelisting
     # a key whose loader does not exist yet is precisely the silent-wrong-row
-    # failure this list guards against, which is why pose_gru_refine_passes /
-    # pose_gru_probe_every are deliberately NOT here until P4.3 lands.
+    # failure this list guards against.
     "pose_gru_input_gain", "pose_gru_ray_gate",
+    # P4.3 (landed d1b9828): refine_passes is recovered from cell.weight_ih
+    # width (probe block presence) and CROSS-CHECKED against ckpt["args"] with
+    # a hard failure on mismatch in both directions (model.py sniff); the
+    # round-trip is machine-checked by verify_gru_probe_pass.py (exit-0 log in
+    # eval_pipeline/evidence/). probe_every rides in ckpt["args"] beside it.
+    "pose_gru_refine_passes", "pose_gru_probe_every",
     # not restored -- gated to "off" below; a GT-injection arm is unscoreable
     "pose_gru_oracle",
 }

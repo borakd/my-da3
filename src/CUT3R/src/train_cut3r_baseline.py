@@ -768,7 +768,7 @@ def train_one_epoch(
                 print(f"Loss is {loss_value}, stopping training, loss details: {loss_details}")
                 sys.exit(1)
             if not result.get("already_backprop", False):
-                loss_scaler(
+                grad_norm = loss_scaler(
                     loss,
                     optimizer,
                     parameters=model.parameters(),
@@ -776,6 +776,8 @@ def train_one_epoch(
                     clip_grad=1.0,
                 )
                 optimizer.zero_grad()
+            else:
+                grad_norm = result.get("grad_norm")
 
             is_metric = batch[0]["is_metric"]
             curr_num_view = len(batch)
@@ -795,6 +797,8 @@ def train_one_epoch(
             metric_logger.update(step=step)
 
             metric_logger.update(loss=loss_value, **loss_details)
+            if grad_norm is not None:
+                metric_logger.update(grad_norm=float(grad_norm))
 
             if (data_iter_step + 1) % accum_iter == 0 and (
                 (data_iter_step + 1) % (accum_iter * args.print_freq)

@@ -102,6 +102,9 @@ discover () {
     run=$cfg
     [ -d "$CR/$run" ] || { log "discover: job $jid ($jname) -> config '$cfg' but no $CR/$run yet"; continue; }
     label=$(derive_label "$cfg")
+    # Deliberately-ignored runs must not come back on the next poll just
+    # because someone tidied their line out of the registry.
+    [ -f "$STATE/$label.ignored" ] && continue
     if grep -q "|$label|" "$REGISTRY"; then
       log "discover: REFUSING job $jid -- label '$label' already registered (would collide)"
       continue
@@ -188,6 +191,14 @@ while :; do
     IFS='|' read -r jid run label jobname <<< "$a"
     RUN_DIR=$CR/$run
 
+    # .ignored is a THIRD terminal state, distinct from .failed on purpose: a
+    # run that is deliberately not a table arm (a short probe, a debug run) is
+    # not a failure, and parking it under .failed would make a healthy watcher
+    # permanently report FAILED for something nobody ever intended to score.
+    if [ -f "$STATE/$label.ignored" ]; then
+      line="$line ${label}=ignored"
+      continue
+    fi
     if [ -f "$STATE/$label.submitted" ] || [ -f "$STATE/$label.failed" ]; then
       line="$line ${label}=$( [ -f "$STATE/$label.submitted" ] && echo SUBMITTED || echo FAILED)"
       continue
