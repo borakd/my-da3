@@ -129,3 +129,10 @@ rpe_rot, >54.2% = progress, >63.0% = beats A; depth inside family band.
 Read the design-lock workflow result; execute its step list (implementation →
 smoke → short arms → score vs gates → full 32-GPU launch). Keep this file
 updated after every phase.
+
+## f1r/f1d twins scored (2026-08-13 07:15, 4292/4292)
+f1rr8np ate .0788 rot 1.1916 | f1dr8np ate .0814 rot 1.1991. Spread .00258
+<= .00281 floor => pair ranks nothing; F-lever verdict unchanged. Win% vs C:
+f1rr8np 55.6/54.4 (grazes 54.2 tier, within the +/-2-point replicate band,
+indistinguishable from r8's 54.2/55.5) — recorded as floor-limited context,
+NOT progress; refine line keeps priority. f1dr8np 49.4/53.8 fails.
