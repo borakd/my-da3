@@ -249,6 +249,13 @@ def train(args):
     assert use_pose_gru or not bool(getattr(args, "pose_gru_ray_gate", False)), (
         "pose_gru_ray_gate=True needs pose_gru=True — the gate reads the GRU hidden"
     )
+    # P4.3: the probe observation exists only to be consumed by the cell, and
+    # the probe decode is pure cost without it. Refuse rather than silently
+    # burning +24%/pass of wall clock on a tensor nothing reads.
+    assert use_pose_gru or int(getattr(args, "pose_gru_refine_passes", 1)) < 2, (
+        "pose_gru_refine_passes>=2 needs pose_gru=True — the probe observation "
+        "is consumed by the GRU cell and by nothing else"
+    )
     if use_pose_gru:
         assert bool(
             getattr(args, "feed_prev_pred", False)
@@ -297,6 +304,16 @@ def train(args):
             # ABSENT KEY -> False -> no head, no state_dict key, byte-identical
             # to every existing arm.
             ray_gate=bool(getattr(args, "pose_gru_ray_gate", False)),
+            # P4.3 iterative refinement (§4). refine_passes = number of DECODES
+            # per view: N-1 throwaway pose-free/re-probe decodes producing an
+            # image-grounded observation of THIS view's pose, then the real
+            # committed pass. The observation is appended to the cell input as a
+            # third 7-d block (width 14 -> 21), so the residual anchor still
+            # reads P(x-1). ABSENT KEY -> 1 -> no widening, no probe decode,
+            # byte-identical to every existing arm. probe_every=k probes only
+            # every k-th view and holds the observation in between.
+            refine_passes=int(getattr(args, "pose_gru_refine_passes", 1)),
+            probe_every=int(getattr(args, "pose_gru_probe_every", 1)),
         )
         # Split the param count: the encoder sources hang a frozen network
         # under pose_gru.img_encoder (11.2M resnet18 / 21M dinov2), and a
@@ -311,6 +328,7 @@ def train(args):
         printer.info(
             "pose_gru enabled: mode=%s, input=%s (dim %d), hidden_dim=%d, "
             "img_feat=%s (src %s, appended %d, frames %d, proj=%s), iters=%d, "
+            "refine_passes=%d (probe_every=%d), "
             "input_gain=%s, trainable params=%d%s"
             % (
                 model.pose_gru.mode,
@@ -323,6 +341,12 @@ def train(args):
                 model.pose_gru.img_feat_frames,
                 model.pose_gru.img_feat_proj,
                 model.pose_gru.iters,
+                # P4.3: the pass count is INVISIBLE in weight shapes (only
+                # "N>=2" is, via the 21-wide cell), so it belongs in the log the
+                # same way iters does — a run scored at the wrong N is silent,
+                # not loud.
+                model.pose_gru.refine_passes,
+                model.pose_gru.probe_every,
                 # P3.4: print the vector, not just on/off — a run whose gain
                 # silently fell back to all-ones is indistinguishable from an
                 # off run in every metric, so the values belong in the log.

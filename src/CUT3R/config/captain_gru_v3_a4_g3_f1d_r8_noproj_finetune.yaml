@@ -1,0 +1,257 @@
+# ============================================================================
+# captain_gru_v3_a4_g3_f1d_r8_noproj_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
+# FULL-DATASET finetune: A4 x G3 x F1d-RAW x R8   (frozen DINOv2 ViT-S/14 CLS, NO PROJECTION)
+# ----------------------------------------------------------------------------
+# THIS FILE IS captain_gru_v3_a4_g3_f1d_r8_finetune.yaml WITH EXACTLY ONE KEY
+# ADDED: pose_gru_img_feat_proj: False. Nothing else -- not the A/G/R levers, not
+# the LR schedule, not the criteria, not the data, not the node count -- differs
+# by so much as a character from the completed run it re-runs. Verified by
+#     diff <(grep -vE '^\s*#|^\s*$' captain_gru_v3_a4_g3_f1d_r8_finetune.yaml) \
+#          <(grep -vE '^\s*#|^\s*$' captain_gru_v3_a4_g3_f1d_r8_noproj_finetune.yaml)
+# which reports exactly two lines: the added proj key and exp_name.
+# The comment BODY below is inherited verbatim from that config; read it for the
+# full A4 / G3 / R8 documentation (the R8 aux-loss 4.1611x multiplier, the
+# pose_gru_lr_scale x lr interaction, the zero-init-head bootstrap, the TBPTT
+# gradient window). ALL of it applies here unchanged. Only the F block is new,
+# and it is documented immediately below.
+#
+# WHAT proj=False DOES, FOR THIS SOURCE (model.py:926-943, the ONLY branch in the
+# entire forward path that reads img_feat_proj is the concat at model.py:1096):
+#   - The frozen frozen DINOv2 ViT-S/14 CLS encoder is UNCHANGED. It is built in both projector
+#     modes (model.py:907-913, inside the SOURCE branch, not the proj branch),
+#     still eval-locked with requires_grad=False, still fed the same raw
+#     320x192 image, still serialized into every checkpoint. proj=False does
+#     not touch it.
+#   - The per-frame LayerNorm(384) is KEPT. It is feature conditioning, not
+#     projection (model.py:920-925).
+#   - The zero-init Linear(384*2 -> 32) is GONE. The two LayerNormed 384-d
+#     blocks (view t and view t-1) enter the GRUCell RAW:
+#         appended width 768   (was 32)
+#         cell input     782   (was 46; pose-first 14-d layout unchanged)
+#         cell.weight_ih (782 wide)  -> 300,288 params (was 17,664)
+#     There is now NO UNLEARNED PIECE between the encoder features and the GRU:
+#     the 768-d feature vector is what the cell's own weight_ih consumes.
+#   - pose_gru_img_feat_dim: 32 below is INERT (model.py:937-942 ignores the
+#     constructor arg when proj=False; the appended width is dictated by
+#     384 x 2 frames). It is left in place so flipping proj back on is a
+#     one-word change.
+#   - TRAINABLE PARAM COUNT: 351,879 (measured), vs 93,863 in the
+#     projected twin. The 22,056,576 frozen frozen DINOv2 ViT-S/14 CLS params are excluded from the
+#     optimizer and from DDP by requires_grad=False, exactly as before.
+#
+# INIT-EQUIVALENCE IS WEAKER THAN THE PROJECTED TWIN -- know this before reading
+# early curves (model.py:682-695). With proj=True the zero-init projector made
+# even the HIDDEN trajectory identical to the F-off arm at init. With proj=False
+# there is no zero gate: image content reaches the hidden state from step one
+# through the cell's default-init weight_ih columns. Only mode='residual''s
+# ZERO-INIT HEAD keeps the OUTPUT identical to F-off at init (verified: max abs
+# diff 0.0 on both the translation and the normalized quaternion). The head is
+# still the gradient gate -- until head.weight is nonzero, d(loss)/d(cell) is
+# exactly zero and the 768 wide input columns stay locked. Do NOT run the
+# POSE_GRU_IMG_FEAT_* falsifiers before the head unlocks, and note that the R8
+# lever makes the bootstrap window MORE visible, not less (all 8 iterates emit
+# the same value while the head is zero).
+#
+# CHECKPOINT COMPATIBILITY. img_norm.{weight,bias} exist, img_proj does NOT, the
+# frozen DINOv2 ViT-S/14 CLS img_encoder.* weights ARE present, and cell.weight_ih is 782 wide --
+# shape-incompatible with the projected twin, with the pooled noproj arms, and
+# with F-off alike. The loader HARD-FAILS on any pose_gru shape mismatch, so a
+# silent random-GRU eval is impossible. load_model sniffs the arm back from the
+# weights alone: img_norm present + img_proj absent => proj=False; the source
+# from the encoder key fingerprint (img_encoder.net.cls_token); and frames uniquely from the
+# cell width, 782 = 14 + 2*384 being the ONLY decomposition of the form
+# base(7|14|21) + blocks(1|2)*384 (model.py:190-212, verified by construction).
+# NO WARM START EXISTS -- pose_gru_expand_ckpt.py only emits projected
+# destinations. This arm trains from base CUT3R like every other v3 arm.
+#
+# WHAT THIS ARM IS FOR. Paired against captain_gru_v3_a4_g3_f1d_r8_finetune
+# (same source, same R8, proj=True) it prices THE 32-D BOTTLENECK on a frozen
+# frozen DINOv2 ViT-S/14 CLS feature -- a strictly single-variable change, which is why not one
+# other key moved. Context from the completed projected runs (both reached all
+# 50 epochs, best @ epoch 47): f1r 2.6009, f1d 2.6673 test loss_avg, against the
+# F-OFF R8 control captain_gru_v3_a4_g3_r8_finetune at 2.5725 -- i.e. at R8 the
+# PROJECTED image feature did not beat no image feature at all. If the 32-d
+# zero-init bottleneck was the thing throttling the lever, this arm is where it
+# shows up. Do NOT compare against the pooled noproj arms
+# (captain_gru_v3_a4_g3_f{0,1}_noproj_finetune): those ran iters=1/gamma=0.0 and
+# the difference would be an R8-vs-R1 confound, not a proj effect.
+#
+# ddp_grad_sync is NOT set here -- same as the projected twin, so it defaults to
+# False and the TBPTT path forwards through the unwrapped module with no
+# cross-rank gradient averaging (effective batch 4). Deliberate: setting it
+# would be a second variable.
+#
+# Falsifiers (keep_freq snapshot only, NEVER checkpoint-last/best.pth while the
+# job is alive, and NOT before the head unlocks):
+#   PREV_PRED_RAY_SHUFFLE=1                                -- pose-feedback channel
+#   POSE_GRU_IMG_FEAT_SHUFFLE=1 / POSE_GRU_IMG_FEAT_ZERO=1 -- THE F LEVER
+#   POSE_GRU_HIDDEN_SHUFFLE=1 / POSE_GRU_HIDDEN_ZERO=1     -- recurrence
+#   POSE_GRU_FORCE_ITERS={1,2,4,8,16}                      -- anytime-N probe
+#
+# Run (32 GPUs; the GPU count comes from --nodes, NOT from this file):
+#   cd /gpfs/home/koc/koc821022/my-da3 && \
+#   sbatch --nodes=8 --job-name=gru_f1d8np_ft \
+#          train_gru_v3_finetune_64node.sbatch captain_gru_v3_a4_g3_f1d_r8_noproj_finetune
+# NB the launcher's #SBATCH default is --nodes=64; --nodes=8 on the command line
+# is REQUIRED.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+# Base CUT3R weights, NOT a warm start from a trained GRU -- identical to every
+# other v3 grid arm, which is what keeps the comparison clean.
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# See the "R8 MULTIPLIES THE AUX LOSS" note in the header before changing this:
+# at iters=8/gamma=0.8 the effective multiplier on the aux term is 4.1611.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: RAFT sequence loss over the 8 iterates, w_k = 0.8^(7-k),
+# final iterate weight 1.0. TRAIN side only -- test_criterion below is
+# deliberately final-iterate-only, so the two strings differ in this arm.
+pose_gru_iter_gamma: 0.8
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Final-iterate-only on the test side: the deployed quantity is the pose that
+# actually drives the ray build, which is iterate 7. Reports as 'PoseGRULoss()'.
+# NOTE: best_ckpt_agg selects on the test loss INCLUDING the gru term -- compare
+# arms at fixed epochs, or subtract gru_pose_loss_avg from headline losses.
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B.
+# Byte-identical to every other 32gpu/1e-5 arm ON PURPOSE: this is the
+# run-independent reference metric, and it carries no GRU term.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Both dataset ray flags MUST stay False (the model
+# asserts this). View 0 gets the masked_ray_map_token.
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 -- pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): BOTH True = G3, the superset.
+#   pose_gru_iters (R lever): 8 here = R ON. Zero new params; the count is
+#                   persisted in ckpt args and restored by load_model (it is
+#                   invisible in weight shapes); the loader HARD-FAILS on any
+#                   pose_gru shape mismatch, so a silent random-GRU eval is
+#                   impossible.
+#   pose_gru_iter_detach: ACTIVE at iters>1 -- detaches the running pose estimate
+#                   between iterates (RAFT discipline). The hidden is NOT
+#                   detached inside the view.
+#   pose_gru_img_feat (F lever): 'input' here = F ON, 2 frames (t and t-1).
+#   pose_gru_oracle: ABSENT -> 'off'. HONEST arm; the GRU only ever sees the pose
+#                   the model itself predicted.
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1, POSE_GRU_HIDDEN_SHUFFLE=1,
+# POSE_GRU_HIDDEN_ZERO=1, POSE_GRU_FORCE_ITERS=<n>.
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0           # x lr -> GRU group peaks at 1e-3, see header
+pose_gru_bptt: True                # G1 half of G3
+pose_gru_e2e: True                 # G2 half of G3
+pose_gru_iters: 8                  # R ON -- 8 back-to-back cell calls per view
+pose_gru_iter_detach: True         # ACTIVE: detach running pose between iterates
+pose_gru_img_feat: input           # F ON  <-- the only lever key that differs
+pose_gru_img_feat_dim: 32          #           from captain_gru_v3_a4_g3_r8_finetune
+pose_gru_img_feat_frames: 2        #           (2 = current view t + previous t-1)
+pose_gru_img_feat_proj: False      # NO Linear: the 2x384-d LayerNormed DINOv2 CLS
+                                   #            features go into the cell RAW (768-d).
+                                   #            <-- THE ONLY KEY THAT DIFFERS FROM
+                                   #            captain_gru_v3_a4_g3_f1d_r8_finetune
+pose_gru_img_feat_src: dinov2_vits14  # F SOURCE: frozen DINOv2 ViT-S/14 CLS of the raw image (384-d)
+pose_gru_img_encoder_weights: null    # default resolves to src/CUT3R/src/pretrained_encoders/; train-time init only
+
+# FULL DROID SPLITS -- 38633 train / 4292 test scenes, per-lab stratified 90/10
+# (seed 42). Train adds aug_crop=16 + SeqColorJitter; test stays aug_crop=0 +
+# ImgNorm. The ray-map kwargs are OMITTED (DL3DV_Multi defaults both to False,
+# which is what the feed_prev_pred arm requires).
+#
+# The launcher runs build_dataset_symlinks.py --check on the head node BEFORE
+# allocating, because dl3dv.py silently SKIPS dangling symlinks (no error, no
+# warning) and would train on a short dataset whose truncated scan then gets
+# written to the disk cache.
+#
+# NB: the split="train"/"test" kwarg is INERT -- DL3DV_Multi accepts and discards
+# it. Train/test separation comes ENTIRELY from ROOT, so a ROOT typo cannot be
+# caught by the split argument.
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+# ===== MULTINODE (8 nodes x 4 GPUs = 32 processes) =====
+# Global batch per optimizer step = batch_size * accum_iter * num_gpus
+#   32 GPUs here = 4 * 1 * 32 = 128   (301 optimizer steps/epoch)
+# accum_iter stays 1 so the per-GPU batch_size=4 sampler micro-batch grouping is
+# unchanged. Everything else (lr schedule, epochs, dataset epoch-size) is
+# GPU-count-independent, so a 32- and a 64-GPU run of this config would differ
+# ONLY in global batch.
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-5                 # 10x the 1e-6 GRU-family default -- see header
+min_lr: 1e-6             # scaled by the same 10x: cosine shape preserved
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
+exp_name: 'captain_gru_v3_a4_g3_f1d_r8_noproj_finetune'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}

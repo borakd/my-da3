@@ -200,12 +200,12 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
             cand = [
                 b
                 for b in (1, 2)
-                for base in (7, 14)
+                for base in (7, 14, 21)
                 if int(w_ih.shape[1]) == base + b * src_dim
             ]
             assert len(cand) == 1, (
                 f"pose_gru cell input width {int(w_ih.shape[1])} does not "
-                f"decompose uniquely as base(7|14) + blocks(1|2)*{src_dim} "
+                f"decompose uniquely as base(7|14|21) + blocks(1|2)*{src_dim} "
                 f"(candidates: {cand})"
             )
             blocks = cand[0]
@@ -225,18 +225,26 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
             )
             img_feat_frames = blocks
     # The weights are authoritative for the input width: base (7 = pose,
-    # 14 = pose+delta) plus the APPENDED F width; the saved config only
-    # breaks ties. Hard-fail on anything unexplained — a mis-sniffed
-    # width would otherwise rebuild the wrong cell and (before the
+    # 14 = pose+delta, 21 = pose+delta+P4.3 probe) plus the APPENDED F width;
+    # the saved config only breaks ties. Hard-fail on anything unexplained — a
+    # mis-sniffed width would otherwise rebuild the wrong cell and (before the
     # load_state_dict hardening) silently evaluate a random GRU.
+    probe_width = False
     if w_ih is not None:
         base_width = w_ih.shape[1] - (img_feat_dim if img_feat == "input" else 0)
-        assert base_width in (7, 14), (
+        assert base_width in (7, 14, 21), (
             f"pose_gru cell input width {w_ih.shape[1]} minus appended F width "
             f"{img_feat_dim if img_feat == 'input' else 0} = {base_width}; "
-            f"expected 7 (pose) or 14 (pose_delta)"
+            f"expected 7 (pose), 14 (pose_delta) or 21 (pose_delta + P4.3 probe)"
         )
-        input_mode = "pose_delta" if base_width == 14 else "pose"
+        # 21 == pose_delta plus the P4.3 probe block. input_mode stays
+        # "pose_delta" — the probe is NOT a fourth input_mode value. Two
+        # parallel expressions of one state (an input_mode string AND a pass
+        # count) can desync; one cannot, and GOVERNING CONSTRAINT 2 item 2 is
+        # explicit that a mechanism gets exactly one key. The widening is a
+        # CONSEQUENCE of refine_passes>=2, recovered below.
+        input_mode = "pose" if base_width == 7 else "pose_delta"
+        probe_width = base_width == 21
     # P3.4: the input-gain buffer is presence-gated exactly like img_norm — it
     # is in the state dict iff the run was configured with pose_gru_input_gain.
     # Rebuild it (all-ones; load_state_dict then writes the ckpt's own values)
@@ -263,10 +271,35 @@ def _sniff_pose_gru_config(state, train_args, enc_embed_dim, where="checkpoint")
             f"ckpt['args'].pose_gru_ray_gate={args_ray_gate!r} — mislabelled "
             "checkpoint, refusing to guess which side is wrong"
         )
+    # P4.3: the PASS COUNT is invisible in weight shapes — the 21-wide cell says
+    # "probe on", nothing more — so ckpt args are the only source, exactly like
+    # mode and iters. That makes it the dangerous class of lever (GOVERNING
+    # CONSTRAINT 2 item 4: silent, not loud), so both directions of disagreement
+    # hard-fail rather than defaulting. Note the getattr default of 1: a
+    # pre-P4.3 checkpoint has no such key and MUST keep loading, so absence is
+    # never itself an error — only absence CONTRADICTED by a 21-wide cell is.
+    refine_passes = int(getattr(train_args, "pose_gru_refine_passes", 1) or 1)
+    probe_every = int(getattr(train_args, "pose_gru_probe_every", 1) or 1)
+    if probe_width and refine_passes < 2:
+        raise RuntimeError(
+            f"{where}: pose_gru cell input is 21 wide (the P4.3 probe block is "
+            f"present) but ckpt['args'].pose_gru_refine_passes={refine_passes} "
+            "says the probe is off. The pass count cannot be recovered from "
+            "weight shapes — refusing to guess, because guessing 1 here would "
+            "silently score a refinement arm as a plain one."
+        )
+    if not probe_width and refine_passes >= 2:
+        raise RuntimeError(
+            f"{where}: ckpt['args'].pose_gru_refine_passes={refine_passes} asks "
+            "for the P4.3 probe, but the cell input is not 21 wide — this "
+            "checkpoint's cell never consumed a probe observation"
+        )
     return dict(
         hidden_dim=hidden_dim,
         mode=mode,
         input_mode=input_mode,
+        refine_passes=refine_passes,
+        probe_every=probe_every,
         img_feat=img_feat,
         img_feat_dim=img_feat_dim,
         img_feat_frames=img_feat_frames,
@@ -672,6 +705,55 @@ class PoseGRU(nn.Module):
     the zero-init head makes any number of untrained iterations an identity
     chain (up to repeated-quat-normalize fp noise; bit-exact at iters=1).
 
+    refine_passes / probe_every (P4.3 iterative refinement): the corrector's
+    circularity is that building the conditioning needs a pose, and getting a
+    good pose needs the conditioning. The probe pass breaks it honestly: decode
+    view x ONCE with the conditioning ray replaced by masked_ray_map_token —
+    the pose-free construction view 0 itself takes — on a throwaway use of the
+    state the real pass is about to consume, read the pose that produces, and
+    hand it to the cell as a THIRD 7-d block:
+
+        gru_in = [ P(x-1) | delta | O(x) ]        width 21, pose block first
+
+    O(x) is the first input this module has ever had that LOOKED at frame x.
+    The fed-back P(x-1) cannot observe the head's accumulated drift by
+    construction; an image-grounded readout can.
+
+    WHY THIS CANNOT REPEAT THE RUNG-0 FAILURE, which is the whole reason the
+    design is shaped this way: O(x) comes out of the SAME pose_head MLP, the
+    SAME postprocess_pose and the SAME view-0-relative frame as P(x-1), so it
+    is in head scale BY CONSTRUCTION. Rung 0 failed because injected GT was
+    numerically correct and in the wrong scale (ATE 0.1165 with a perfect input
+    against 0.0888 with its own stale one). That failure mode is structurally
+    unavailable here — no units conversion exists to get wrong.
+
+    refine_passes = N is the number of DECODES per view: N-1 throwaway probes
+    plus the real committed pass. N=1 disables the probe path entirely and does
+    not widen the cell. N=2 is the directive's design (one pose-free probe);
+    N>2 re-probes with the ray rebuilt from the running refined estimate, so
+    each observation is grounded in better conditioning than the last. The
+    CALL SITE owns the loop, exactly like the R lever, and the count lives here
+    so it rides enable_pose_gru and the checkpoint sniff.
+    N is INVISIBLE in weight shapes (only "N>=2" is, via the 21-wide cell), so
+    a checkpoint trained at N=4 can be SCORED at any N>=2 with
+    POSE_GRU_FORCE_REFINE — the anytime-refinement curve, free.
+
+    probe_every = k probes only every k-th view and holds the last observation
+    in between, dividing the added decode cost by ~k. Default 1. Read the
+    default as deliberate: a held observation is an ABSOLUTE pose from j frames
+    ago and the cell gets no staleness signal to tell fresh from stale, so k>1
+    is a cost lever with a real information cost. POSE_GRU_PROBE_LAG=1 measures
+    what one frame of staleness costs on a trained checkpoint instead of
+    guessing.
+
+    Cost, measured (FlopCounterMode on the real modules at 192x320, anchored to
+    3.75 s/step): a probe decode is the decoder trunk plus pose_retriever
+    .inquire plus a 768->3072->7 MLP — 2.34e11 FLOPs against 4.10e11 for a full
+    decoder+head pass. N=2 is +24% wall clock, N=4 +72%. The saving is entirely
+    in NOT re-entering the dense head: camera_pose is computed from ONE token
+    before the three DPT adapters, which are ~96% of the head and run FP32
+    while the decoder runs autocast, so re-entering it would cost +43%/pass.
+
     input_gain (P3.4 scale normalization): a per-dimension multiplier on the
     CELL INPUT, registered as a persistent buffer so it serializes with the
     checkpoint and eval rebuilds bit-exact. Motivation, measured not assumed
@@ -704,7 +786,10 @@ class PoseGRU(nn.Module):
                          exists but not its values, and load_state_dict
                          overwrites the ones with the ckpt's own.
       sequence        -> the gains. Length must be self.input_dim OR the base
-                         pose width (7/14); a base-width vector is PADDED WITH
+                         pose width (7/14/21 — 21 on a P4.3 probe arm, whose
+                         probe block is a THIRD scale regime the P3.4 probe
+                         never measured, so re-measure before combining the two
+                         levers); a base-width vector is PADDED WITH
                          ONES over the appended F block. NOTE self.input_dim is
                          NOT always 14 — the F1 pooled/proj arms widen the cell
                          input to 46 — so a bare 14-long buffer would fail to
@@ -742,6 +827,8 @@ class PoseGRU(nn.Module):
         iters=1,
         input_gain=None,
         ray_gate=False,
+        refine_passes=1,
+        probe_every=1,
     ):
         super().__init__()
         assert mode in ("residual", "direct", "split_anchor"), (
@@ -750,6 +837,12 @@ class PoseGRU(nn.Module):
         assert input_mode in ("pose", "pose_delta"), f"unknown pose_gru input {input_mode!r}"
         assert img_feat in ("none", "input"), f"unknown pose_gru img_feat {img_feat!r}"
         assert int(iters) >= 1, f"pose_gru iters must be >= 1, got {iters!r}"
+        assert int(refine_passes) >= 1, (
+            f"pose_gru refine_passes must be >= 1, got {refine_passes!r}"
+        )
+        assert int(probe_every) >= 1, (
+            f"pose_gru probe_every must be >= 1, got {probe_every!r}"
+        )
         self.mode = mode
         self.input_mode = input_mode
         self.hidden_dim = hidden_dim
@@ -758,7 +851,31 @@ class PoseGRU(nn.Module):
         self.img_feat_src_dim = int(img_feat_src_dim)
         self.img_encoder = None
         self.iters = int(iters)
+        # P4.3 iterative refinement. refine_passes is the number of DECODES per
+        # view; refine_passes-1 of them are throwaway probe decodes producing the
+        # observation, the last is the real committed pass. 1 == off, and off
+        # means the cell is NOT widened, so an absent config key leaves every
+        # weight shape and every forward byte-identical to the pre-P4.3 arms.
+        self.refine_passes = int(refine_passes)
+        self.probe_every = int(probe_every)
+        self.probe = self.refine_passes >= 2
+        # Width 21 must mean "probe arm" and nothing else. Under input_mode
+        # "pose" the widened input would be 7+7=14, colliding exactly with a
+        # plain pose_delta cell — two different arms, one weight shape, and the
+        # sniff could not tell them apart. Refuse the ambiguous combination
+        # instead of shipping a checkpoint nobody can identify later.
+        assert not (self.probe and input_mode != "pose_delta"), (
+            f"pose_gru refine_passes={self.refine_passes} needs "
+            f"input_mode='pose_delta' (got {input_mode!r}): the probe block "
+            "widens the cell input to 21, and 7+7 under input_mode='pose' "
+            "would be indistinguishable from a plain pose_delta arm"
+        )
         self.input_dim = pose_dim if input_mode == "pose" else 2 * pose_dim
+        # The probe observation is APPENDED after the pose block, so the
+        # residual anchor (gru_in[:, :3] / [3:7] in forward) still reads
+        # P(x-1) and init-equivalence to the un-probed arm is preserved.
+        if self.probe:
+            self.input_dim += pose_dim
         if img_feat == "input":
             from dust3r.img_encoders import (
                 CORR_FEAT_DIM,
@@ -873,6 +990,23 @@ class PoseGRU(nn.Module):
                     )
             self.register_buffer("input_gain", gain)
         self.cell = nn.GRUCell(self.input_dim, hidden_dim)
+        if self.probe:
+            # P4.3 init-equivalence, and it is STRICTLY STRONGER than the F
+            # lever's. Zeroing the probe columns of weight_ih (all three gate
+            # blocks at once — weight_ih is (3H, input_dim), so a column slice
+            # hits r, z and n) makes the widened cell reproduce the 14-wide arm
+            # bit-for-bit at init, INCLUDING the hidden trajectory, which the
+            # img_feat_proj=False arms cannot claim.
+            #
+            # The channel is not dead: grad_W = delta (x) cell_in, and the probe
+            # columns of cell_in are nonzero, so the gradient to these columns is
+            # nonzero as soon as the zero-init head unlocks delta — the same
+            # bootstrap the zero-init img_proj and the zero-init head already
+            # rely on. verify_gru_probe_pass.py asserts both halves: identical
+            # at init, and changed once these columns are perturbed.
+            base = 2 * pose_dim
+            with torch.no_grad():
+                self.cell.weight_ih[:, base : base + pose_dim].zero_()
         self.head = nn.Linear(hidden_dim, pose_dim)
         if mode == "residual":
             nn.init.zeros_(self.head.weight)
@@ -1226,6 +1360,8 @@ class ARCroco3DStereo(CroCoNet):
         iters=1,
         input_gain=None,
         ray_gate=False,
+        refine_passes=1,
+        probe_every=1,
     ):
         """Materialize the PoseGRU refiner for the feed_prev_pred loop.
 
@@ -1267,6 +1403,13 @@ class ARCroco3DStereo(CroCoNet):
             # pose_gru_ray_gate config key gives) builds no head at all, so
             # the ray add stays the plain unconditional sum.
             ray_gate=ray_gate,
+            # P4.3 iterative refinement: 1 (the default, and what an absent
+            # pose_gru_refine_passes config key gives) leaves the cell 14 wide
+            # and the probe path unreachable, so the module is byte-identical
+            # to every pre-P4.3 arm. >=2 widens the cell to 21 for the probe
+            # observation and runs refine_passes-1 throwaway decodes per view.
+            refine_passes=refine_passes,
+            probe_every=probe_every,
         )
         self._pose_gru_hidden = None
         self._prev_img_feat = None
@@ -1677,6 +1820,129 @@ class ARCroco3DStereo(CroCoNet):
             start += size
         return feat_cat, pos_cat, offsets
 
+    def _pred_ray_tokens(self, views, view_idx, pose_enc, shape, dtype):
+        """Encode a predicted pose into conditioning ray tokens (P4.3 probe path).
+
+        Deliberately a SEPARATE copy of the ray build in
+        _forward_decoder_group_step rather than a refactor of it: that block is
+        on the default path of every existing arm, and GOVERNING CONSTRAINT 2
+        makes byte-identity with an absent key non-negotiable, so it does not
+        get touched to serve a lever that is off by default. The duplication is
+        pinned by verify_gru_probe_pass.py, which asserts both produce the
+        identical token tensor for the same pose.
+
+        Intrinsics come from view x-1, matching feed_prev_gt_ray_map's shift and
+        the real build exactly. Caller runs under no_grad.
+        """
+        with torch.autocast(device_type=pose_enc.device.type, enabled=False):
+            c2w = pose_encoding_to_camera(pose_enc.float())
+            h, w = views[view_idx]["img"].shape[-2:]
+            rmap = get_ray_map_torch(c2w, views[view_idx - 1]["camera_intrinsics"], h, w)
+        ray_out, _, _ = self._encode_ray_map(rmap.permute(0, 3, 1, 2).to(dtype), shape)
+        return ray_out[-1]
+
+    @torch.no_grad()
+    def _probe_decode_pose(
+        self, feat_view, pos_view, state_feat, state_pos, mem, init_state_feat,
+        ray_token=None,
+    ):
+        """P4.3: decode view x once and read ONLY its pose — the observation.
+
+        ray_token=None gives the POSE-FREE construction (masked_ray_map_token,
+        the same constant view 0 takes), which is the pass-1 probe; a ray token
+        gives a conditioned re-probe for passes >= 2.
+
+        THROWAWAY SEMANTICS, and no copy is taken. Nothing on this path writes
+        through its inputs: every DecoderBlock is `x = x + f(x)` and returns its
+        `y` argument untouched (croco/models/blocks.py), LocalMemory.inquire is
+        read-only, and update_mem — the one function that would produce a new
+        memory — is never called here. The caller's state_feat/mem are therefore
+        bit-identical afterwards, which POSE_GRU_PROBE_ASSERT_PURE=1 checks in
+        the real loop and verify_gru_probe_pass.py checks in the harness.
+        A defensive .clone() was considered and rejected: `mem` at view 0 is a
+        stride-0 expand of a trainable nn.Parameter, so a clone would MASK an
+        in-place write rather than catch it.
+
+        Reads the pose off the pose token directly instead of calling
+        _downstream_head: camera_pose comes from a 768->3072->7 MLP on ONE token
+        (DPTPts3dPose.forward) computed BEFORE the three dense DPT adapters,
+        which are ~96% of the head's FLOPs and run FP32 while the decoder runs
+        autocast. Re-entering the full head would cost +43% per pass instead of
+        +24%, for three dense tensors that get thrown away — and would also pay
+        transpose_to_landscape's per-call host sync.
+        """
+        # Local import, mirroring the corr_motion_stats import at the F-source
+        # branch: model.py's module-level imports are order-sensitive
+        # (dust3r.heads must precede dust3r.utils.camera), and this keeps the
+        # probe from adding a new constraint to that ordering.
+        from dust3r.heads.postprocess import postprocess_pose
+
+        # POSE_GRU_PROBE_ASSERT_PURE=1 verifies the throwaway claim IN THE REAL
+        # LOOP, not just in the harness. verify_gru_probe_pass.py can only prove
+        # that TODAY's decode path is non-mutating; this catches the refactor
+        # that adds an in-place op months from now, which is the failure mode a
+        # falsifier structurally cannot see. Off by default — one getattr.
+        _pure = os.environ.get("POSE_GRU_PROBE_ASSERT_PURE") == "1"
+        if _pure:
+            _snap = (state_feat.detach().clone(), mem.detach().clone())
+
+        token = self.masked_ray_map_token if ray_token is None else ray_token
+        feat_probe = feat_view + token.to(feat_view.dtype)
+        if self.pose_head_flag:
+            # The SAME seed the real pass uses (pose_retriever.inquire), not
+            # self.pose_token. pose_token is view 0's seed; using it would change
+            # what is being ablated from "the ray token" to "the ray token AND
+            # the memory read", and the observation would stop being comparable
+            # to what the real pass would have produced.
+            pose_feat = self.pose_retriever.inquire(self._get_img_level_feat(feat_probe), mem)
+            pose_pos = torch.zeros(
+                feat_probe.shape[0], 1, 2, device=feat_probe.device, dtype=pos_view.dtype
+            )
+        else:
+            pose_feat = pose_pos = None
+        _discard_state, dec = self._recurrent_rollout(
+            state_feat, state_pos, feat_probe, pos_view, pose_feat, pose_pos, init_state_feat
+        )
+        # group_size == 1 on this path (feed_prev_pred asserts it), so the pose
+        # token is index 0 of the last decoder output — the same slice
+        # stage_last takes. .float() + autocast off mirrors the real head, which
+        # casts head_input and runs the pose MLP autocast-disabled.
+        pose_token = dec[self.dec_depth][:, 0].float()
+        with torch.autocast(device_type=feat_probe.device.type, enabled=False):
+            out = postprocess_pose(
+                self.downstream_head.pose_head(pose_token), self.pose_mode
+            ).detach()
+        if _pure:
+            assert torch.equal(state_feat, _snap[0]) and torch.equal(mem, _snap[1]), (
+                "pose_gru probe pass MUTATED the state it was handed. The probe "
+                "is supposed to be a throwaway read of (state_feat, mem); if this "
+                "fires, something on the decode path acquired an in-place write "
+                "and the real pass is now consuming state the probe corrupted."
+            )
+        return out
+
+    def _probe_falsify(self, obs):
+        """P4.3 falsifier channel — the evidence that the probe is USED.
+
+        POSE_GRU_PROBE_SHUFFLE=1 batch-rolls the observation, so every sample is
+        corrected using another sample's view of the world (same shapes, same
+        magnitudes, wrong content). If metrics do not degrade, the cell is
+        ignoring columns 14:21 and the whole pass is wasted compute.
+
+        POSE_GRU_PROBE_LAG=1 feeds the PREVIOUS view's observation instead of
+        this one's. Unlike the shuffle it works at batch size 1, it stays in
+        distribution, and it is a direct measurement of what one view of
+        staleness costs — i.e. what pose_gru_probe_every=2 would buy and lose.
+        """
+        if os.environ.get("POSE_GRU_PROBE_SHUFFLE") == "1" and obs.shape[0] > 1:
+            obs = torch.roll(obs, shifts=1, dims=0)
+        if os.environ.get("POSE_GRU_PROBE_LAG") == "1":
+            lagged = getattr(self, "_probe_obs_lagged", None)
+            self._probe_obs_lagged = obs
+            if lagged is not None:
+                obs = lagged
+        return obs
+
     def _forward_decoder_group_step(
         self,
         views,
@@ -1714,6 +1980,12 @@ class ARCroco3DStereo(CroCoNet):
                 self._prev_prev_pred_pose_enc = None
                 self._pose_gru_hidden = None
                 self._prev_img_feat = None
+                # P4.3: the held probe observation (probe_every > 1) and the
+                # PROBE_LAG falsifier's one-view stash. Reset here for the same
+                # reason as the pose stashes — otherwise a sequence would open
+                # by correcting against the last view of the previous batch.
+                self._probe_obs = None
+                self._probe_obs_lagged = None
                 pose_gru = getattr(self, "pose_gru", None)
                 if pose_gru is not None and pose_gru.img_feat == "input":
                     # Stash view 0's appearance for the next step's (current,
@@ -1918,21 +2190,99 @@ class ARCroco3DStereo(CroCoNet):
                             # The loss target is NOT rolled, so under the oracle
                             # this MUST destroy the zero — the positive control.
                             est = torch.roll(est, shifts=1, dims=0)
-                    with torch.autocast(device_type=feat_group[0].device.type, enabled=False):
-                        for _it in range(n_iters):
-                            gru_in = (
-                                est
-                                if delta_static is None
-                                else torch.cat([est, delta_static], dim=-1)
-                            )
-                            gru_pose_pred, hidden = pose_gru(
-                                gru_in.float(), hidden, img_feat=img_feat_vec
-                            )
-                            gru_iterates.append(gru_pose_pred)
-                            if _it + 1 < n_iters:
-                                est = (
-                                    gru_pose_pred.detach() if iter_detach else gru_pose_pred
+                    # ---------------- P4.3 ITERATIVE REFINEMENT ---------------
+                    # n_blocks-1 throwaway decodes produce an image-grounded
+                    # observation of THIS view's pose; the cell refines against
+                    # it; the final ray is built from the refined pose. With the
+                    # lever off (refine_passes=1) probe_on is False, n_blocks is
+                    # 1, `obs` stays None, and every line below reduces to the
+                    # pre-P4.3 R loop — the same single autocast-disabled
+                    # iterate loop over the same 14-wide input.
+                    probe_on = bool(getattr(pose_gru, "probe", False))
+                    n_blocks = 1
+                    if probe_on:
+                        n_passes = int(getattr(pose_gru, "refine_passes", 2))
+                        if os.environ.get("POSE_GRU_FORCE_REFINE"):
+                            # Anytime-refinement probe, mirroring
+                            # POSE_GRU_FORCE_ITERS. N is invisible in weight
+                            # shapes (only "N>=2" is, via the 21-wide cell), so
+                            # ONE trained checkpoint can be scored across N.
+                            # Clamped at 2: at N=1 there is no observation to
+                            # fill columns 14:21 and the cell would consume a
+                            # tensor that does not exist.
+                            n_passes = max(2, int(os.environ["POSE_GRU_FORCE_REFINE"]))
+                        n_blocks = n_passes - 1
+                        # probe_every: view 1 always probes, so the held
+                        # observation is never empty when it is first read. The
+                        # BLOCK count stays constant across views — only the
+                        # DECODE count varies — so gru_pose_iters keeps a
+                        # uniform length and the aux loss sees the same shape at
+                        # every view.
+                        every = max(1, int(getattr(pose_gru, "probe_every", 1)))
+                        probe_view = ((view_indices[0] - 1) % every) == 0
+                    obs = None
+                    for _p in range(n_blocks):
+                        if probe_on:
+                            if probe_view:
+                                # Pass 0 is POSE-FREE (ray_token=None -> the
+                                # masked_ray_map_token construction). Later
+                                # passes re-probe with the ray rebuilt from the
+                                # running refined estimate, so each observation
+                                # is grounded in better conditioning than the
+                                # last. Under no_grad throughout: the
+                                # observation is DATA for the cell, never a
+                                # second gradient path into the trunk.
+                                with torch.no_grad():
+                                    ray_tok = None
+                                    if _p > 0:
+                                        ray_tok = self._pred_ray_tokens(
+                                            views, view_indices[0], est,
+                                            shape_group[0], feat_group[0].dtype,
+                                        )
+                                    obs = self._probe_decode_pose(
+                                        feat_group[0], pos_group[0], state_feat,
+                                        state_pos, mem, init_state_feat,
+                                        ray_token=ray_tok,
+                                    )
+                                self._probe_obs = obs
+                            else:
+                                # Held observation (probe_every > 1). Stale by up
+                                # to every-1 views and the cell gets no staleness
+                                # signal — that is the cost this lever trades for
+                                # its saved decodes.
+                                obs = getattr(self, "_probe_obs", None)
+                                assert obs is not None, (
+                                    "pose_gru probe: no held observation — views "
+                                    "must be processed sequentially from view 0"
                                 )
+                            obs = self._probe_falsify(obs).to(est.dtype)
+                        with torch.autocast(
+                            device_type=feat_group[0].device.type, enabled=False
+                        ):
+                            for _it in range(n_iters):
+                                gru_in = (
+                                    est
+                                    if delta_static is None
+                                    else torch.cat([est, delta_static], dim=-1)
+                                )
+                                if obs is not None:
+                                    # APPENDED after the pose block, so the
+                                    # residual anchor in PoseGRU.forward still
+                                    # reads gru_in[:, :3] / [3:7] = P(x-1).
+                                    gru_in = torch.cat([gru_in, obs], dim=-1)
+                                gru_pose_pred, hidden = pose_gru(
+                                    gru_in.float(), hidden, img_feat=img_feat_vec
+                                )
+                                gru_iterates.append(gru_pose_pred)
+                                if _it + 1 < n_iters:
+                                    est = (
+                                        gru_pose_pred.detach() if iter_detach else gru_pose_pred
+                                    )
+                        if _p + 1 < n_blocks:
+                            # Carry the refined pose into the next pass, under
+                            # the SAME iter_detach rule that governs the R loop.
+                            # Never executes when the lever is off (n_blocks=1).
+                            est = gru_pose_pred.detach() if iter_detach else gru_pose_pred
                     new_hidden = hidden
                     # getattr, not attribute access: mirrors img_feat_src above,
                     # so a PoseGRU that predates this attribute reads as "no

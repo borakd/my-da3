@@ -1,0 +1,265 @@
+# ============================================================================
+# captain_gru_v3_a4_g3_r8_refine_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
+# FULL-DATASET finetune: A4 x G3 x F0 x R8 + P4.3 ITERATIVE PROBE REFINEMENT
+# ----------------------------------------------------------------------------
+# THE ONLY SEMANTIC DIFF vs captain_gru_v3_a4_g3_r8_finetune.yaml:
+#     pose_gru_refine_passes: 2    (new key; absent => 1 => no probe at all)
+#     pose_gru_probe_every:   1    (new key; absent => 1 => same thing)
+# plus a new exp_name. Everything else -- data, schedule, lr, node count, seed,
+# criterion strings, every other pose_gru lever -- is byte-identical, so this is
+# a strict single-variable A/B against a row that is already scored:
+#     captain_gru_v3_a4_g3_r8_finetune  ->  row `gru_a4g3r8`
+#     ate 0.079918, rpe_rot 1.192692, 54.2% ATE win vs arm C (n=4292)
+# Absence of the keys IS the control -- do not add them to the base config.
+#
+# WHAT THE PROBE IS. The corrector's problem is circular: building the
+# conditioning needs a pose, and getting a good pose needs the conditioning.
+# GT breaks the circle by cheating. This breaks it honestly: decode view x once
+# with the conditioning ray replaced by masked_ray_map_token -- the pose-free
+# construction view 0 itself takes -- on a throwaway use of the state the real
+# pass is about to consume, read the pose that produces (call it O(x)), and hand
+# it to the cell as a THIRD 7-d block:
+#     gru_in = [ P(x-1) | delta | O(x) ]          width 14 -> 21
+# O(x) is the first input this module has ever had that LOOKED at frame x. The
+# fed-back P(x-1) cannot observe accumulated drift by construction.
+#
+# WHY THIS CANNOT REPEAT RUNG 0 (the strongest argument for this design). O(x)
+# comes out of the SAME pose_head MLP, the SAME postprocess_pose and the SAME
+# view-0-relative frame as P(x-1), so it is in head scale BY CONSTRUCTION. Rung
+# 0 failed because injected GT was numerically correct and in the WRONG SCALE
+# (ATE 0.1165 with a perfect input vs 0.0888 with its own stale one). There is
+# no units conversion here to get wrong.
+#
+# refine_passes = N is the number of DECODES per view: N-1 throwaway probes plus
+# the real committed pass. N=2 is one pose-free probe. N>2 re-probes with the ray
+# rebuilt from the running refined estimate. Sweep it with ONE CLI override:
+#     ... --config-name captain_gru_v3_a4_g3_r8_refine_finetune pose_gru_refine_passes=4
+# and note N is INVISIBLE in weight shapes (only "N>=2" is, via the 21-wide
+# cell), so POSE_GRU_FORCE_REFINE=<n> SCORES one trained checkpoint across N --
+# the anytime-refinement curve, without retraining.
+#
+# !! N CHANGES THE AUX LOSS SCALE FOR N>2 -- A SECOND VARIABLE !!
+# Iterates per view are (N-1)*iters, and PoseGRULoss weights iterate k by
+# gamma**(M-1-k) with the final at 1.0, so the weight sum moves with M:
+#     N=2  M=8   sum 4.1611   <- IDENTICAL to the R8 control. Single-variable.
+#     N=3  M=16  sum 4.8593   -> renormalise with pose_gru_loss_weight=0.8563
+#     N=4  M=24  sum 4.9764   -> renormalise with pose_gru_loss_weight=0.8362
+# N=2 is therefore the clean A/B; anything above it needs the renormalisation or
+# it changes iterate count AND aux-loss scale together, exactly like R8-vs-R1.
+#
+# COST, measured (FlopCounterMode on the real modules at 192x320, anchored to
+# the 3.75 s/step this arm's control actually runs at): a probe decode is the
+# decoder trunk + pose_retriever.inquire + a 768->3072->7 MLP = 2.34e11 FLOPs
+# against 4.10e11 for a full decoder+head pass. N=2 is +24% wall clock (~26 h
+# for 50 epochs), N=4 +72% (~36 h). Both fit the 3-day walltime. The saving is
+# in NOT re-entering the dense head: camera_pose is computed from ONE token
+# before the three DPT adapters, which are ~96% of the head and run FP32 while
+# the decoder runs autocast -- re-entering would cost +43%/pass. Eval pays
+# +39%/pass over 4292 scenes; budget that before N=4.
+#
+# INIT-EQUIVALENCE IS EXACT, and stronger than the F lever's: cell.weight_ih
+# columns 14:21 are ZERO-INIT across all three gate blocks, so at step 0 this
+# arm reproduces the R8 arm bit-for-bit INCLUDING the hidden trajectory. The
+# channel is not dead -- grad_W = delta (x) cell_in is nonzero there as soon as
+# the zero-init head unlocks, the same bootstrap img_proj relies on.
+#
+# FALSIFIERS (a channel nothing can kill is a channel nothing is using):
+#   POSE_GRU_PROBE_SHUFFLE=1   batch-roll the observation. Metrics MUST degrade;
+#                              if they do not, the cell ignores columns 14:21.
+#   POSE_GRU_PROBE_LAG=1       feed the PREVIOUS view's observation. Works at
+#                              B=1, stays in distribution, and measures directly
+#                              what pose_gru_probe_every=2 would cost.
+#   POSE_GRU_FORCE_REFINE=<n>  anytime-N refinement curve.
+#   POSE_GRU_PROBE_ASSERT_PURE=1  assert IN THE REAL LOOP that the probe leaves
+#                              (state_feat, mem) bit-identical. Catches a future
+#                              in-place op that verify_gru_probe_pass.py cannot.
+# Run `python verify_gru_probe_pass.py` before launching.
+#
+# GATE IS OFF HERE ON PURPOSE. pose_gru_ray_gate reads the POST-update hidden,
+# which under P4.3 has consumed the probe observation -- the two levers are not
+# independent and a refine-vs-raygate A/B would confound them.
+#
+# BEFORE SCORING: `pose_gru_refine_passes` and `pose_gru_probe_every` must be
+# added to LEVERS_RESTORED in eval_pipeline/preflight_ckpt.py. Both ARE restored
+# (_sniff_pose_gru_config recovers them from the 21-wide cell plus ckpt args,
+# hard-failing on any disagreement), but check_lever_coverage refuses any
+# pose_gru* key it has not been told about, so arm_eval_for_run.sh will fail
+# preflight until that edit lands.
+#
+# Run (32 GPUs; the GPU count comes from --nodes, NOT from this file):
+#   \
+#   sbatch --nodes=8 --job-name=gru_a4g3r8_refine \
+#          train_gru_v3_finetune_64node.sbatch captain_gru_v3_a4_g3_r8_refine_finetune
+# Fresh from-scratch start with a new wandb id; wipe any stale run dir first
+# (auto-resume + a persisted wandb_run_id.txt would silently continue it).
+# NB: a P4.3 checkpoint CANNOT warm-start from any A4 checkpoint -- the cell is
+# 21 wide, not 14, and the loader hard-fails on the shape mismatch by design.
+# ============================================================================
+model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
+# Base CUT3R weights, NOT a warm start from a trained GRU -- identical to every
+# other v3 grid arm, which is what keeps the comparison clean.
+pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+load_only_encoder: False
+long_context: True
+fixed_length: False
+resume: null
+benchmark: False
+num_views : 64
+num_test_views : 4
+n_corres_train: 0
+n_corres_test: 0
+
+# PoseGRU term weight, interpolated into both criterion strings below.
+# See the "R8 MULTIPLIES THE AUX LOSS" note in the header before changing this:
+# at iters=8/gamma=0.8 the effective multiplier on the aux term is 4.1611.
+pose_gru_loss_weight: 1.0
+
+# R lever supervision: RAFT sequence loss over the 8 iterates, w_k = 0.8^(7-k),
+# final iterate weight 1.0. TRAIN side only -- test_criterion below is
+# deliberately final-iterate-only, so the two strings differ in this arm.
+pose_gru_iter_gamma: 0.8
+
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss(iter_gamma=${pose_gru_iter_gamma})
+# Final-iterate-only on the test side: the deployed quantity is the pose that
+# actually drives the ray build, which is iterate 7. Reports as 'PoseGRULoss()'.
+# NOTE: best_ckpt_agg selects on the test loss INCLUDING the gru term -- compare
+# arms at fixed epochs, or subtract gru_pose_loss_avg from headline losses.
+test_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis'), alpha=0.2) + RGBLoss(MSE) + ${pose_gru_loss_weight}*PoseGRULoss()
+
+# Extra diagnostic test criteria, evaluated on the same forward pass as test_criterion.
+# Each is logged under <test_prefix>_<name>/... so the total ('<name>/loss') and every
+# individual term get their own scalar plots in TensorBoard / W&B.
+# Byte-identical to every other 32gpu/1e-5 arm ON PURPOSE: this is the
+# run-independent reference metric, and it carries no GRU term.
+extra_test_criteria:
+  orig: "Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=True, sky_loss_value=0) + RGBLoss(L21)"
+
+resolution: [[320, 192]]
+
+allow_repeat: True
+
+# When True, each sampled batch is a strictly consecutive (interval=1), temporally
+# ordered window of `num_views` frames. When False, behaves exactly as before.
+force_consecutive_frame_sampling: True
+
+# Closed-loop previous-prediction conditioning: at step x the model builds a ray
+# map from the pose it PREDICTED at step x-1 (fed through the pretrained ray-map
+# encoder, intrinsics from view x-1) and adds it to view x's encoder tokens
+# inside the decode loop. Both dataset ray flags MUST stay False (the model
+# asserts this). View 0 gets the masked_ray_map_token.
+# Falsifier: env PREV_PRED_RAY_SHUFFLE=1 batch-rolls the fed-back poses.
+feed_gt_ray_map: False
+feed_prev_gt_ray_map: False
+feed_prev_pred: True
+
+# PoseGRU: recurrent filter between the fed-back pose and the ray-map build
+# (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
+# the current view's GT pose; hidden resets at view 0.
+#   pose_gru_mode / pose_gru_input: A4 -- pose_delta input, residual head.
+#   pose_gru_bptt (G1) / pose_gru_e2e (G2): BOTH True = G3, the superset.
+#   pose_gru_iters (R lever): 8 here = R ON. Zero new params; the count is
+#                   persisted in ckpt args and restored by load_model (it is
+#                   invisible in weight shapes); the loader HARD-FAILS on any
+#                   pose_gru shape mismatch, so a silent random-GRU eval is
+#                   impossible.
+#   pose_gru_iter_detach: ACTIVE at iters>1 -- detaches the running pose estimate
+#                   between iterates (RAFT discipline). The hidden is NOT
+#                   detached inside the view.
+#   pose_gru_img_feat (F lever): 'none' here = F OFF.
+#   pose_gru_oracle: ABSENT -> 'off'. HONEST arm; the GRU only ever sees the pose
+#                   the model itself predicted.
+# Falsifiers: PREV_PRED_RAY_SHUFFLE=1, POSE_GRU_HIDDEN_SHUFFLE=1,
+# POSE_GRU_HIDDEN_ZERO=1, POSE_GRU_FORCE_ITERS=<n>.
+pose_gru: True
+pose_gru_mode: residual
+pose_gru_input: pose_delta
+pose_gru_hidden_dim: 128
+pose_gru_lr_scale: 100.0           # x lr -> GRU group peaks at 1e-3, see header
+pose_gru_bptt: True                # G1 half of G3
+pose_gru_e2e: True                 # G2 half of G3
+pose_gru_iters: 8                  # R ON -- 8 back-to-back cell calls per view
+pose_gru_iter_detach: True         # ACTIVE: detach running pose between iterates
+pose_gru_img_feat: none            # F OFF
+pose_gru_img_feat_dim: 32          # inert while img_feat='none' (kept so flipping
+pose_gru_img_feat_frames: 2        #   F back on is a one-word change)
+
+# ==== P4.3 (§4): THE ONE VARIABLE THIS ARM CHANGES =========================
+# N decodes per view: N-1 throwaway probe decodes producing an image-grounded
+# observation of THIS view's pose, then the real committed pass. Widens the
+# cell input 14 -> 21 (the observation is APPENDED, so the residual anchor
+# still reads P(x-1)); columns 14:21 of cell.weight_ih are zero-init, so step 0
+# is bit-identical to the R8 control. Removing this line reverts to that
+# control exactly. See the header for the loss-scale caveat at N>2.
+pose_gru_refine_passes: 2
+# Probe every k-th view and hold the observation in between; k=1 = every view.
+# k>1 is a COST lever with an information cost: a held observation is an
+# absolute pose from j frames ago and the cell gets no staleness signal.
+# POSE_GRU_PROBE_LAG=1 measures that cost before you pay it.
+pose_gru_probe_every: 1
+
+# FULL DROID SPLITS -- 38633 train / 4292 test scenes, per-lab stratified 90/10
+# (seed 42). Train adds aug_crop=16 + SeqColorJitter; test stays aug_crop=0 +
+# ImgNorm. The ray-map kwargs are OMITTED (DL3DV_Multi defaults both to False,
+# which is what the feed_prev_pred arm requires).
+#
+# The launcher runs build_dataset_symlinks.py --check on the head node BEFORE
+# allocating, because dl3dv.py silently SKIPS dangling symlinks (no error, no
+# warning) and would train on a short dataset whose truncated scan then gets
+# written to the disk cache.
+#
+# NB: the split="train"/"test" kwarg is INERT -- DL3DV_Multi accepts and discards
+# it. Train/test separation comes ENTIRELY from ROOT, so a ROOT typo cannot be
+# caught by the split argument.
+train_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/train/dl3dv_multi", aug_crop=16, resolution=${resolution}, transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+test_data: 'DL3DV_Multi(allow_repeat=${allow_repeat}, split="test", ROOT="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi", aug_crop=0, resolution=${resolution}, transform=ImgNorm, num_views=${num_test_views}, n_corres=${n_corres_test}, force_consecutive_frame_sampling=${force_consecutive_frame_sampling})'
+
+train_dataset: 38633 @ ${train_data}
+test_dataset: 4292 @ ${test_data}
+
+seed: 0
+# ===== MULTINODE (8 nodes x 4 GPUs = 32 processes) =====
+# Global batch per optimizer step = batch_size * accum_iter * num_gpus
+#   32 GPUs here = 4 * 1 * 32 = 128   (301 optimizer steps/epoch)
+# accum_iter stays 1 so the per-GPU batch_size=4 sampler micro-batch grouping is
+# unchanged. Everything else (lr schedule, epochs, dataset epoch-size) is
+# GPU-count-independent, so a 32- and a 64-GPU run of this config would differ
+# ONLY in global batch.
+batch_size: 4
+accum_iter: 1
+gradient_checkpointing: True
+epochs: 50
+start_epoch: 0
+weight_decay: 0.05
+lr: 1e-5                 # 10x the 1e-6 GRU-family default -- see header
+min_lr: 1e-6             # scaled by the same 10x: cosine shape preserved
+warmup_epochs: 0.5
+amp: 1
+
+num_workers: 10
+world_size: 1
+local-rank: -1
+dist_url: 'env://'
+rank: 0
+gpu: 0
+distributed: True
+dist_backend: 'nccl'
+
+# Metric logging / checkpointing
+log_median: False        # when False, only *_avg metrics are logged (no *_med)
+best_ckpt_agg: avg       # save best checkpoint on loss_avg instead of loss_med
+
+eval_freq: 1
+save_freq: 1
+keep_freq: 10
+print_freq: 10
+print_img_freq: 1000
+num_imgs_vis: 4
+save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
+exp_name: 'captain_gru_v3_a4_g3_r8_refine_finetune'
+task: 'cut3r'
+logdir: ${save_dir}/${exp_name}/logs
+output_dir: ${save_dir}/${exp_name}/
+hydra:
+  verbose: True
+  run:
+    dir: ${save_dir}/${exp_name}
