@@ -136,3 +136,11 @@ f1rr8np ate .0788 rot 1.1916 | f1dr8np ate .0814 rot 1.1991. Spread .00258
 f1rr8np 55.6/54.4 (grazes 54.2 tier, within the +/-2-point replicate band,
 indistinguishable from r8's 54.2/55.5) — recorded as floor-limited context,
 NOT progress; refine line keeps priority. f1dr8np 49.4/53.8 fails.
+
+## Checkpoint-10 kill gate (2026-08-13 09:45): RUN CONTINUES
+(i) probe-block norm 9.50 PASS. (ii) shuffle degradation e_head_t +26.4%
+mid / +21.7% late PASS. (iii) committed error 1.7-2.1x arm-A head — mid-
+anneal vs annealed references, inconclusive by construction; kill branch
+(B2 poison) never armed since no poison region exists. Risk carried: error
+must anneal below sigma_ref-equivalent by e50; checkpoint-30 trend probe
+scheduled (~19:30) to confirm the anneal slope before completion.
