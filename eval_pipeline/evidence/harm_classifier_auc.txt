@@ -1,0 +1,6 @@
+Step 12a harm-predictability classifier (2026-08-13 04:30)
+Labels: per-scene harm = ATE(gru_a4g3r8) > ATE(augfull_lr1e5), 4292 scenes, harm_rate 0.594
+Features: arm C's per-scene ate/rpe_trans/rpe_rot/absrel/a1 (trajectory-only deploy-visible)
+LogReg 5-fold AUC 0.5005 | GBM 5-fold AUC 0.5032
+=> harm is UNPREDICTABLE from trajectory-only signals; no trajectory-only gate
+   can discriminate it (validates unobservability verdict + gate-design rejections).
