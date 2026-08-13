@@ -1,0 +1,22 @@
+== (c) CAUSAL: shuffle degradation of committed e_head at e10 ==
+  e_head_t early: clean 0.1909 shuffle 0.2427  (+27.1%)
+  e_head_t mid: clean 0.4299 shuffle 0.6420  (+49.3%)
+  e_head_t late: clean 0.7441 shuffle 1.0599  (+42.4%)
+  e_head_r early: clean 2.3922 shuffle 3.5770  (+49.5%)
+  e_head_r mid: clean 7.4221 shuffle 10.4264  (+40.5%)
+  e_head_r late: clean 11.2805 shuffle 15.8149  (+40.2%)
+  CAUSAL GATE: PASS
+== (d) PAIRED trained-minus-placebo dR2 (scene-block bootstrap) ==
+  e5 early_t: ddR2 +0.1115  CI95 [+0.0560, +0.1716]  EXCLUDES 0
+  e5 mid_t: ddR2 +0.1568  CI95 [+0.0898, +0.2229]  EXCLUDES 0
+  e5 late_t: ddR2 +0.1374  CI95 [+0.0086, +0.2167]  EXCLUDES 0
+  e5 early_r: ddR2 +0.0003  CI95 [-0.0118, +0.0295]  includes 0
+  e5 mid_r: ddR2 +0.0004  CI95 [-0.0127, +0.0118]  includes 0
+  e5 late_r: ddR2 +0.0097  CI95 [-0.0124, +0.0369]  includes 0
+  e10 early_t: ddR2 +0.0726  CI95 [+0.0113, +0.1491]  EXCLUDES 0
+  e10 mid_t: ddR2 -0.0041  CI95 [-0.0742, +0.0415]  includes 0
+  e10 late_t: ddR2 -0.0283  CI95 [-0.0927, +0.0512]  includes 0
+  e10 early_r: ddR2 +0.0045  CI95 [-0.0133, +0.0394]  includes 0
+  e10 mid_r: ddR2 -0.0070  CI95 [-0.0242, +0.0063]  includes 0
+  e10 late_r: ddR2 +0.0099  CI95 [-0.0215, +0.0451]  includes 0
+  PAIRED GATE (e5 mid_t CI excludes zero upward): PASS
