@@ -73,6 +73,7 @@ import glob
 import os
 import random
 import time
+import zlib
 import imageio.v2 as iio
 import numpy as np
 import PIL.Image
@@ -206,6 +207,66 @@ def crop_resize_training_style(image, K, resolution):
     return image, K2
 
 
+def _gt_ray_noise_cfg():
+    """Noise-tolerance-oracle hook config from GT_RAY_NOISE_* env vars.
+
+    Returns None when GT_RAY_NOISE_MODE is unset/empty — the loader is then
+    byte-identical to the un-hooked code (nothing else may change).
+    """
+    mode = os.environ.get("GT_RAY_NOISE_MODE", "").strip().lower()
+    if not mode:
+        return None
+    if mode not in ("white", "walk"):
+        raise ValueError(f"GT_RAY_NOISE_MODE must be 'white' or 'walk', got {mode!r}")
+    return dict(
+        mode=mode,
+        sigma_t=float(os.environ.get("GT_RAY_NOISE_T", "0") or 0.0),
+        sigma_r_deg=float(os.environ.get("GT_RAY_NOISE_R_DEG", "0") or 0.0),
+        seed=int(os.environ.get("GT_RAY_NOISE_SEED", "0") or 0),
+    )
+
+
+def _se3_exp(xi_r, xi_t):
+    """4x4 float32 SE(3) element from axis-angle (rad) + translation vectors.
+
+    Exact identity when both are zero, so a sigma=0 run stays byte-identical
+    through the pose @ exp(0) matmul (the instrument's own sanity check).
+    """
+    theta = float(np.linalg.norm(xi_r))
+    T = np.eye(4, dtype=np.float64)
+    if theta > 1e-12:
+        k = xi_r / theta
+        K = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+        T[:3, :3] = np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+    T[:3, 3] = xi_t
+    return T
+
+
+def _gt_ray_noise_xi(cfg, scene_key, view_idx, n_views):
+    """Deterministic noise tangent vector for (scene, view, seed).
+
+    white: independent draw per view. walk: sum of per-view increments scaled
+    by sqrt(2/(T+1)) so the sequence-RMS magnitude matches a white draw of the
+    same sigma (magnitude-matched curves). Increment j is a pure function of
+    (scene_key, j, seed), so the walk is shard- and order-independent.
+    """
+    def draw(j, s_t, s_r_deg):
+        key = f"{scene_key}|{j}|{cfg['seed']}".encode()
+        rs = np.random.RandomState(zlib.crc32(key) & 0xFFFFFFFF)
+        return rs.randn(3) * np.deg2rad(s_r_deg), rs.randn(3) * s_t
+
+    if cfg["mode"] == "white":
+        return draw(view_idx, cfg["sigma_t"], cfg["sigma_r_deg"])
+    scale = np.sqrt(2.0 / (n_views + 1.0))
+    xi_r = np.zeros(3)
+    xi_t = np.zeros(3)
+    for j in range(1, view_idx + 1):
+        r, t = draw(j, cfg["sigma_t"] * scale, cfg["sigma_r_deg"] * scale)
+        xi_r += r
+        xi_t += t
+    return xi_r, xi_t
+
+
 def load_frames_training_style(img_paths, pose_path, size):
     """Load images + GT ray maps exactly as the training loader does.
 
@@ -229,6 +290,13 @@ def load_frames_training_style(img_paths, pose_path, size):
 
     patch = 16
     ref_pose = None
+    # Noise-tolerance oracle: perturbs ONLY the pose the conditioning ray map
+    # is built from; the returned `poses` (scoring GT) stay untouched, and
+    # frame 0 (the reference) is never perturbed.
+    noise_cfg = _gt_ray_noise_cfg()
+    scene_key = os.path.basename(
+        os.path.dirname(os.path.dirname(os.path.abspath(pose_path)))
+    )
     images = []
     ray_maps = []
     intrinsics_list = []
@@ -254,7 +322,13 @@ def load_frames_training_style(img_paths, pose_path, size):
 
         if ref_pose is None:
             ref_pose = pose
-        ray_map = get_ray_map(ref_pose, pose, K, th, tw).astype(np.float32)
+        cond_pose = pose
+        if noise_cfg is not None and i > 0:
+            xi_r, xi_t = _gt_ray_noise_xi(noise_cfg, scene_key, i, len(img_paths))
+            cond_pose = (
+                pose.astype(np.float64) @ _se3_exp(xi_r, xi_t)
+            ).astype(np.float32)
+        ray_map = get_ray_map(ref_pose, cond_pose, K, th, tw).astype(np.float32)
         ray_maps.append(torch.from_numpy(ray_map).unsqueeze(0))  # (1, H, W, 6)
         intrinsics_list.append(torch.from_numpy(K).unsqueeze(0))  # (1, 3, 3)
         poses.append(torch.from_numpy(pose).unsqueeze(0))  # (1, 4, 4) GT c2w
