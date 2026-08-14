@@ -1,0 +1,6 @@
+row                               n      ate    rpe_t  rpe_rot  absrel     a1
+B CLOSED LOOP (prev_pred)       430  0.13069  0.01346   3.2907  0.2242 0.6727
+B with GT rays (subset)         430  0.01393  0.00380   0.3503  0.1889 0.7807
+A regular (subset)              430  0.07714  0.00824   1.1119  0.1787 0.7835
+C prevpred-trained (subset)     430  0.08500  0.00846   1.2143  0.1919 0.7676
+curve walk-1.0 prediction       430  0.04251      nan      nan     nan    nan

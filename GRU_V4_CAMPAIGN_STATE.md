@@ -163,3 +163,19 @@ model.py:2028 requires batch>1; harness runs batch 1 (instrument no-op —
 recorded as an instrument limitation, not arm evidence). Probe-shuffle
 falsifier (batch-4 instrument) pending: p43_final_clean re-running after
 transient OOM; p43_final_shuffle.json already on disk.
+
+## B CLOSED-LOOP COLLAPSE (2026-08-14 08:10) — the curve's caveat BINDS
+diag_gtrayB_prevpred430: ate .1307 rpet .01346 rper 3.291 absrel .2242 a1
+.6727 — collapse below every baseline; 3x worse than the walk-1.0 curve
+prediction (.0425). Converges with the concurrent-session finding
+(gru_a4g3otr honest eval: ate .1192, rot 4.21). VERDICT TRIAD now complete:
+(1) closed-loop-trained arms co-adapt conditioning to ~zero-or-negative net
+value (refine: .0903); (2) accurate-conditioning-trained trunks collapse
+when self-fed (B: .1307; oracle-trained: .1192); (3) exogenous-noise
+tolerance does NOT price endogenous feedback error — the "no poison region"
+was an artifact of exogenous injection. Frozen-B + GRU add-on is dead on
+arrival. Surviving untested design: noise-conditioned TRAINING (train the
+trunk on GT-conditioning corrupted with walk noise matched to deployment
+error statistics — the user's trust-calibration escape hatch, applied at
+trunk level). Cheap decisive rung: 10-epoch short arm (~5.5 khours), scored
+closed-loop on the subset, BEFORE any 50-epoch bet.
