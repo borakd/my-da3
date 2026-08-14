@@ -188,3 +188,14 @@ NGC_WALKDRIFT_GATES.md BEFORE launch. 10 epochs, 8 nodes, trunk-pure,
 label gru_ngcwalkdriftshort marked .ignored (rung, never a table arm).
 Next: ckpt-5 early-out (closed-loop subset vs .1307), then G1/G2/G3/G4 on
 ckpt-10, then S1-or-promotion per the frozen table.
+
+## NGC ckpt-10 gate battery SUBMITTED (2026-08-14 13:05, jobs 44592185-88)
+Storage note: checkpoints moved (new runs -> /gpfs/scratch/.../checkpoints,
+old -> /gpfs/scratch/.../checkpoints_projects; mv from /gpfs/projects still
+draining — ckpt-10 read explicitly from the projects-side source). Battery:
+G1 diag_ngc10_clean (prev_gt), G2 diag_ngc10_drift10 (walk-1.0 + frozen
+warmstart drift 0.0362/0.34), G3 DECISIVE diag_ngc10_closed (prev_pred),
+shuffle spot check (LIMIT=5). R-denominator replays at 0.5/1.5x wait for the
+checkpoint-specific drift fit from G3's own residuals. Claim message sent to
+peer session (koc821022-6b) to avoid duplicate gate work; a4_g1 twins' evals
+left to the peer unless they delegate.
