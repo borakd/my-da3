@@ -1,0 +1,19 @@
+== F1: kwargs-absent byte-identity vs HEAD ==
+  [PASS] kwargs-absent items byte-identical to HEAD — 20/20
+== F2: m=0 (clean_frac=1.0) ray_map identity ==
+  [PASS] m=0 ray maps bit-identical to clean
+== F3: determinism ==
+  [PASS] same (seed, idx) => identical noised maps
+  [PASS] different idx => different maps
+  [PASS] noise actually perturbs (vs clean)
+== F4: generator parity (synthetic) ==
+  [PASS] walk seq-RMS parity — 1.1196 vs 1.1260
+  [PASS] rotation realized median ~ nominal at m=1 (walk: matched in RMS) — 32.10 deg vs 36.68 nominal
+  [PASS] white realized rotation median within 2% of nominal — 36.70 vs 36.68
+  [PASS] drift slope within 5% of spec — 0.03620 vs 0.0362
+== F5: eval-hook drift extension ==
+  [PASS] drift-absent xi unchanged (branch not entered)
+  [PASS] drift-set deterministic
+  [PASS] drift adds on top of unchanged zero-mean part
+
+ALL RAY-COND-NOISE FALSIFIERS PASS
