@@ -179,3 +179,12 @@ trunk on GT-conditioning corrupted with walk noise matched to deployment
 error statistics — the user's trust-calibration escape hatch, applied at
 trunk level). Cheap decisive rung: 10-epoch short arm (~5.5 khours), scored
 closed-loop on the subset, BEFORE any 50-epoch bet.
+
+## NGC-WalkDrift short rung LAUNCHED (2026-08-14 ~10:30, job 44583714)
+All pre-launch falsifiers PASS (F1-F5 battery 20/20 byte-identity + parity,
+archived; F6 drift fit 1.23x naive; F7 graft loads with refine sniff + 8
+scenes scored; F8 config diff exact; F9 t_frac round-trip). Gates frozen in
+NGC_WALKDRIFT_GATES.md BEFORE launch. 10 epochs, 8 nodes, trunk-pure,
+label gru_ngcwalkdriftshort marked .ignored (rung, never a table arm).
+Next: ckpt-5 early-out (closed-loop subset vs .1307), then G1/G2/G3/G4 on
+ckpt-10, then S1-or-promotion per the frozen table.
