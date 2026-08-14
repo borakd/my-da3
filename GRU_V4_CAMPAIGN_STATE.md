@@ -199,3 +199,10 @@ shuffle spot check (LIMIT=5). R-denominator replays at 0.5/1.5x wait for the
 checkpoint-specific drift fit from G3's own residuals. Claim message sent to
 peer session (koc821022-6b) to avoid duplicate gate work; a4_g1 twins' evals
 left to the peer unless they delegate.
+Storage correction (peer session 13:15): the checkpoints_projects mv DIED
+partway (RLIMIT_CPU on glogin1) — cut3r_multinode never copied to scratch;
+projects side is source-of-truth for it, READ-ONLY (group over quota, 1.02TB
+/1024GB, 6.9-day grace). a4_g1 twins are NEW runs at
+/gpfs/scratch/.../checkpoints/captain_cut3r_finetune_aug_full/; their evals
+resubmitted with CKPT_ROOT override: gru_a4g1f1np + gru_a4g1f1r8np, 8 shards
+each (44592216+/44592234+). NGC battery unchanged (reads projects source).
