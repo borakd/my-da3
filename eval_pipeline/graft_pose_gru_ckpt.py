@@ -23,15 +23,21 @@ def main():
     for k in keys:
         trunk["model"][k] = donor["model"][k].clone()
 
+    # args are OmegaConf DictConfigs: enumerate via keys(), assign via
+    # open_dict so struct mode cannot silently drop new keys.
+    from omegaconf import OmegaConf, open_dict
     ta, da = trunk["args"], donor["args"]
     moved = []
-    for name in vars(da):
-        if name.startswith("pose_gru"):
-            setattr(ta, name, getattr(da, name))
-            moved.append(name)
-    ta.feed_prev_pred = True
-    ta.feed_gt_ray_map = False
-    ta.feed_prev_gt_ray_map = False
+    with open_dict(ta):
+        for name in da.keys():
+            if str(name).startswith("pose_gru"):
+                ta[name] = da[name]
+                moved.append(str(name))
+        ta["feed_prev_pred"] = True
+        ta["feed_gt_ray_map"] = False
+        ta["feed_prev_gt_ray_map"] = False
+    assert "pose_gru_refine_passes" in moved and "pose_gru" in moved, (
+        f"graft moved {len(moved)} args but the load-bearing keys are missing")
 
     torch.save(trunk, out_p)
     print(f"grafted {len(keys)} tensors, args: {sorted(moved)}")
