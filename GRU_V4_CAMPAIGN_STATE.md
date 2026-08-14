@@ -149,3 +149,17 @@ scheduled (~19:30) to confirm the anneal slope before completion.
 e_head_t mid 0.592->0.383 (-35%), ratio vs arm A 1.90->1.23; all six bands
 -27..-42%. 20 steepest-anneal epochs remain. Gate-(iii) risk retired.
 Training ETA ~03:15 2026-08-14 (27 min/epoch); eval auto-arms on completion.
+
+## DELIVERABLE SCORED (2026-08-14 04:00, 4292/4292) — PRE-REGISTERED NEGATIVE
+gru_a4g3r8refine: ate .0903 rpet .00845 rper 1.3317 absrel .1981 a1 .7614.
+Win% vs C: ATE 34.23, rot 26.82 — 20.0/27.4 points BELOW the 54.22 progress
+tier, far outside the replicate bands (±4.0/±13.5) in the failing direction
+=> clean single-run FAILURE, no replicate owed under PREREG_VERDICT_RULES.md.
+Depth inside family band (pre-registered depth expectation held). Delta vs
+gru_a4g3r8: +0.0104 ATE = 3.9x the corrected floor — a REAL regression, not
+scatter. rpe_rot 1.332 = worst in family (open-risk #5, rotation
+co-adaptation, likely fired). Ray-shuffle Gate-2 falsifier VOID at eval:
+model.py:2028 requires batch>1; harness runs batch 1 (instrument no-op —
+recorded as an instrument limitation, not arm evidence). Probe-shuffle
+falsifier (batch-4 instrument) pending: p43_final_clean re-running after
+transient OOM; p43_final_shuffle.json already on disk.
