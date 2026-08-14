@@ -206,3 +206,9 @@ projects side is source-of-truth for it, READ-ONLY (group over quota, 1.02TB
 /gpfs/scratch/.../checkpoints/captain_cut3r_finetune_aug_full/; their evals
 resubmitted with CKPT_ROOT override: gru_a4g1f1np + gru_a4g1f1r8np, 8 shards
 each (44592216+/44592234+). NGC battery unchanged (reads projects source).
+Coordination (3rd session, known_good_fsrc_noproj, ~13:40): a4_g1 twin evals
+run to completion under my labels but AGGREGATION IS THEIRS (single-pass
+merge incl. eval_gru companions; my-da3's aggregate_results.py drops _gru
+rows — do not merge from this worktree). They also score the two oracle
+lr1e5 arms ORACLE=gt as user-directed table toplines (unmissable labels,
+--no_rank). My remaining ownership: NGC ckpt-10 gate battery + readouts.
