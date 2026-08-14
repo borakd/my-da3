@@ -1,0 +1,6 @@
+row                             n      ate    rpe_t  rpe_rot  absrel     a1
+refine FULL (clean)           430  0.09290  0.00860   1.3633  0.1975 0.7577
+refine ROTZERO surgery        430  0.09307  0.00848   1.3090  0.1975 0.7581
+r8 (subset of table)          430  0.08160  0.00896   1.1923  0.1962 0.7596
+C prevpred (subset)           430  0.08500  0.00846   1.2143  0.1919 0.7676
+A regular (subset)            430  0.07714  0.00824   1.1119  0.1787 0.7835
