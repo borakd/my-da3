@@ -25,12 +25,38 @@ class DL3DV_Multi(BaseMultiViewDataset):
         is_metric=False,
         feed_gt_ray_map=False,
         feed_prev_gt_ray_map=False,
+        ray_cond_noise_mode="",
+        ray_cond_noise_t_frac=0.0,
+        ray_cond_noise_r_deg=0.0,
+        ray_cond_noise_clean_frac=0.10,
+        ray_cond_noise_m_lo=0.25,
+        ray_cond_noise_m_hi=1.5,
+        ray_cond_noise_r_m_cap=1.0,
+        ray_cond_noise_drift_t=0.0,
+        ray_cond_noise_drift_r=0.0,
         **kwargs,
     ):
         assert not (feed_gt_ray_map and feed_prev_gt_ray_map), (
             "feed_gt_ray_map and feed_prev_gt_ray_map are mutually exclusive: "
             "a view is conditioned either on its own GT camera or its predecessor's"
         )
+        # NGC noise-conditioned training (campaign 2026-08-14). All keys are
+        # default-off: mode "" leaves every code path and RNG stream
+        # byte-identical to a tree without these kwargs (falsifier F1).
+        assert ray_cond_noise_mode in ("", "walk", "white", "mix")
+        if ray_cond_noise_mode:
+            assert feed_gt_ray_map or feed_prev_gt_ray_map, (
+                "ray_cond_noise_* perturbs the conditioning ray maps; it is "
+                "meaningless without a GT-ray conditioning mode")
+        self.ray_cond_noise_mode = ray_cond_noise_mode
+        self.ray_cond_noise_t_frac = float(ray_cond_noise_t_frac)
+        self.ray_cond_noise_r_deg = float(ray_cond_noise_r_deg)
+        self.ray_cond_noise_clean_frac = float(ray_cond_noise_clean_frac)
+        self.ray_cond_noise_m_lo = float(ray_cond_noise_m_lo)
+        self.ray_cond_noise_m_hi = float(ray_cond_noise_m_hi)
+        self.ray_cond_noise_r_m_cap = float(ray_cond_noise_r_m_cap)
+        self.ray_cond_noise_drift_t = float(ray_cond_noise_drift_t)
+        self.ray_cond_noise_drift_r = float(ray_cond_noise_drift_r)
         self.ROOT = ROOT
         self.video = True
         self.max_interval = 20

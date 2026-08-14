@@ -24,6 +24,73 @@ def get_ray_map(c2w1, c2w2, intrinsics, h, w):
     return ray_map
 
 
+def _se3_exp_np(xi_r, xi_t):
+    """4x4 float64 SE(3) element from axis-angle (rad) + translation vectors.
+
+    Port of demo_ray.py:_se3_exp (same Rodrigues branch, exact identity at
+    zero) so the train-side noise generator and the audited eval-side replay
+    hook share one convention (falsifier F4 checks parity numerically).
+    """
+    theta = float(np.linalg.norm(xi_r))
+    T = np.eye(4, dtype=np.float64)
+    if theta > 1e-12:
+        k = xi_r / theta
+        K = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+        T[:3, :3] = np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+    T[:3, 3] = xi_t
+    return T
+
+
+_CHI3_MEDIAN = 1.5382  # realized-median convention shared with the eval hook
+
+
+def _ray_cond_noise_plan(child_rng, n_views, s_seq, cfg):
+    """Per-sequence conditioning-noise plan: list of (xi_r, xi_t) per view.
+
+    View 0 gets None (the reference is never noised). Draw order is fixed so
+    the plan is a pure function of the child rng state: trust m, mode, drift
+    directions, then per-view increments. Zero-mean part: walk (increments
+    scaled sqrt(2/(T+1)) for sequence-RMS parity with white) or white, per-axis
+    sigma divided by chi-3 median so the realized per-view median magnitude
+    equals the nominal. First-moment part: linear-in-view drift of
+    cfg['drift_t'] s_seq-units/view (resp. cfg['drift_r'] deg/view) along a
+    fixed per-sequence direction — the endogenous error's persistent component
+    that zero-mean noise cannot represent.
+    """
+    m = 0.0
+    if child_rng.random() >= cfg["clean_frac"]:
+        lo, hi = np.log(cfg["m_lo"]), np.log(cfg["m_hi"])
+        m = float(np.exp(child_rng.uniform(lo, hi)))
+    mode = cfg["mode"]
+    if mode == "mix":
+        mode = "walk" if child_rng.random() < 0.8 else "white"
+    m_r = min(m, cfg["r_m_cap"])
+    u_t = child_rng.normal(size=3)
+    u_t /= max(np.linalg.norm(u_t), 1e-12)
+    u_r = child_rng.normal(size=3)
+    u_r /= max(np.linalg.norm(u_r), 1e-12)
+
+    sig_t = cfg["t_frac"] * m * s_seq / _CHI3_MEDIAN
+    sig_r = np.deg2rad(cfg["r_deg"] * m_r / _CHI3_MEDIAN)
+    scale = np.sqrt(2.0 / (n_views + 1.0)) if mode == "walk" else 1.0
+    drift_t = cfg["drift_t"] * m * s_seq
+    drift_r = np.deg2rad(cfg["drift_r"] * m_r)
+
+    plan = [None]
+    acc_r, acc_t = np.zeros(3), np.zeros(3)
+    for k in range(1, n_views):
+        step_r = child_rng.normal(size=3) * sig_r * scale
+        step_t = child_rng.normal(size=3) * sig_t * scale
+        if mode == "walk":
+            acc_r += step_r
+            acc_t += step_t
+            zr, zt = acc_r.copy(), acc_t.copy()
+        else:
+            zr, zt = step_r, step_t
+        plan.append((zr + k * drift_r * u_r, zt + k * drift_t * u_t))
+    return plan
+
+
 class BaseMultiViewDataset(EasyDataset):
     """Define all basic options.
 
@@ -350,6 +417,35 @@ class BaseMultiViewDataset(EasyDataset):
         first_view_camera_pose = views[0]["camera_pose"]
         transform = SeqColorJitter() if self.is_seq_color_jitter else self.transform
 
+        # NGC noise-conditioned training: perturb ONLY the pose the conditioning
+        # ray map is built from (camera_pose / pts3d / supervision untouched;
+        # view 0 never noised). Mode "" takes zero rng draws and zero branches
+        # beyond this guard, keeping existing runs byte-identical (F1). When
+        # set, exactly ONE parent draw seeds a child stream so the plan is
+        # deterministic per (seed, idx) and the parent stream shifts by a fixed
+        # amount regardless of plan size.
+        _noise_plan = None
+        if getattr(self, "ray_cond_noise_mode", ""):
+            child = np.random.default_rng(int(self._rng.integers(2**63)))
+            inv0 = np.linalg.inv(first_view_camera_pose.astype(np.float64))
+            rels = [
+                np.linalg.norm((inv0 @ v["camera_pose"].astype(np.float64))[:3, 3])
+                for v in views[1:]
+                if "camera_pose" in v and np.isfinite(v["camera_pose"]).all()
+            ]
+            s_seq = max(float(np.median(rels)) if rels else 0.0, 1e-6)
+            _noise_plan = _ray_cond_noise_plan(
+                child, len(views), s_seq,
+                dict(mode=self.ray_cond_noise_mode,
+                     t_frac=self.ray_cond_noise_t_frac,
+                     r_deg=self.ray_cond_noise_r_deg,
+                     clean_frac=self.ray_cond_noise_clean_frac,
+                     m_lo=self.ray_cond_noise_m_lo,
+                     m_hi=self.ray_cond_noise_m_hi,
+                     r_m_cap=self.ray_cond_noise_r_m_cap,
+                     drift_t=self.ray_cond_noise_drift_t,
+                     drift_r=self.ray_cond_noise_drift_r))
+
         for v, view in enumerate(views):
             assert (
                 "pts3d" not in view
@@ -371,9 +467,15 @@ class BaseMultiViewDataset(EasyDataset):
                     view["camera_pose"]
                 ).all(), f"NaN in camera pose for view {view_name(view)}"
 
+            cond_pose = view["camera_pose"]
+            if _noise_plan is not None and v >= 1 and _noise_plan[v] is not None:
+                xi_r, xi_t = _noise_plan[v]
+                cond_pose = (
+                    cond_pose.astype(np.float64) @ _se3_exp_np(xi_r, xi_t)
+                ).astype(np.float32)
             ray_map = get_ray_map(
                 first_view_camera_pose,
-                view["camera_pose"],
+                cond_pose,
                 view["camera_intrinsics"],
                 height,
                 width,

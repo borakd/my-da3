@@ -223,6 +223,12 @@ def _gt_ray_noise_cfg():
         sigma_t=float(os.environ.get("GT_RAY_NOISE_T", "0") or 0.0),
         sigma_r_deg=float(os.environ.get("GT_RAY_NOISE_R_DEG", "0") or 0.0),
         seed=int(os.environ.get("GT_RAY_NOISE_SEED", "0") or 0),
+        # NGC drifted replay (R denominator): linear-in-view first-moment term
+        # along a fixed per-sequence direction. Defaults 0.0 => the drift
+        # branch below is never entered and every existing curve point stays
+        # byte-identical (its keyed streams are untouched).
+        drift_t=float(os.environ.get("GT_RAY_NOISE_DRIFT_T", "0") or 0.0),
+        drift_r_deg=float(os.environ.get("GT_RAY_NOISE_DRIFT_R_DEG", "0") or 0.0),
     )
 
 
@@ -263,14 +269,26 @@ def _gt_ray_noise_xi(cfg, scene_key, view_idx, n_views):
         return rs.randn(3) * np.deg2rad(s_r_deg), rs.randn(3) * s_t
 
     if cfg["mode"] == "white":
-        return draw(view_idx, cfg["sigma_t"], cfg["sigma_r_deg"])
-    scale = np.sqrt(2.0 / (n_views + 1.0))
-    xi_r = np.zeros(3)
-    xi_t = np.zeros(3)
-    for j in range(1, view_idx + 1):
-        r, t = draw(j, cfg["sigma_t"] * scale, cfg["sigma_r_deg"] * scale)
-        xi_r += r
-        xi_t += t
+        xi_r, xi_t = draw(view_idx, cfg["sigma_t"], cfg["sigma_r_deg"])
+    else:
+        scale = np.sqrt(2.0 / (n_views + 1.0))
+        xi_r = np.zeros(3)
+        xi_t = np.zeros(3)
+        for j in range(1, view_idx + 1):
+            r, t = draw(j, cfg["sigma_t"] * scale, cfg["sigma_r_deg"] * scale)
+            xi_r += r
+            xi_t += t
+    if cfg.get("drift_t") or cfg.get("drift_r_deg"):
+        # Per-sequence deterministic drift direction from its own keyed
+        # stream, so enabling drift never perturbs the per-view draws above.
+        dkey = f"{scene_key}|drift|{cfg['seed']}".encode()
+        drs = np.random.RandomState(zlib.crc32(dkey) & 0xFFFFFFFF)
+        u_t = drs.randn(3)
+        u_t /= max(np.linalg.norm(u_t), 1e-12)
+        u_r = drs.randn(3)
+        u_r /= max(np.linalg.norm(u_r), 1e-12)
+        xi_t = xi_t + view_idx * cfg["drift_t"] * u_t
+        xi_r = xi_r + view_idx * np.deg2rad(cfg["drift_r_deg"]) * u_r
     return xi_r, xi_t
 
 
