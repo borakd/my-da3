@@ -239,3 +239,11 @@ target; (2) refine/P4.3 — real observation, co-adapts net-negative; (3)
 teacher-forced trunks — collapse self-fed; (4) noise-bridged trunk — trades
 ceiling away, gains nothing. Campaign is at its pre-registered negative
 endgame; further GPU spend requires a user scope decision.
+Verdict-doc dependency (14:30): hold the final dossier's quantitative section
+for the FOUR-CORNER SQUARE — honest-trained/honest-eval (C .0821),
+honest-trained/GT-fed (rung 0 / curve), oracle-trained/honest-eval
+(gru_a4g3otr .1192), oracle-trained/GT-fed (gru_a4g{1,3}oraclegtfed, in
+flight ~650/4292, peer my-da3-ca will send numbers). The matched corner
+bounds every "if the corrector were accurate" counterfactual. User decision
+pending: accept verdict / P4.2 last family / constraint relaxation. No new
+GPU from this session until decided.
