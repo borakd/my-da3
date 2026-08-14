@@ -212,3 +212,30 @@ merge incl. eval_gru companions; my-da3's aggregate_results.py drops _gru
 rows — do not merge from this worktree). They also score the two oracle
 lr1e5 arms ORACLE=gt as user-directed table toplines (unmissable labels,
 --no_rank). My remaining ownership: NGC ckpt-10 gate battery + readouts.
+
+## NGC ckpt-10 GATE RESULTS (2026-08-14 14:10) — RUNG KILLED
+Frozen bars from NGC_WALKDRIFT_GATES.md; subset refs A .0771 / C .0850 /
+r8 .0816 / refine .0929 / B-closed .1307.
+- G1 clean ceiling (prev_gt): ate .0663 — KILL (bar: PASS <=.045, KILL >.060).
+  The noise-trained trunk retains little of the conditioning benefit even on
+  CLEAN prev-GT rays.
+- G2 drifted replay walk-1.0: delta_ate +.0533 vs clean — NO FLATTENING
+  (bar <=.015). Trained on walk+drift noise, still detonates on walk+drift
+  replay: the curriculum did not transfer even within its own noise family.
+- G3 DECISIVE closed-loop (prev_pred): ate .1126 — KILL (bar >.0850).
+  Between C-class failure and B-closed collapse.
+- Shuffle spot check: VOID — paired delta exactly 0.00000 on 20/20 scenes =
+  instrument no-op (known batch-1 limitation, model.py ray-shuffle requires
+  batch>1). NOT evidence of a dead channel: the +.0533 replay delta proves
+  the channel is alive.
+- S1 stop rule does not technically fire (requires G2 flattening), but the
+  measured conclusion is stronger: noise-conditioned training BOTH loses the
+  clean ceiling AND buys no robustness. No retune exception applies (the
+  CONDITIONAL band .0771-.0850 was not reached; no early rot divergence).
+- G4/R-replays: moot per frozen ladder (P1 requires G3 PROMOTE); not run
+  (GPU-awareness).
+DESIGN MATRIX NOW MEASURED-DEAD: (1) A/G/F/R grid — function class lacks
+target; (2) refine/P4.3 — real observation, co-adapts net-negative; (3)
+teacher-forced trunks — collapse self-fed; (4) noise-bridged trunk — trades
+ceiling away, gains nothing. Campaign is at its pre-registered negative
+endgame; further GPU spend requires a user scope decision.
