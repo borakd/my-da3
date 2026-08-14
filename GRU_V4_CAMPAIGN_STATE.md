@@ -247,3 +247,21 @@ flight ~650/4292, peer my-da3-ca will send numbers). The matched corner
 bounds every "if the corrector were accurate" counterfactual. User decision
 pending: accept verdict / P4.2 last family / constraint relaxation. No new
 GPU from this session until decided.
+
+## Four-corner square COMPLETE (peer delivery, 2026-08-14 ~15:20; 4292/4292,
+## banners verified, 16/16 jobs clean)
+ATE, a4/G3 family: honest/honest .0837 | honest/GT-fed .1104 |
+oracle/honest .1192 | oracle/GT-fed .0133 (= gtray topline .0134 exactly).
+Both matched corners work; both mismatched corners fail SYMMETRICALLY —
+the cleanest statement of the train/test conditioning-distribution principle
+the campaign has. Cautions for the dossier (peer's, verified sound):
+1. Oracle-fed _gru rotation rows (0.044/0.039 deg) are ECHO, not capability
+   (residual mode, input IS GT, trained residual~0). Only honest _gru rows
+   are interpretable.
+2. Ceiling is exactly the GT baseline, no headroom beyond: oracle-fed head
+   ate .0133 vs gtray .0134; rpe_rot WORSE through the GRU (0.446 vs 0.337).
+3. NO DEPTH HEADROOM behind an accurate corrector: absrel .1876 with perfect
+   pose vs .1794 unconditioned — the counterfactual is pose-only.
+4. G1-vs-G3 null under oracle feeding (.0131 vs .0133) — e2e lever inert
+   once input is correct.
+Pending from peer: honest _gru columns for a4_g1 twins (~2146/4292).
