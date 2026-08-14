@@ -265,3 +265,21 @@ the campaign has. Cautions for the dossier (peer's, verified sound):
 4. G1-vs-G3 null under oracle feeding (.0131 vs .0133) — e2e lever inert
    once input is correct.
 Pending from peer: honest _gru columns for a4_g1 twins (~2146/4292).
+
+## Honest _gru columns COMPLETE (peer delivery, 2026-08-14 ~16:10) — QUANT
+## SECTION CLOSED
+a4_g1 twins (4292/4292, banners verified, 0 oracle contamination):
+f1np head ate .0828 / gru .0823, rot 1.263 -> 1.326; f1r8np head .0800 /
+gru .0794, rot 1.215 -> 1.277. Across ALL SEVEN instrumented honest arms:
+GRU pose is a WASH on ATE (deltas ±0.0006, sign-inconsistent) and WORSE on
+rotation in every non-degenerate case (+0.055..+0.089 deg). The corrector
+moves rotation the wrong way while not helping translation — at iters 1 and
+8, with/without features, G1 and G3.
+Complete campaign statement: ray channel worth 6.3x ATE when pose correct
+(.0837->.0133); ceiling exactly gtray, no further; depth zero headroom;
+GRU-as-built degrades rotation; and train/test conditioning distributions
+must match or BOTH directions collapse symmetrically.
+G1-vs-G3 matched pair (F1 noproj): e2e buys ~.002 ATE, costs ~.002 AbsRel —
+below attribution floor, not a lever effect.
+Table: summary/fresh_table_gru_pose.* (24 rows) with a real generator now at
+eval_pipeline/build_gru_pose_table.{py,sh} (validated by regenerate+diff).
