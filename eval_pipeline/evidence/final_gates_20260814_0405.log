@@ -1,0 +1,10 @@
+== GATE 2 (probe shuffle at checkpoint-final) ==
+  e_head_t mid: clean 0.3373 shuffle 0.5099 (+51.2%)
+  e_head_t late: clean 0.5566 shuffle 0.9739 (+75.0%)
+  e_head_r mid: clean 5.4480 shuffle 8.2633 (+51.7%)
+  e_head_r late: clean 8.6717 shuffle 13.1265 (+51.4%)
+== EPOCH TRACE (committed e_head, ratio vs armA head) ==
+  e_head_t mid: 0.5923 -> 0.4699 -> 0.3832 -> 0.3373 | armA 0.3112 | final ratio 1.084
+  e_head_t late: 0.9202 -> 0.8601 -> 0.6746 -> 0.5566 | armA 0.5197 | final ratio 1.071
+  e_head_r mid: 10.0274 -> 8.0327 -> 6.6999 -> 5.4480 | armA 5.1892 | final ratio 1.050
+  e_head_r late: 13.9325 -> 12.5186 -> 9.8933 -> 8.6717 | armA 8.0754 | final ratio 1.074
