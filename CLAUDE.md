@@ -1,5 +1,14 @@
 # my-da3 — notes for Claude
 
+## GRU v4 campaign (2026-08-13→15): read before any GRU/conditioning work
+
+`GRU_V4_CAMPAIGN_STATE.md` (repo root) is the authoritative chronicle and has
+an ORIENTATION section for new sessions: verdicts, evidence map
+(`eval_pipeline/evidence/`), verified traps, and the paused decision state.
+All four conditioning design families are measured-dead; do NOT launch
+training arms before the user's pending scope decision recorded there.
+Plain-language history: `REPORT_2026-08-13.md` (addendum has the ending).
+
 ## Checkpoint locations (changed 2026-08-14)
 
 - **All new finetuning runs must save checkpoints under

@@ -283,3 +283,66 @@ G1-vs-G3 matched pair (F1 noproj): e2e buys ~.002 ATE, costs ~.002 AbsRel —
 below attribution floor, not a lever effect.
 Table: summary/fresh_table_gru_pose.* (24 rows) with a real generator now at
 eval_pipeline/build_gru_pose_table.{py,sh} (validated by regenerate+diff).
+
+════════════════════════════════════════════════════════════════════════
+## ORIENTATION FOR FUTURE SESSIONS (written 2026-08-15, campaign paused)
+════════════════════════════════════════════════════════════════════════
+
+READ THIS FILE TOP-TO-BOTTOM before touching anything GRU/conditioning-
+related; it is the authoritative chronicle. Then read, in order:
+1. eval_pipeline/evidence/STEP6_GO_RECORD.md — how the refine launch was
+   gated (the method template every later rung followed).
+2. eval_pipeline/evidence/NGC_WALKDRIFT_GATES.md — frozen-gates pattern +
+   the S1 stop rule.
+3. eval_pipeline/evidence/FINAL_DOSSIER.md — refine autopsy.
+4. REPORT_2026-08-13.md — plain-language history of every lever (its
+   original ending is superseded by the addendum at its foot).
+
+### Where the campaign stands (as of 2026-08-15)
+ALL FOUR design families are measured-dead (grid / probe-pass refine /
+teacher-forced trunks / noise-bridged trunk). The complete empirical
+statement is in the "Honest _gru columns COMPLETE" section above. GPU spend
+is PAUSED awaiting the user's choice: (a) adversarial audit + final dossier,
+(b) P4.2 cross-attention short rung (last untested observability route,
+weighs against finding 3), (c) constraint relaxation (probe-informed gate is
+the one untrained variant). DO NOT launch training arms before that choice.
+
+### What this session (2026-08-13→15, "GRU v4 autonomous campaign") built
+Commits 49f5819..7485e5d on captain_gru_v3, roughly in order:
+- 49f5819 noise hook: GT_RAY_NOISE_* env-gated SE(3) perturbation in
+  src/CUT3R/demo_ray.py (later extended by a peer with DRIFT_* terms).
+  Unit-checked: sigma=0 byte-identity, white/walk seq-RMS matched.
+- d1b9828 committed the P4.3 probe-pass mechanism (model.py,
+  train_cut3r_baseline.py, refine configs, probe instrument, verifier).
+- 0cd7e83 eval-path registration: refine levers whitelisted in
+  preflight_ckpt.py, falsifier+noise envs added to arm_eval_for_run.sh
+  unset list, grad_norm logging (inference.py returns max chunk norm),
+  watcher .ignored state.
+- 94ec8a5 noise-oracle instruments: noise_oracle_calibrate.py (sigma_ref
+  from arm C's saved preds, zero GPU), noise_oracle_launch.sh (grid),
+  430-scene subset list.
+- fea153f noise curve + STEP6_GO_RECORD (B1-B4 readouts).
+- ckpt10_kill_gate.sh, p43_regen_compare.py, noise_oracle_analyze.py,
+  noise_oracle_bytecheck.sh — the gate/readout instruments.
+- bd3d698 NGC ckpt-10 gate verdict (KILL); bcd46af path migration commit
+  (peers' sed); 880d71a/7485e5d four-corner square + honest _gru closure.
+(Table generator build_gru_pose_table.{py,sh} and eval_gru companion
+instrument are PEER work from known_good_fsrc_noproj, not this session.)
+
+### Traps future sessions must not rediscover (all verified here)
+- Shuffle-type falsifiers are batch-gated: GT_RAY_MAP_SHUFFLE and the ray
+  shuffle in model.py need batch>1; the 4292-harness runs batch 1 => a
+  paired delta of exactly 0.00000 means INSTRUMENT VOID, not dead channel.
+- Weight-norm check must precede any probe-shuffle reading (zero-init dead
+  window).
+- getattr-defaulted config keys: an uncommitted-lever arm launched from a
+  committed-only tree silently trains the base arm under the new name —
+  always verify the startup log line.
+- diag_ labels never enter averages_table.csv; my-da3's aggregate_results
+  drops _gru rows (merge from known_good only).
+- Storage: new runs -> /gpfs/scratch/.../checkpoints; old ->
+  /gpfs/scratch/.../checkpoints_projects; cut3r_multinode still ONLY on the
+  /gpfs/projects source side (mv died; group over quota — READ-ONLY there).
+- Exogenous noise tolerance does NOT price endogenous feedback error. Any
+  future "condition on a predicted pose" idea must be scored closed-loop
+  from day one; the noise curve alone WILL mislead.
