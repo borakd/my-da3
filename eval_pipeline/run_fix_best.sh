@@ -12,8 +12,8 @@
 #SBATCH --cpus-per-task=15   # was 12; MN5 derives mem from cores (8G/core) -> 120G ~= old --mem=120G
 #SBATCH --time=2:00:00
 #SBATCH --job-name=fixbest
-#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.out
-#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.err
+#SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.out
+#SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_fixbest_%j.err
 
 set -o pipefail
 # --- self-locating worktree -------------------------------------------------

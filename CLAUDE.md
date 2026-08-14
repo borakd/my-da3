@@ -1,12 +1,23 @@
 # my-da3 — notes for Claude
 
+## Checkpoint locations (changed 2026-08-14)
+
+- **All new finetuning runs must save checkpoints under
+  `/gpfs/scratch/etur59/koc821022/checkpoints`.**
+- All pre-2026-08-14 runs were moved to
+  `/gpfs/scratch/etur59/koc821022/checkpoints_projects`
+  (formerly `/gpfs/projects/etur59/koc821022/checkpoints`, which no longer
+  exists — do not write there; anything landing on /gpfs/projects is a bug).
+- YAML configs and sbatch/eval scripts that still hardcode the old
+  `/gpfs/projects/.../checkpoints` root must be repointed before use.
+
 ## W&B syncing (MareNostrum5): always exclude media, always use the beta path
 
 Compute nodes have no internet, so W&B records OFFLINE under
 `<save_dir>/<exp_name>/wandb/offline-run-*`. To port runs to wandb.ai, run from
 a LOGIN node:
 
-    /gpfs/projects/etur59/koc821022/checkpoints/sync_nomedia.sh [path-substring ...]
+    /gpfs/scratch/etur59/koc821022/checkpoints/sync_nomedia.sh [path-substring ...]
 
 Non-negotiables, all learned empirically (full record in that script's header
 and `checkpoints/sync_nomedia.log`):

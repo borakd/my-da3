@@ -26,7 +26,10 @@ set -o pipefail
 WT=/gpfs/home/koc/koc821022/my-da3
 export OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs
 OUT=$OUT_ROOT/cut3r_eval
-CKPT_ROOT=/gpfs/projects/etur59/koc821022/checkpoints/cut3r_multinode
+# The three lr1e-5 baselines moved twice: out of the DELETED cut3r_multinode/
+# into cut3r_finetune_baselines/, then off /gpfs/projects entirely in the
+# 2026-08-14 storage move. The three dir names below survived both moves.
+CKPT_ROOT=${CKPT_ROOT:-/gpfs/scratch/etur59/koc821022/checkpoints_projects/cut3r_finetune_baselines}
 
 # Falsifier env vars silently contaminate a scoring run and nothing logs it.
 unset PREV_PRED_RAY_SHUFFLE GT_RAY_MAP_SHUFFLE \

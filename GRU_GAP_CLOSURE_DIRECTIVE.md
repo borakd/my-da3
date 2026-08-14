@@ -1609,7 +1609,7 @@ run dirs.
 
    ```bash
    env | grep -E 'PREV_PRED_RAY_SHUFFLE|GT_RAY_MAP_SHUFFLE|POSE_GRU_'   # must be empty
-   CR=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full
+   CR=/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full
    OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs \
    sbatch --nodes=1 --gres=gpu:4 --cpus-per-task=80 \
           --job-name=diag_oracle_honest \
@@ -1768,7 +1768,7 @@ region before editing, never edit blind.
 - **Finished but NEVER scored at 4292 scenes**:
   `captain_gru_v3_a4_g3_oracle_finetune_32gpu` (idle since 08-07). Rung 0.
 - **Baselines A/B/C live in
-  `/gpfs/projects/etur59/koc821022/checkpoints/cut3r_finetune_baselines/`**
+  `/gpfs/scratch/etur59/koc821022/checkpoints_projects/cut3r_finetune_baselines/`**
   as `cut3r_finetune_aug_full{,_gtray,_prevpred}_32gpu_lr1e5`. NOTE:
   `checkpoints/cut3r_multinode/` — the 64-GPU b2_lr1e5 family — **has been
   deleted**, though 15 configs under `src/CUT3R/config/` still reference that

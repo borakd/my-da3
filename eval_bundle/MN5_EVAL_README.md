@@ -21,7 +21,7 @@ mkdir -p "$OUT/logs" && cp -n eval_bundle/data/scene_list.txt "$OUT/"
 
 # per checkpoint — submit once per node, distinct BASE_SHARD per node (0, 4, 8, …)
 LABEL=gru_a4g3f1r4 CONDITIONING=prev_pred_gru \
-CKPT=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_f1_r4_finetune/checkpoint-final.pth \
+CKPT=/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_f1_r4_finetune/checkpoint-final.pth \
 BASE_SHARD=0 NUM_SHARDS=12 \
   sbatch eval_pipeline/run_captain_ray_eval_node.sh
 
@@ -43,7 +43,7 @@ and every one is overridable from the environment.
 | Var | MN5 default | Notes |
 |---|---|---|
 | `WT` | `$SLURM_SUBMIT_DIR`, else `$PWD` | the my-da3 checkout; validated, hard-fails otherwise |
-| `CKPT_ROOT` | `/gpfs/projects/etur59/koc821022/checkpoints` | scratch group quota is ~97% full, hence gpfs_projects |
+| `CKPT_ROOT` | `/gpfs/scratch/etur59/koc821022/checkpoints_projects` | pre-2026-08-14 runs; new runs save to `/gpfs/scratch/etur59/koc821022/checkpoints` |
 | `OUT_ROOT` | `/gpfs/projects/etur59/koc821022/outputs` | `$OUT = $OUT_ROOT/cut3r_eval` |
 | `DATA_ROOT` | `/gpfs/scratch/etur59/koc821022` | DROID episode store |
 | `SCENES_ROOT` | `$DATA_ROOT/pointworld_droid_splits/test/dl3dv_multi/wrist` | the 4292-scene test split |

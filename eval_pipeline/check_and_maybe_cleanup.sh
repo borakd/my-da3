@@ -11,7 +11,7 @@
 #   CLEANUP_RESUBMITTED -> all finished but coverage incomplete; one cleanup pass; reschedule
 #   COMPLETE            -> done; caller should aggregate, present table, and ping
 set -o pipefail
-OUT=${OUT_ROOT:-/gpfs/projects/etur59/koc821022/outputs}/cut3r_eval
+OUT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}/cut3r_eval
 # Self-locating: this is a plain driver script (not an sbatch body), so deriving
 # the worktree from ${BASH_SOURCE[0]} is correct here -- there is no SLURM spool
 # copy involved. Fail loudly rather than silently driving the wrong checkout.

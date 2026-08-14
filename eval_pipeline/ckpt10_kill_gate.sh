@@ -3,7 +3,9 @@
 # settled. Submits the paired clean+shuffle probe jobs on checkpoint-10 and
 # prints the weight-norm guard immediately.
 set -eo pipefail
-RUN=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_r8_refine_finetune
+# Pre-2026-08-14 run, so checkpoints_projects/ (the old /gpfs/projects root is
+# gone). A run started after that date lives under .../checkpoints/ instead.
+RUN=${RUN:-/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_r8_refine_finetune}
 CK=$RUN/checkpoint-10.pth
 [ -f "$CK" ] || { echo "no checkpoint-10 yet"; exit 1; }
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh

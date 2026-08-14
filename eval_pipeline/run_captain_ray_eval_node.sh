@@ -32,8 +32,8 @@
                              # unavailable). Memory is derived at 8G/core -> 640G. Never add --mem.
 #SBATCH --time=24:00:00
 #SBATCH --job-name=cray_eval
-#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.out
-#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.err
+#SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.out
+#SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.err
 
 # Source the conda hook directly so the job never depends on an interactive shell rc.
 # No 'set -u' (MKL activation scripts read unset vars).

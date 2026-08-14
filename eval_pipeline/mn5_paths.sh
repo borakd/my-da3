@@ -29,8 +29,8 @@ if [ ! -f "$WT/src/CUT3R/src/train_cut3r_baseline.py" ]; then
   return 1 2>/dev/null || exit 1
 fi
 
-CKPT_ROOT=${CKPT_ROOT:-/gpfs/projects/etur59/koc821022/checkpoints}
-OUT_ROOT=${OUT_ROOT:-/gpfs/projects/etur59/koc821022/outputs}
+CKPT_ROOT=${CKPT_ROOT:-/gpfs/scratch/etur59/koc821022/checkpoints_projects}
+OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 DATA_ROOT=${DATA_ROOT:-/gpfs/scratch/etur59/koc821022}
 
 # NOTE: no `scenes/` component on MN5 -- the splits tree sits directly under

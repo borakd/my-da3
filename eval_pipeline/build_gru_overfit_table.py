@@ -30,7 +30,7 @@ import subprocess
 ROOT = os.environ.get(
     "OVERFIT_EVAL_ROOT",
     os.path.join(
-        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        os.environ.get("OUT_ROOT", "/gpfs/scratch/etur59/koc821022/outputs"),
         "cut3r_eval", "overfit_test_scene",
     ),
 )
@@ -41,7 +41,7 @@ SCENE = os.environ.get("OVERFIT_SCENE", "RAIL+eh61f232+2023-10-26-17h-33m-59s")
 PREV_PRED_CSV = os.environ.get(
     "PREV_PRED_CSV",
     os.path.join(
-        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        os.environ.get("OUT_ROOT", "/gpfs/scratch/etur59/koc821022/outputs"),
         "cut3r_eval", "demo_ray_smoketest", "prev_pred",
         "eval_depth_pose_metrics.csv",
     ),

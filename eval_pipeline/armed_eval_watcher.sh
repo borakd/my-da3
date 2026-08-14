@@ -30,7 +30,24 @@ set -o pipefail
 WT=${WT:-/gpfs/home/koc/koc821022/my-da3}
 export OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 OUT=$OUT_ROOT/cut3r_eval
-CR=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full
+# Run dirs live under TWO roots since the 2026-08-14 storage move: new
+# finetunes save to checkpoints/, everything older was mv'd to
+# checkpoints_projects/, and the old /gpfs/projects root is gone. A watcher
+# pinned to one root does not error -- it logs "no <path> yet" forever and
+# silently never arms the run. So CR_ROOTS is a search path, newest first, and
+# every run dir is resolved through cr_run().
+CR_ROOTS=(
+  "${CR:-/gpfs/scratch/etur59/koc821022/checkpoints}/captain_cut3r_finetune_aug_full"
+  /gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full
+)
+# cr_run <run-dir-name> -> absolute path of the first root that has it.
+# Prints the FIRST root's candidate when the run exists nowhere, so the
+# "not there yet" log line names the place a new run is expected to appear.
+cr_run () {
+  local r
+  for r in "${CR_ROOTS[@]}"; do [ -d "$r/$1" ] && { echo "$r/$1"; return 0; }; done
+  echo "${CR_ROOTS[0]}/$1"; return 1
+}
 STATE=$OUT/armed
 POLL=${POLL:-300}
 CKPT_GRACE=${CKPT_GRACE:-1800}   # seconds to wait for the final ckpt after job exit
@@ -91,7 +108,7 @@ derive_label () {  # $1 = exp/config name -> the short table key
 }
 
 discover () {
-  local jid jname sl cfg run label
+  local jid jname sl cfg run run_dir label
   while IFS='|' read -r jid jname; do
     [ -n "$jid" ] || continue
     grep -q "^$jid|" "$REGISTRY" && continue
@@ -100,7 +117,7 @@ discover () {
     echo "$sl" | grep -qE "$TRAIN_SBATCH_RE" || continue
     cfg=$(echo "$sl" | awk '{print $NF}')           # trainer takes the config name last
     run=$cfg
-    [ -d "$CR/$run" ] || { log "discover: job $jid ($jname) -> config '$cfg' but no $CR/$run yet"; continue; }
+    run_dir=$(cr_run "$run") || { log "discover: job $jid ($jname) -> config '$cfg' but no $run_dir yet"; continue; }
     label=$(derive_label "$cfg")
     # Deliberately-ignored runs must not come back on the next poll just
     # because someone tidied their line out of the registry.
@@ -114,21 +131,26 @@ discover () {
       continue
     fi
     echo "$jid|$run|$label|$jname" >> "$REGISTRY"
-    log "discover: ARMED $label  job $jid ($jname)  $CR/$run"
+    log "discover: ARMED $label  job $jid ($jname)  $run_dir"
   done < <(squeue -u "$USER" -h -o '%i|%j' -t PENDING,RUNNING 2>/dev/null)
 }
 
 # Finished run dirs nobody has scored. Reported once per poll-cycle change, and
 # never acted on -- see the note above.
 report_orphans () {
-  local d n label
-  for d in "$CR"/*/; do
-    [ -f "$d/checkpoint-final.pth" ] || continue
-    n=$(basename "$d")
-    label=$(derive_label "$n")
-    [ -d "$OUT/$label/eval" ] && continue
-    grep -q "|$n|" "$REGISTRY" && continue
-    log "orphan: $n has checkpoint-final.pth but no eval and no arm (not auto-armed)"
+  local r d n label
+  # Both roots, because a run finished before the 2026-08-14 move and one
+  # started after it are equally unscored.
+  for r in "${CR_ROOTS[@]}"; do
+    [ -d "$r" ] || continue
+    for d in "$r"/*/; do
+      [ -f "$d/checkpoint-final.pth" ] || continue
+      n=$(basename "$d")
+      label=$(derive_label "$n")
+      [ -d "$OUT/$label/eval" ] && continue
+      grep -q "|$n|" "$REGISTRY" && continue
+      log "orphan: $n has checkpoint-final.pth but no eval and no arm (not auto-armed)"
+    done
   done
 }
 
@@ -189,7 +211,7 @@ while :; do
   pending=0; line=""
   for a in "${ARMS[@]}"; do
     IFS='|' read -r jid run label jobname <<< "$a"
-    RUN_DIR=$CR/$run
+    RUN_DIR=$(cr_run "$run")
 
     # .ignored is a THIRD terminal state, distinct from .failed on purpose: a
     # run that is deliberately not a table arm (a short probe, a debug run) is

@@ -13,7 +13,7 @@
 set -o pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-CKPT=/gpfs/projects/etur59/koc821022/checkpoints/cut3r_finetune_baselines/cut3r_finetune_aug_full_gtray_32gpu_lr1e5/checkpoint-final.pth
+CKPT=${CKPT:-/gpfs/scratch/etur59/koc821022/checkpoints_projects/cut3r_finetune_baselines/cut3r_finetune_aug_full_gtray_32gpu_lr1e5/checkpoint-final.pth}
 SUBSET=$PWD/eval_pipeline/noise_oracle_subset_430.txt
 OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs
 SIGMA_T=0.07753853660694085
