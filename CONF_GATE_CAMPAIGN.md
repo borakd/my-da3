@@ -193,6 +193,18 @@ lifted by this directive.
   .013445 distance}. TAU stays frozen at −11.99 for the verdict; any
   retune afterwards is diag_-labeled.
 
+### Phase-2 lever ledger
+- diag_cg_revisit / diag_cg_rev_g7ema (hindsight second sweep, update=False
+  pass 2, preds from pass 2): CATASTROPHIC — absrel +.027*, a1 −.049*,
+  ATE +.0385*, rot +2.16°* (0/429 wins). Decoding against a frozen state
+  that contains the frame's own future is far outside the training
+  distribution (training never used update=False at all). KILLED. A
+  revisit-TRAINED model is the only route this could ever work — parked.
+- diag_cg_scenetau (tercile tau schedule −10.5/−11.99/−15.75, atten .122):
+  ATE −.00269* rot +.0171* trans +.000139*, depth n.s. — DOMINATED by plain
+  g7ema (same atten, better everything). Scene-conditional aggressiveness
+  adds nothing over the global tau. NEGATIVE.
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
