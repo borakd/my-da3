@@ -160,6 +160,39 @@ predicted (rot +1.4%* → +0.5% n.s.).
 Both rows merged into summary/averages_table.csv (honest inference-time
 arms; no oracle information — the gate signal is the model's own conf).
 
+## PHASE 2 (2026-08-17, user-directed): gate-trained finetune + push to topline
+
+User directive: (a) full finetune with the winner gate active, baseline
+parity (32 GPU, lr1e-5, batch 4, accum 1, 38633/4292); (b) keep improving
+toward the gtray topline (.013445 ATE) closed-loop. Training-arm pause is
+lifted by this directive.
+
+- Training integration (commit 2aed6d0): _state_gate_batched — vectorized
+  B>1 gate, detached signals, per-slot EMA; B==1 scalar path preserved
+  verbatim (eval reproducibility). Adversarial review: SOUND (scalar path
+  mechanically verified identical; no TBPTT graph leak; exactly-once EMA
+  under checkpointing; test-path B∈{1..4} safe).
+- 1-node smoke 44709042: banner `[STATE_GATE] batched gate ACTIVE (B=4)`,
+  loss sane (2.95 @ step 0), no errors. Wiped after.
+- FULL RUN launched: job 44709426, 8 nodes × 4 H100, config
+  cut3r_ft_augfull_cg_g7ema_32gpu_lr1e5 (2-line diff from augfull yaml),
+  winner gate env in --export. Expected ~17 h; ckpts every 10 epochs.
+- PRE-REGISTERED ckpt-10 early gate (~3.5 h, 20% spend), NGC-style:
+  paired 430-subset diags, all CONDITIONING=none:
+  - diag_cgt10_on  — gate-trained ckpt-10, winner gate ON (matched corner)
+  - diag_cgt10_off — gate-trained ckpt-10, gate OFF (mismatch probe)
+  - diag_aug10_on  — PLAIN augfull ckpt-10, gate ON (paired control)
+  KILL if diag_cgt10_on is worse than diag_aug10_on by >+.005 ATE AND
+  >+.05° rot (training under the gate actively harms), or training loss
+  NaN/diverged vs baseline log.txt at epoch 10. Conf-distribution drift
+  (mean attenuation at ckpt-10 vs the plain model's 11.7%) is recorded as
+  telemetry, not a kill.
+- Final scoring plan (pre-registered): cgtrain_g7ema (gate-on, PRIMARY,
+  via cg_launch_full.sh with CKPT override) and cgtrain_plain (gate-off,
+  via arm_eval_for_run.sh) vs {augfull_lr1e5, augfull_cg_g7ema, gtray
+  .013445 distance}. TAU stays frozen at −11.99 for the verdict; any
+  retune afterwards is diag_-labeled.
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame

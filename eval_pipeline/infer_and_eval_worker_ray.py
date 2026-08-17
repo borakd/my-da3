@@ -300,6 +300,20 @@ def main():
 
         try:
             ts = time.time()
+            # Two-pass scene-adaptive gating: STATE_GATE_TAU_FILE points at a
+            # json {scene: tau} built from a prior log-mode pass (the model's
+            # own conf telemetry -- no GT involved). The model re-reads env
+            # per call, so setting STATE_GATE_TAU here scopes it per scene.
+            # Scenes absent from the file keep the global STATE_GATE_TAU.
+            tf = os.environ.get("STATE_GATE_TAU_FILE", "").strip()
+            if tf:
+                if not hasattr(main, "_scene_taus"):
+                    with open(tf) as _f:
+                        main._scene_taus = json.load(_f)
+                    print(f"{tag} scene-tau file: {tf} "
+                          f"({len(main._scene_taus)} scenes)", flush=True)
+                if scene in main._scene_taus:
+                    os.environ["STATE_GATE_TAU"] = str(main._scene_taus[scene])
             # Run inference with one OOM retry (after a cache clear) for very long
             # sequences; silence per-frame prints.
             nfr = None
