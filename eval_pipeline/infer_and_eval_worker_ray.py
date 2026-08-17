@@ -310,10 +310,13 @@ def main():
                 if not hasattr(main, "_scene_taus"):
                     with open(tf) as _f:
                         main._scene_taus = json.load(_f)
+                    main._global_tau = os.environ.get("STATE_GATE_TAU", "0")
                     print(f"{tag} scene-tau file: {tf} "
                           f"({len(main._scene_taus)} scenes)", flush=True)
-                if scene in main._scene_taus:
-                    os.environ["STATE_GATE_TAU"] = str(main._scene_taus[scene])
+                # Restore the global default for uncovered scenes -- without
+                # this, a partial-coverage file leaks the previous scene's tau.
+                os.environ["STATE_GATE_TAU"] = str(
+                    main._scene_taus.get(scene, main._global_tau))
             # Run inference with one OOM retry (after a cache clear) for very long
             # sequences; silence per-frame prints.
             nfr = None
