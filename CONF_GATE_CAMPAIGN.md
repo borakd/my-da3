@@ -194,6 +194,20 @@ lifted by this directive.
   retune afterwards is diag_-labeled.
 
 ### Phase-2 lever ledger
+- ORACLE HARD-BLOCK EXPERIMENT (user-requested, evidence/cg_oracle_430.json;
+  masks from clean per-frame GT errors, verified; ~19–23% frames blocked
+  via update=False): ALL THREE variants (ate>1.5×med, ate top-20%,
+  rpe>2×med) are WORSE than clean on ALL FIVE metrics — ATE +.0007…+.0027,
+  rot +0.28°*, trans +25%*. Compare conf-based th_p20 (same skip rate):
+  ATE −.0008, same rot cost. INTERPRETATION (the campaign's sharpest
+  mechanism result): per-frame GT error marks VICTIMS of drift, not
+  CULPRITS — blocking a poorly-localized frame removes late-but-good
+  observations while the corrupting frames already wrote; error segments
+  are contiguous ⇒ long skip runs ⇒ compounding staleness (attribution:
+  harm ∝ run length). Confidence marks observation quality (culprits),
+  which is why conf-keyed gating wins where GT-error-keyed blocking loses.
+  Both of g7ema's design choices (soft floor, culprit signal) are hereby
+  independently validated.
 - diag_cg_revisit / diag_cg_rev_g7ema (hindsight second sweep, update=False
   pass 2, preds from pass 2): CATASTROPHIC — absrel +.027*, a1 −.049*,
   ATE +.0385*, rot +2.16°* (0/429 wins). Decoding against a frozen state
