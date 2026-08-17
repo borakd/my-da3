@@ -1,0 +1,714 @@
+{
+  "diag_cg_th_p05": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.1790302541940314,
+        "delta": 0.00030727064711307325,
+        "ci": [
+          -0.000249387828433152,
+          0.0009095335590616471
+        ],
+        "wins": 56,
+        "ties": 314,
+        "losses": 60,
+        "better": false,
+        "significant": false
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7830639413368045,
+        "delta": -0.0004002613260393087,
+        "ci": [
+          -0.001221337139730446,
+          0.0003928947828577137
+        ],
+        "wins": 54,
+        "ties": 314,
+        "losses": 62,
+        "better": false,
+        "significant": false
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07694803322513552,
+        "delta": -0.00019160803535218845,
+        "ci": [
+          -0.0012023306858462857,
+          0.0008379109528104827
+        ],
+        "wins": 67,
+        "ties": 314,
+        "losses": 49,
+        "better": true,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.00894556927373551,
+        "delta": 0.000702690787150597,
+        "ci": [
+          0.0005308178312466599,
+          0.0008846227049206652
+        ],
+        "wins": 14,
+        "ties": 314,
+        "losses": 102,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.218257669746167,
+        "delta": 0.10634160299611214,
+        "ci": [
+          0.07926609885058207,
+          0.13637404349188587
+        ],
+        "wins": 16,
+        "ties": 314,
+        "losses": 100,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.06383484502532562,
+      "mean_attenuation": 0.06383484502532562,
+      "p50_skip_frac": 0.0,
+      "p90_skip_frac": 0.28385719232100964,
+      "frac_scenes_any_skip": 0.26976744186046514,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_th_p10": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.1795010981010818,
+        "delta": 0.0007781145541634844,
+        "ci": [
+          -1.1136726844750055e-05,
+          0.0015917693884499914
+        ],
+        "wins": 80,
+        "ties": 245,
+        "losses": 105,
+        "better": false,
+        "significant": false
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7825210280559558,
+        "delta": -0.0009431746068879605,
+        "ci": [
+          -0.002147957547173111,
+          0.00024739073196716185
+        ],
+        "wins": 84,
+        "ties": 245,
+        "losses": 101,
+        "better": false,
+        "significant": false
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.0768828765458184,
+        "delta": -0.0002567647146693041,
+        "ci": [
+          -0.0015866127977000692,
+          0.0011367198177943802
+        ],
+        "wins": 106,
+        "ties": 245,
+        "losses": 79,
+        "better": true,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.0095145693487175,
+        "delta": 0.0012716908621325882,
+        "ci": [
+          0.0010306823278224526,
+          0.0015264353270972948
+        ],
+        "wins": 14,
+        "ties": 245,
+        "losses": 171,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.3098809499058686,
+        "delta": 0.1979648831558139,
+        "ci": [
+          0.15985901321068788,
+          0.2388522223193166
+        ],
+        "wins": 18,
+        "ties": 245,
+        "losses": 167,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.1207842840222233,
+      "mean_attenuation": 0.1207842840222233,
+      "p50_skip_frac": 0.0,
+      "p90_skip_frac": 0.44388064583271386,
+      "frac_scenes_any_skip": 0.43023255813953487,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_th_p20": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.17965474395369768,
+        "delta": 0.0009317604067793248,
+        "ci": [
+          6.328433697957058e-06,
+          0.001882916126736486
+        ],
+        "wins": 107,
+        "ties": 177,
+        "losses": 146,
+        "better": false,
+        "significant": true
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7820241017370009,
+        "delta": -0.001440100925842933,
+        "ci": [
+          -0.0029445316980594547,
+          8.15744483499686e-05
+        ],
+        "wins": 109,
+        "ties": 177,
+        "losses": 144,
+        "better": false,
+        "significant": false
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07630694023813422,
+        "delta": -0.0008327010223534803,
+        "ci": [
+          -0.002464590237447249,
+          0.0008539726028051938
+        ],
+        "wins": 135,
+        "ties": 177,
+        "losses": 118,
+        "better": true,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.01030391548964181,
+        "delta": 0.002061037003056897,
+        "ci": [
+          0.0017500329598718225,
+          0.002389618852291322
+        ],
+        "wins": 20,
+        "ties": 177,
+        "losses": 233,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.379030498515677,
+        "delta": 0.2671144317656222,
+        "ci": [
+          0.22789651755365609,
+          0.30750399055900357
+        ],
+        "wins": 17,
+        "ties": 177,
+        "losses": 236,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.2074318743754339,
+      "mean_attenuation": 0.2074318743754339,
+      "p50_skip_frac": 0.10399594491847597,
+      "p90_skip_frac": 0.5610814599169771,
+      "frac_scenes_any_skip": 0.5883720930232558,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_th_p30": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.1806405629882729,
+        "delta": 0.0019175794413545514,
+        "ci": [
+          0.0008175371403985048,
+          0.0030639263689022363
+        ],
+        "wins": 116,
+        "ties": 131,
+        "losses": 183,
+        "better": false,
+        "significant": true
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7807401130868182,
+        "delta": -0.002724089576025618,
+        "ci": [
+          -0.004549482156144285,
+          -0.0009335760571869601
+        ],
+        "wins": 120,
+        "ties": 131,
+        "losses": 179,
+        "better": false,
+        "significant": true
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07525694601159323,
+        "delta": -0.0018826952488944764,
+        "ci": [
+          -0.003845664484141622,
+          7.76615370884145e-05
+        ],
+        "wins": 174,
+        "ties": 131,
+        "losses": 125,
+        "better": true,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.0109592970400751,
+        "delta": 0.002716418553490189,
+        "ci": [
+          0.0023805843591221303,
+          0.0030648676051021396
+        ],
+        "wins": 16,
+        "ties": 131,
+        "losses": 283,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.4431575007515236,
+        "delta": 0.331241434001469,
+        "ci": [
+          0.28840785636785043,
+          0.37566661892987957
+        ],
+        "wins": 15,
+        "ties": 131,
+        "losses": 284,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.28547335193176765,
+      "mean_attenuation": 0.28547335193176765,
+      "p50_skip_frac": 0.28570734551107657,
+      "p90_skip_frac": 0.6518668241279072,
+      "frac_scenes_any_skip": 0.6953488372093023,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_rel_a2": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.18072414980951132,
+        "delta": 0.0020011662625929335,
+        "ci": [
+          0.0006076664801508129,
+          0.003418214524512732
+        ],
+        "wins": 171,
+        "ties": 16,
+        "losses": 243,
+        "better": false,
+        "significant": true
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7806530967897969,
+        "delta": -0.00281110587304679,
+        "ci": [
+          -0.005326659861391939,
+          -0.00018646224540969244
+        ],
+        "wins": 173,
+        "ties": 16,
+        "losses": 241,
+        "better": false,
+        "significant": true
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07159991223894091,
+        "delta": -0.0055397290215468,
+        "ci": [
+          -0.007841200148364287,
+          -0.0032544575004486826
+        ],
+        "wins": 253,
+        "ties": 16,
+        "losses": 161,
+        "better": true,
+        "significant": true
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.01257848569961231,
+        "delta": 0.004335607213027397,
+        "ci": [
+          0.003958980556109864,
+          0.004728215205090792
+        ],
+        "wins": 18,
+        "ties": 16,
+        "losses": 396,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.5879981020949858,
+        "delta": 0.4760820353449311,
+        "ci": [
+          0.42682826538271545,
+          0.5322113988493505
+        ],
+        "wins": 13,
+        "ties": 16,
+        "losses": 401,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.5401137478583029,
+      "mean_attenuation": 0.5401137478583029,
+      "p50_skip_frac": 0.5872034747744738,
+      "p90_skip_frac": 0.7715024524013289,
+      "frac_scenes_any_skip": 0.9627906976744186,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_rel_a4": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.18097867867635142,
+        "delta": 0.0022556951294330865,
+        "ci": [
+          0.0009972729455543993,
+          0.0035351849439760803
+        ],
+        "wins": 150,
+        "ties": 41,
+        "losses": 239,
+        "better": false,
+        "significant": true
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7803104051366192,
+        "delta": -0.003153797526224605,
+        "ci": [
+          -0.00537807750635672,
+          -0.0008851245425642127
+        ],
+        "wins": 143,
+        "ties": 41,
+        "losses": 246,
+        "better": false,
+        "significant": true
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07458894754193737,
+        "delta": -0.0025506937185503513,
+        "ci": [
+          -0.004821722193892832,
+          -0.00028359443644983436
+        ],
+        "wins": 230,
+        "ties": 41,
+        "losses": 159,
+        "better": true,
+        "significant": true
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.012052657703710631,
+        "delta": 0.0038097792171257186,
+        "ci": [
+          0.003476762950477028,
+          0.00414257485144133
+        ],
+        "wins": 15,
+        "ties": 41,
+        "losses": 374,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.5308801617089516,
+        "delta": 0.41896409495889686,
+        "ci": [
+          0.3780148299529,
+          0.46095429002200095
+        ],
+        "wins": 11,
+        "ties": 41,
+        "losses": 378,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.4452630615013178,
+      "mean_attenuation": 0.4452630615013178,
+      "p50_skip_frac": 0.5047073903818953,
+      "p90_skip_frac": 0.728981612446959,
+      "frac_scenes_any_skip": 0.9046511627906977,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_mem_p20": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.17865980004492163,
+        "delta": -6.318350199669442e-05,
+        "ci": [
+          -0.0003755972393841349,
+          0.00023839657390162166
+        ],
+        "wins": 111,
+        "ties": 177,
+        "losses": 142,
+        "better": true,
+        "significant": false
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.7837886589590145,
+        "delta": 0.00032445629617076644,
+        "ci": [
+          -0.00028027786587440554,
+          0.0009461491848411394
+        ],
+        "wins": 129,
+        "ties": 177,
+        "losses": 124,
+        "better": true,
+        "significant": false
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07747256431874806,
+        "delta": 0.0003329230582603521,
+        "ci": [
+          -0.00023969071205123086,
+          0.0009205466226166404
+        ],
+        "wins": 118,
+        "ties": 177,
+        "losses": 135,
+        "better": false,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.008274968164077029,
+        "delta": 3.208967749211699e-05,
+        "ci": [
+          -1.5836114926510134e-05,
+          8.434611391030176e-05
+        ],
+        "wins": 102,
+        "ties": 177,
+        "losses": 151,
+        "better": false,
+        "significant": false
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.1171892591881152,
+        "delta": 0.0052731924380605795,
+        "ci": [
+          -0.0043775671466775475,
+          0.01929606750736768
+        ],
+        "wins": 114,
+        "ties": 177,
+        "losses": 139,
+        "better": false,
+        "significant": false
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.14468782515049375,
+      "mean_attenuation": 0.14468782515049375,
+      "p50_skip_frac": 0.030990446012770657,
+      "p90_skip_frac": 0.4515217930692251,
+      "frac_scenes_any_skip": 0.5883720930232558,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  },
+  "diag_cg_self_p10": {
+    "n_paired": 430,
+    "metrics": {
+      "absrel": {
+        "n": 430,
+        "clean_mean": 0.17872298354691835,
+        "gated_mean": 0.17872455400689224,
+        "delta": 1.570459973887882e-06,
+        "ci": [
+          -0.0007111218270955165,
+          0.0007015534943245808
+        ],
+        "wins": 87,
+        "ties": 267,
+        "losses": 76,
+        "better": false,
+        "significant": false
+      },
+      "a1": {
+        "n": 430,
+        "clean_mean": 0.7834642026628438,
+        "gated_mean": 0.783760810002377,
+        "delta": 0.00029660733953308774,
+        "ci": [
+          -0.0006874188005314012,
+          0.0012544131014703926
+        ],
+        "wins": 83,
+        "ties": 267,
+        "losses": 80,
+        "better": true,
+        "significant": false
+      },
+      "ate": {
+        "n": 430,
+        "clean_mean": 0.07713964126048772,
+        "gated_mean": 0.07685990057802933,
+        "delta": -0.0002797406824583878,
+        "ci": [
+          -0.0012805841233401952,
+          0.0007064849444769432
+        ],
+        "wins": 86,
+        "ties": 267,
+        "losses": 77,
+        "better": true,
+        "significant": false
+      },
+      "rpe_trans": {
+        "n": 430,
+        "clean_mean": 0.008242878486584912,
+        "gated_mean": 0.009006908747328823,
+        "delta": 0.0007640302607439098,
+        "ci": [
+          0.0005476956123150443,
+          0.0010148086587800451
+        ],
+        "wins": 34,
+        "ties": 267,
+        "losses": 129,
+        "better": false,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 430,
+        "clean_mean": 1.1119160667500547,
+        "gated_mean": 1.2225864623021983,
+        "delta": 0.11067039555214368,
+        "ci": [
+          0.08236970045510272,
+          0.14216153184996688
+        ],
+        "wins": 23,
+        "ties": 267,
+        "losses": 140,
+        "better": false,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 430,
+      "mean_skip_frac": 0.07783759720587596,
+      "mean_attenuation": 0.07783759720587596,
+      "p50_skip_frac": 0.0,
+      "p90_skip_frac": 0.2782746546347754,
+      "frac_scenes_any_skip": 0.37906976744186044,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  }
+}

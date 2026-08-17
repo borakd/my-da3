@@ -76,8 +76,8 @@ def _state_gate_cfg():
     mode = os.environ.get("STATE_GATE_MODE", "").strip().lower()
     if not mode:
         return None
-    if mode not in ("log", "thresh", "soft", "rel"):
-        raise ValueError(f"STATE_GATE_MODE must be log|thresh|soft|rel, got {mode!r}")
+    if mode not in ("log", "thresh", "soft", "rel", "cap"):
+        raise ValueError(f"STATE_GATE_MODE must be log|thresh|soft|rel|cap, got {mode!r}")
     signal = os.environ.get("STATE_GATE_SIGNAL", "conf_mean").strip()
     if signal not in STATE_GATE_SIG_KEYS:
         raise ValueError(f"STATE_GATE_SIGNAL must be one of {STATE_GATE_SIG_KEYS}, got {signal!r}")
@@ -97,6 +97,12 @@ def _state_gate_cfg():
         # Force a write after this many consecutive skips (0 = unlimited),
         # bounding staleness when a scene's confidence collapses globally.
         max_skip=int(os.environ.get("STATE_GATE_MAX_SKIP", "0") or 0),
+        # Floor on g for soft mode: a partial write always survives, so the
+        # next frame never decodes from fully stale state (RPE continuity).
+        gmin=float(os.environ.get("STATE_GATE_GMIN", "0") or 0.0),
+        # Flip the comparison: gate when the signal is HIGH (for dstate/dmem,
+        # where large values mean anomalously big memory rewrites).
+        invert=os.environ.get("STATE_GATE_INVERT", "") == "1",
     )
 
 
@@ -2594,7 +2600,11 @@ class ARCroco3DStereo(CroCoNet):
                            / (state_feat.norm() + 1e-8)).item(),
                 "dmem": ((new_mem - mem).norm() / (mem.norm() + 1e-8)).item(),
             }
-            s = sig[sg_cfg["signal"]]
+            s_raw = sig[sg_cfg["signal"]]
+            # invert: gate on HIGH signal values (dstate/dmem anomalies) by
+            # negating both signal and tau, so all mode logic stays keep-if-
+            # signal-large.
+            s = -s_raw if sg_cfg["invert"] else s_raw
             vi = view_indices[0]
             if vi == 0:
                 # Per-scene state lives on the instance; one inference() call
@@ -2602,13 +2612,21 @@ class ARCroco3DStereo(CroCoNet):
                 self._sg_hist = []
                 self._sg_skiprun = 0
             mode = sg_cfg["mode"]
+            tau = -sg_cfg["tau"] if sg_cfg["invert"] else sg_cfg["tau"]
             if mode == "log" or vi < sg_cfg["warmup"]:
                 g = 1.0
             elif mode == "thresh":
-                g = 1.0 if s >= sg_cfg["tau"] else 0.0
+                g = 1.0 if s >= tau else 0.0
             elif mode == "soft":
                 import math
-                g = 1.0 / (1.0 + math.exp(-(s - sg_cfg["tau"]) / max(sg_cfg["temp"], 1e-6)))
+                g = 1.0 / (1.0 + math.exp(-(s - tau) / max(sg_cfg["temp"], 1e-6)))
+                g = max(g, sg_cfg["gmin"])
+            elif mode == "cap":
+                # Trust region on the rewrite: attenuate so the effective
+                # step never exceeds tau in signal units. Only meaningful for
+                # magnitude signals (dstate/dmem); g = min(1, tau/s_raw).
+                g = 1.0 if s_raw <= sg_cfg["tau"] else max(
+                    sg_cfg["tau"] / max(s_raw, 1e-8), sg_cfg["gmin"])
             else:  # rel
                 hist = getattr(self, "_sg_hist", [])
                 if not hist:

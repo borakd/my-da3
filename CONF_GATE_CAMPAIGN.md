@@ -71,3 +71,19 @@ metrics), `cg_bytecheck.sh`.
   WARMUP=1 MAX_SKIP=8: th_p05/p10/p20/p30 (thresh conf_mean at pooled
   percentiles), rel_a2/rel_a4 (per-scene adaptive, alpha in log units),
   mem_p20 (scope=mem dissection), self_p10 (conf_self_mean signal).
+- 2026-08-17 ROUND-1 RESULTS (evidence/cg_round1_430.json, all paired vs
+  per_scene_augfull_lr1e5 on the 430):
+  - ATE improves monotonically with skip rate; rel_a2 (54% skip) ATE
+    −.00554 CI[−.0078,−.0033]* with 253w/16t/161l — hypothesis CONFIRMED
+    for global trajectory: dropping low-conf frames' writes helps ATE.
+  - RPE degrades ~linearly with skip fraction (rpe_rot +.11°…+.48°*, worst
+    at rel_a2) — suspected mechanism: post-skip frames decode from stale
+    state ⇒ local pose discontinuities. THE tension of the campaign.
+  - scope=mem is a wash on everything ⇒ the whole effect (help and harm)
+    flows through state_feat, not the pose-retriever mem.
+  - Depth: neutral at low skip, mildly worse* at ≥20% skip.
+- 2026-08-17 hook v2 (STATE_GATE_GMIN floor for soft, mode=cap trust-region
+  g=min(1,tau/dstate), STATE_GATE_INVERT for high-signal gating); round-2
+  arms launched (44694245-50): soft_g3, soft_g5, cap_p90, cap_p70,
+  state_p20 (dissection), inv_dst (skip top-1% rewrites). Attribution
+  analysis of per-frame RPE vs skip adjacency running concurrently.
