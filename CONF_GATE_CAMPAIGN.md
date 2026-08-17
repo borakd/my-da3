@@ -219,6 +219,14 @@ lifted by this directive.
   g7ema (same atten, better everything). Scene-conditional aggressiveness
   adds nothing over the global tau. NEGATIVE.
 
+- CKPT-10 GATE (evidence/cg_ckpt10_gate.json): NO KILL. KILL-0 pass (loss
+  tracks baseline, gated slightly lower at e10: 1.750 vs 1.813). Trio at
+  20% training: cgt10_on vs aug10_on ATE +.0033 (bar .005 — clears);
+  gate-trained BETTER on depth (absrel .2286 vs .2387, a1 .6958 vs .6821);
+  matched corner beats mismatched on absrel/a1/ATE. FLAG carried to final:
+  rot 2.43 vs 1.52 (+0.9°) — conf-head recalibration mid-schedule (atten
+  23% at ckpt-10 vs final-model 11.7%); resolve at 50-epoch verdict.
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
