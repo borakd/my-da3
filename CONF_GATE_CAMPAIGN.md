@@ -121,3 +121,11 @@ metrics), `cg_bytecheck.sh`.
 - 2026-08-17 round-4 launched (44697524-27): low-atten frontier c_g75/g8/g85
   (combo, gmin .75/.80/.85 × cap .1837) + g7ema (EMA .7 signal smoothing,
   jitter-mechanism test). STATE_GATE_EMA added to hook + unset list.
+- 2026-08-17 ROUND-4 RESULTS (evidence/cg_round4_430.json): EMA WORKS —
+  g7ema: absrel −.00101* a1 +.00213* ATE −.00316* | rot +.0155* (+1.4%)
+  trans +.000205* (+2.5%). Halves the rot cost of soft_g7 while growing
+  every win; dominates the whole combo-gmin family (c_g8: ATE −.0018,
+  rot +.0249). Flicker-jitter mechanism confirmed.
+- 2026-08-17 round-5 launched (44699254-57): g7emacap (EMA×cap), g7ema85
+  (EMA .85), g5ema (aggressive+smooth), g6ema8cap (middle). Winner → full
+  4292 promotion.
