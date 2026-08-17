@@ -348,8 +348,37 @@ def main():
                                     else args.conditioning
                                 ),
                             )
+                        # REVISIT=1: hindsight second sweep. Duplicate every
+                        # view with update=False (predictions emitted, memory
+                        # frozen), so pass-2 poses/depths are decoded against
+                        # the matured whole-scene state/mem (pose seed comes
+                        # from pose_retriever.inquire — global view index
+                        # never restarts at 0). Only pass-2 predictions are
+                        # kept, mirroring demo prepare_output(revisit=2).
+                        # ~2x compute and peak memory; a deterministic OOM
+                        # fails the scene loudly into the failure log rather
+                        # than silently mixing arms.
+                        revisit = os.environ.get("REVISIT", "").strip() == "1"
+                        if revisit:
+                            n1 = len(views)
+                            pass2 = []
+                            for vi_, v_ in enumerate(views):
+                                nv = dict(v_)  # shallow: share image tensors
+                                nv["update"] = torch.tensor(False).unsqueeze(0)
+                                nv["idx"] = n1 + vi_
+                                nv["instance"] = str(n1 + vi_)
+                                pass2.append(nv)
+                            views = views + pass2
                         with torch.no_grad():
                             outputs, state_args = inference(views, model, device)
+                        sgs_pass1 = None
+                        if revisit:
+                            half = len(outputs["pred"]) // 2
+                            sgs_pass1 = [p["state_gate_sigs"][0].tolist()
+                                         for p in outputs["pred"][:half]
+                                         if "state_gate_sigs" in p]
+                            outputs["pred"] = outputs["pred"][half:]
+                            outputs["views"] = outputs["views"][half:]
                         nfr = save_depth_camera(
                             outputs, pred_dir, pose_encoding_to_camera,
                             estimate_focal_knowing_depth,
@@ -357,16 +386,22 @@ def main():
                         if os.environ.get("STATE_GATE_MODE", "").strip():
                             # Per-frame gate telemetry attached by the model's
                             # STATE_GATE hook; absent when the hook is off, so
-                            # honest runs write nothing here.
+                            # honest runs write nothing here. Under REVISIT
+                            # 'frames' holds the (saved) hindsight pass;
+                            # 'frames_pass1' holds the gate decisions that
+                            # actually shaped memory.
                             from src.dust3r.model import STATE_GATE_SIG_KEYS
                             sgs = [p["state_gate_sigs"][0].tolist()
                                    for p in outputs["pred"]
                                    if "state_gate_sigs" in p]
                             cfg = {k: v for k, v in os.environ.items()
                                    if k.startswith("STATE_GATE_")}
+                            doc = {"keys": STATE_GATE_SIG_KEYS + ["s", "g"],
+                                   "config": cfg, "frames": sgs}
+                            if sgs_pass1 is not None:
+                                doc["frames_pass1"] = sgs_pass1
                             with open(os.path.join(pred_dir, "state_gate.json"), "w") as f:
-                                json.dump({"keys": STATE_GATE_SIG_KEYS + ["s", "g"],
-                                           "config": cfg, "frames": sgs}, f)
+                                json.dump(doc, f)
                     break
                 except torch.cuda.OutOfMemoryError as oom:
                     last_exc = oom
