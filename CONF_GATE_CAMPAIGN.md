@@ -87,3 +87,11 @@ metrics), `cg_bytecheck.sh`.
   arms launched (44694245-50): soft_g3, soft_g5, cap_p90, cap_p70,
   state_p20 (dissection), inv_dst (skip top-1% rewrites). Attribution
   analysis of per-frame RPE vs skip adjacency running concurrently.
+- 2026-08-17 ATTRIBUTION (evidence/cg_frame_attrib.json, cg_frame_attrib.py):
+  per-frame RPE deltas by class — accepted-after-accepted ≈ 0 (median exactly
+  0); every stale-state frame pays (+0.36…+1.0° rot), worst at the FIRST
+  frame of a skip run; forced writes +0.5…0.75°. Partial correlations: harm
+  tracks n_skipped/run-length, NOT transition count (more transitions at
+  fixed skips slightly protective). ATE gains live in low/mid-conf scenes
+  (rel_a2 terciles −.0073/−.0100/+.0006). ⇒ floor-attenuation (soft+GMIN)
+  is the mechanistically indicated fix; "clustered skips" contraindicated.
