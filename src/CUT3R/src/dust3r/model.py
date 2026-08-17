@@ -2585,94 +2585,103 @@ class ARCroco3DStereo(CroCoNet):
         else:
             # Confidence-gated memory write. res_group already holds this
             # frame's full predictions, so gating here changes ONLY what the
-            # next frame's decode sees. Loud failure on batch/group > 1: the
-            # 4292 harness runs (1, 1); a silent shape-gated no-op is the
-            # GT_RAY_MAP_SHUFFLE trap all over again.
-            if update_mask.shape[0] != 1 or len(view_indices) != 1:
+            # next frame's decode sees. group>1 is unsupported (loud, not a
+            # silent shape-gated no-op — the GT_RAY_MAP_SHUFFLE trap).
+            if len(view_indices) != 1:
                 raise RuntimeError(
-                    f"STATE_GATE requires batch=1, views_per_step=1; got "
-                    f"B={update_mask.shape[0]}, group={len(view_indices)}"
+                    f"STATE_GATE requires views_per_step=1; got group="
+                    f"{len(view_indices)}"
                 )
-            res_last = res_group[-1]
-            conf_self = res_last["conf_self"].detach().float()
-            conf_x = res_last.get("conf")
-            conf_x = conf_self if conf_x is None else conf_x.detach().float()
-            lx = torch.log(conf_x - 1.0 + 1e-8).flatten()
-            ls = torch.log(conf_self - 1.0 + 1e-8).flatten()
-            sig = {
-                "conf_mean": lx.mean().item(),
-                "conf_p10": torch.quantile(lx, 0.10).item(),
-                "conf_p50": torch.quantile(lx, 0.50).item(),
-                "conf_self_mean": ls.mean().item(),
-                "conf_self_p10": torch.quantile(ls, 0.10).item(),
-                "dstate": ((new_state_feat - state_feat).norm()
-                           / (state_feat.norm() + 1e-8)).item(),
-                "dmem": ((new_mem - mem).norm() / (mem.norm() + 1e-8)).item(),
-            }
-            s_raw = sig[sg_cfg["signal"]]
-            # invert: gate on HIGH signal values (dstate/dmem anomalies) by
-            # negating both signal and tau, so all mode logic stays keep-if-
-            # signal-large.
-            s = -s_raw if sg_cfg["invert"] else s_raw
-            vi = view_indices[0]
-            if vi == 0:
-                # Per-scene state lives on the instance; one inference() call
-                # per scene in the eval workers, so view 0 is the reset point.
-                self._sg_hist = []
-                self._sg_skiprun = 0
-                self._sg_ema = None
-            if sg_cfg["ema"] > 0:
-                prev = getattr(self, "_sg_ema", None)
-                s = s if prev is None else sg_cfg["ema"] * prev + (1 - sg_cfg["ema"]) * s
-                self._sg_ema = s
-            mode = sg_cfg["mode"]
-            tau = -sg_cfg["tau"] if sg_cfg["invert"] else sg_cfg["tau"]
-            if mode == "log" or vi < sg_cfg["warmup"]:
-                g = 1.0
-            elif mode == "thresh":
-                g = 1.0 if s >= tau else 0.0
-            elif mode in ("soft", "combo"):
-                import math
-                g = 1.0 / (1.0 + math.exp(-(s - tau) / max(sg_cfg["temp"], 1e-6)))
-                g = max(g, sg_cfg["gmin"])
-                if mode == "combo" and sg_cfg["cap_tau"] > 0:
-                    ds = sig["dstate"]
-                    if ds > sg_cfg["cap_tau"]:
-                        g = g * (sg_cfg["cap_tau"] / max(ds, 1e-8))
-            elif mode == "cap":
-                # Trust region on the rewrite: attenuate so the effective
-                # step never exceeds tau in signal units. Only meaningful for
-                # magnitude signals (dstate/dmem); g = min(1, tau/s_raw).
-                g = 1.0 if s_raw <= sg_cfg["tau"] else max(
-                    sg_cfg["tau"] / max(s_raw, 1e-8), sg_cfg["gmin"])
-            else:  # rel
-                hist = getattr(self, "_sg_hist", [])
-                if not hist:
-                    g = 1.0
-                else:
-                    srt = sorted(hist)
-                    med = srt[len(srt) // 2]
-                    g = 1.0 if s >= med - sg_cfg["rel_alpha"] else 0.0
-            if g < 0.5:
-                self._sg_skiprun = getattr(self, "_sg_skiprun", 0) + 1
-                if sg_cfg["max_skip"] > 0 and self._sg_skiprun > sg_cfg["max_skip"]:
-                    g = 1.0
-                    self._sg_skiprun = 0
+            if update_mask.shape[0] > 1:
+                # Batched (training) path: vectorized per-sample gate, no
+                # .item() syncs, all signals detached (gate is data, not a
+                # gradient path). The B==1 scalar path below is kept verbatim
+                # so scored eval arms stay byte-reproducible.
+                state_feat, mem = self._state_gate_batched(
+                    sg_cfg, res_group[-1], view_indices[0], update_mask,
+                    new_state_feat, state_feat, new_mem, mem)
             else:
-                self._sg_skiprun = 0
-            if g >= 0.5:
-                # rel compares against what memory actually contains, so only
-                # accepted frames enter the history.
-                self._sg_hist = getattr(self, "_sg_hist", []) + [s]
-            res_last["state_gate_sigs"] = torch.tensor(
-                [[sig[k] for k in STATE_GATE_SIG_KEYS] + [s, g]], dtype=torch.float32
-            )
-            g_state = g if sg_cfg["scope"] in ("both", "state") else 1.0
-            g_mem = g if sg_cfg["scope"] in ("both", "mem") else 1.0
-            um_state = update_mask * g_state
-            um_mem = update_mask * g_mem
-            state_feat = new_state_feat * um_state + state_feat * (1 - um_state)
-            mem = new_mem * um_mem + mem * (1 - um_mem)
+                res_last = res_group[-1]
+                conf_self = res_last["conf_self"].detach().float()
+                conf_x = res_last.get("conf")
+                conf_x = conf_self if conf_x is None else conf_x.detach().float()
+                lx = torch.log(conf_x - 1.0 + 1e-8).flatten()
+                ls = torch.log(conf_self - 1.0 + 1e-8).flatten()
+                sig = {
+                    "conf_mean": lx.mean().item(),
+                    "conf_p10": torch.quantile(lx, 0.10).item(),
+                    "conf_p50": torch.quantile(lx, 0.50).item(),
+                    "conf_self_mean": ls.mean().item(),
+                    "conf_self_p10": torch.quantile(ls, 0.10).item(),
+                    "dstate": ((new_state_feat - state_feat).norm()
+                               / (state_feat.norm() + 1e-8)).item(),
+                    "dmem": ((new_mem - mem).norm() / (mem.norm() + 1e-8)).item(),
+                }
+                s_raw = sig[sg_cfg["signal"]]
+                # invert: gate on HIGH signal values (dstate/dmem anomalies) by
+                # negating both signal and tau, so all mode logic stays keep-if-
+                # signal-large.
+                s = -s_raw if sg_cfg["invert"] else s_raw
+                vi = view_indices[0]
+                if vi == 0:
+                    # Per-scene state lives on the instance; one inference()
+                    # call per scene in the eval workers, so view 0 is the
+                    # reset point.
+                    self._sg_hist = []
+                    self._sg_skiprun = 0
+                    self._sg_ema = None
+                if sg_cfg["ema"] > 0:
+                    prev = getattr(self, "_sg_ema", None)
+                    s = s if prev is None else sg_cfg["ema"] * prev + (1 - sg_cfg["ema"]) * s
+                    self._sg_ema = s
+                mode = sg_cfg["mode"]
+                tau = -sg_cfg["tau"] if sg_cfg["invert"] else sg_cfg["tau"]
+                if mode == "log" or vi < sg_cfg["warmup"]:
+                    g = 1.0
+                elif mode == "thresh":
+                    g = 1.0 if s >= tau else 0.0
+                elif mode in ("soft", "combo"):
+                    import math
+                    g = 1.0 / (1.0 + math.exp(-(s - tau) / max(sg_cfg["temp"], 1e-6)))
+                    g = max(g, sg_cfg["gmin"])
+                    if mode == "combo" and sg_cfg["cap_tau"] > 0:
+                        ds = sig["dstate"]
+                        if ds > sg_cfg["cap_tau"]:
+                            g = g * (sg_cfg["cap_tau"] / max(ds, 1e-8))
+                elif mode == "cap":
+                    # Trust region on the rewrite: attenuate so the effective
+                    # step never exceeds tau in signal units. Only meaningful
+                    # for magnitude signals (dstate/dmem); g = min(1, tau/s).
+                    g = 1.0 if s_raw <= sg_cfg["tau"] else max(
+                        sg_cfg["tau"] / max(s_raw, 1e-8), sg_cfg["gmin"])
+                else:  # rel
+                    hist = getattr(self, "_sg_hist", [])
+                    if not hist:
+                        g = 1.0
+                    else:
+                        srt = sorted(hist)
+                        med = srt[len(srt) // 2]
+                        g = 1.0 if s >= med - sg_cfg["rel_alpha"] else 0.0
+                if g < 0.5:
+                    self._sg_skiprun = getattr(self, "_sg_skiprun", 0) + 1
+                    if sg_cfg["max_skip"] > 0 and self._sg_skiprun > sg_cfg["max_skip"]:
+                        g = 1.0
+                        self._sg_skiprun = 0
+                else:
+                    self._sg_skiprun = 0
+                if g >= 0.5:
+                    # rel compares against what memory actually contains, so
+                    # only accepted frames enter the history.
+                    self._sg_hist = getattr(self, "_sg_hist", []) + [s]
+                res_last["state_gate_sigs"] = torch.tensor(
+                    [[sig[k] for k in STATE_GATE_SIG_KEYS] + [s, g]], dtype=torch.float32
+                )
+                g_state = g if sg_cfg["scope"] in ("both", "state") else 1.0
+                g_mem = g if sg_cfg["scope"] in ("both", "mem") else 1.0
+                um_state = update_mask * g_state
+                um_mem = update_mask * g_mem
+                state_feat = new_state_feat * um_state + state_feat * (1 - um_state)
+                mem = new_mem * um_mem + mem * (1 - um_mem)
         reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(dim=0)
         reset_mask = reset_mask[:, None, None].float()
         state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
@@ -2681,6 +2690,98 @@ class ARCroco3DStereo(CroCoNet):
             print(f"[GroupedUpdate] committed single state/memory update for views {view_indices}")
             self._debug_grouped_updates_emitted = debug_emitted + 1
         return res_group, (state_feat, mem)
+
+    def _state_gate_batched(self, sg_cfg, res_last, vi, update_mask,
+                            new_state_feat, state_feat, new_mem, mem):
+        """Vectorized STATE_GATE commit for batched training (B>1).
+
+        Semantics mirror the B==1 scalar path: per-sample gate g in [0,1]
+        from the frame's own confidence, EMA-smoothed, applied to the
+        state/mem convex blend. Differences, all deliberate:
+        - no .item()/CPU syncs (everything stays on device);
+        - all inputs to g are detached — g is data, never a gradient path
+          into the conf head or the state;
+        - per-slot EMA/skiprun live on self as (B,) tensors, re-created at
+          view 0 of every batch (even_batches=False can change B);
+        - mode 'rel' is unsupported (loud) — its running-median history is
+          scalar-path only.
+        TBPTT note: this method is called outside every checkpointed region
+        (decoder blocks / DPT trunks), so instance state updates exactly once
+        per group step even with gradient checkpointing on.
+        """
+        B = update_mask.shape[0]
+        conf_self = res_last["conf_self"].detach().float()
+        conf_x = res_last.get("conf")
+        conf_x = conf_self if conf_x is None else conf_x.detach().float()
+        lx = torch.log(conf_x - 1.0 + 1e-8).reshape(B, -1)
+        ls = torch.log(conf_self - 1.0 + 1e-8).reshape(B, -1)
+        sf = state_feat.detach().float().reshape(B, -1)
+        nsf = new_state_feat.detach().float().reshape(B, -1)
+        mf = mem.detach().float().reshape(B, -1)
+        nmf = new_mem.detach().float().reshape(B, -1)
+        sig = {
+            "conf_mean": lx.mean(dim=1),
+            "conf_p10": torch.quantile(lx, 0.10, dim=1),
+            "conf_p50": torch.quantile(lx, 0.50, dim=1),
+            "conf_self_mean": ls.mean(dim=1),
+            "conf_self_p10": torch.quantile(ls, 0.10, dim=1),
+            "dstate": (nsf - sf).norm(dim=1) / (sf.norm(dim=1) + 1e-8),
+            "dmem": (nmf - mf).norm(dim=1) / (mf.norm(dim=1) + 1e-8),
+        }
+        s_raw = sig[sg_cfg["signal"]]
+        s = -s_raw if sg_cfg["invert"] else s_raw
+        if vi == 0:
+            self._sg_ema_v = None
+            self._sg_skiprun_v = torch.zeros_like(s)
+            if not getattr(self, "_sg_banner", False):
+                # Startup evidence the gate is LIVE in this process — the
+                # getattr-default trap (arm silently training the base
+                # recipe) is caught by grepping the job log for this line.
+                print(f"[STATE_GATE] batched gate ACTIVE (B={B}): {sg_cfg}",
+                      flush=True)
+                self._sg_banner = True
+        if sg_cfg["ema"] > 0:
+            prev = getattr(self, "_sg_ema_v", None)
+            s = s if prev is None else sg_cfg["ema"] * prev + (1 - sg_cfg["ema"]) * s
+            self._sg_ema_v = s
+        mode = sg_cfg["mode"]
+        tau = -sg_cfg["tau"] if sg_cfg["invert"] else sg_cfg["tau"]
+        one = torch.ones_like(s)
+        if mode == "log" or vi < sg_cfg["warmup"]:
+            g = one
+        elif mode == "thresh":
+            g = (s >= tau).float()
+        elif mode in ("soft", "combo"):
+            g = torch.sigmoid((s - tau) / max(sg_cfg["temp"], 1e-6))
+            g = g.clamp_min(sg_cfg["gmin"])
+            if mode == "combo" and sg_cfg["cap_tau"] > 0:
+                ds = sig["dstate"]
+                g = torch.where(ds > sg_cfg["cap_tau"],
+                                g * sg_cfg["cap_tau"] / ds.clamp_min(1e-8), g)
+        elif mode == "cap":
+            g = torch.where(s_raw <= sg_cfg["tau"], one,
+                            (sg_cfg["tau"] / s_raw.clamp_min(1e-8)).clamp_min(
+                                sg_cfg["gmin"]))
+        else:  # rel
+            raise RuntimeError("STATE_GATE mode=rel is unsupported at batch>1")
+        skipped = (g < 0.5).float()
+        self._sg_skiprun_v = (getattr(self, "_sg_skiprun_v", torch.zeros_like(s))
+                              + skipped) * skipped
+        if sg_cfg["max_skip"] > 0:
+            force = self._sg_skiprun_v > sg_cfg["max_skip"]
+            g = torch.where(force, one, g)
+            self._sg_skiprun_v = torch.where(
+                force, torch.zeros_like(s), self._sg_skiprun_v)
+        res_last["state_gate_sigs"] = torch.stack(
+            [sig[k] for k in STATE_GATE_SIG_KEYS] + [s, g], dim=1).detach()
+        g3 = g.detach()[:, None, None]
+        g_state = g3 if sg_cfg["scope"] in ("both", "state") else 1.0
+        g_mem = g3 if sg_cfg["scope"] in ("both", "mem") else 1.0
+        um_state = update_mask * g_state
+        um_mem = update_mask * g_mem
+        state_feat = new_state_feat * um_state + state_feat * (1 - um_state)
+        mem = new_mem * um_mem + mem * (1 - um_mem)
+        return state_feat, mem
 
     def _forward_decoder_step(
         self,
