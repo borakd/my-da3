@@ -348,6 +348,24 @@ def main():
                                     else args.conditioning
                                 ),
                             )
+                        # SKIP_FRAMES_FILE: oracle/list-driven write blocking.
+                        # json {scene: [frame indices]} -- listed frames still
+                        # get a full forward pass and predictions, but their
+                        # memory write is suppressed via the model's native
+                        # views[i]['update']=False switch. Frames absent from
+                        # the list write normally.
+                        sk = os.environ.get("SKIP_FRAMES_FILE", "").strip()
+                        if sk:
+                            if not hasattr(main, "_skip_frames"):
+                                with open(sk) as _f:
+                                    main._skip_frames = json.load(_f)
+                                print(f"{tag} skip-frames file: {sk} "
+                                      f"({len(main._skip_frames)} scenes)",
+                                      flush=True)
+                            bad = set(main._skip_frames.get(scene, []))
+                            for vi_, v_ in enumerate(views):
+                                if vi_ in bad:
+                                    v_["update"] = torch.tensor(False).unsqueeze(0)
                         # REVISIT=1: hindsight second sweep. Duplicate every
                         # view with update=False (predictions emitted, memory
                         # frozen), so pass-2 poses/depths are decoded against
