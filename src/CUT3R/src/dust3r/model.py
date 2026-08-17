@@ -76,8 +76,9 @@ def _state_gate_cfg():
     mode = os.environ.get("STATE_GATE_MODE", "").strip().lower()
     if not mode:
         return None
-    if mode not in ("log", "thresh", "soft", "rel", "cap"):
-        raise ValueError(f"STATE_GATE_MODE must be log|thresh|soft|rel|cap, got {mode!r}")
+    if mode not in ("log", "thresh", "soft", "rel", "cap", "combo"):
+        raise ValueError(
+            f"STATE_GATE_MODE must be log|thresh|soft|rel|cap|combo, got {mode!r}")
     signal = os.environ.get("STATE_GATE_SIGNAL", "conf_mean").strip()
     if signal not in STATE_GATE_SIG_KEYS:
         raise ValueError(f"STATE_GATE_SIGNAL must be one of {STATE_GATE_SIG_KEYS}, got {signal!r}")
@@ -103,6 +104,10 @@ def _state_gate_cfg():
         # Flip the comparison: gate when the signal is HIGH (for dstate/dmem,
         # where large values mean anomalously big memory rewrites).
         invert=os.environ.get("STATE_GATE_INVERT", "") == "1",
+        # combo mode: multiply the soft-conf gate (SIGNAL/TAU/TEMP/GMIN) by a
+        # dstate trust-region term min(1, CAP_TAU/dstate). 0 disables the
+        # cap term.
+        cap_tau=float(os.environ.get("STATE_GATE_CAP_TAU", "0") or 0.0),
     )
 
 
@@ -2617,10 +2622,14 @@ class ARCroco3DStereo(CroCoNet):
                 g = 1.0
             elif mode == "thresh":
                 g = 1.0 if s >= tau else 0.0
-            elif mode == "soft":
+            elif mode in ("soft", "combo"):
                 import math
                 g = 1.0 / (1.0 + math.exp(-(s - tau) / max(sg_cfg["temp"], 1e-6)))
                 g = max(g, sg_cfg["gmin"])
+                if mode == "combo" and sg_cfg["cap_tau"] > 0:
+                    ds = sig["dstate"]
+                    if ds > sg_cfg["cap_tau"]:
+                        g = g * (sg_cfg["cap_tau"] / max(ds, 1e-8))
             elif mode == "cap":
                 # Trust region on the rewrite: attenuate so the effective
                 # step never exceeds tau in signal units. Only meaningful for

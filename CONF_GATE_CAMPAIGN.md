@@ -95,3 +95,16 @@ metrics), `cg_bytecheck.sh`.
   fixed skips slightly protective). ATE gains live in low/mid-conf scenes
   (rel_a2 terciles −.0073/−.0100/+.0006). ⇒ floor-attenuation (soft+GMIN)
   is the mechanistically indicated fix; "clustered skips" contraindicated.
+- 2026-08-17 ROUND-2 RESULTS (evidence/cg_round2_430.json):
+  - cap_p90 (trust-region, only 1.9% mean atten): absrel −.00060*, a1
+    +.00164*, ATE −.00028, rpe_trans −.000003, rpe_rot +.0185 n.s.
+    ⇒ 4/5 better in the mean, both depth wins SIGNIFICANT, no significant
+    loss. Capping the top-decile state rewrites is nearly a free win.
+  - soft_g5 (gmin .5): ATE −.00419* + a1 +.00173* but rpe pair still
+    significantly worse (+.053° rot) — partial staleness still costs,
+    ~10× less than hard skip.
+  - state-only scope ≈ both-scope (state_feat is the whole story);
+    inv_dst (hard-skip top-1% rewrites) dominated by cap.
+- 2026-08-17 round-3 launched (44696338-43): combo1 (soft g.5 τ p30 ×
+  cap .1837), combo2 (soft g.7 × cap .21), soft_g7, cap_p95, cap_p98,
+  soft_g5t3 (τ p20, temp 3 — smoother sigmoid).
