@@ -129,3 +129,44 @@ metrics), `cg_bytecheck.sh`.
 - 2026-08-17 round-5 launched (44699254-57): g7emacap (EMA×cap), g7ema85
   (EMA .85), g5ema (aggressive+smooth), g6ema8cap (middle). Winner → full
   4292 promotion.
+- 2026-08-17 ROUND-5 RESULTS (evidence/cg_round5_430.json): EMA×cap boosts
+  depth but doubles rot cost; EMA .85 pose-safest but depth n.s.; g7ema
+  stays champion. Losing diag arms' depth/camera preds purged (~700 GB);
+  telemetry + eval CSVs kept.
+
+## FINAL VERDICT (2026-08-17, evidence/cg_full4292_verdict.json)
+
+Full 4292-scene harness, paired vs augfull_lr1e5, byte-deterministic:
+
+**augfull_cg_g7ema** (STATE_GATE_MODE=soft, SIGNAL=conf_mean, TAU=−11.99,
+TEMP=1.5, GMIN=0.70, EMA=0.7, WARMUP=1; mean attenuation 11.7%, zero hard
+skips):
+| metric | clean | gated | Δ | CI | w/l |
+|---|---|---|---|---|---|
+| absrel | .179384 | .178647 | −.000736* | [−.000999,−.000470] | 2275/2017 |
+| a1 | .786312 | .787188 | +.000875* | [+.000491,+.001257] | 2198/2094 |
+| ate | .075869 | .072802 | −.003067* | [−.003389,−.002740] | 2686/1606 |
+| rpe_trans | .007941 | .008091 | +.000150* | [+.000125,+.000175] | 1871/2421 |
+| rpe_rot | 1.100981 | 1.106619 | +.005638 n.s. | [−.000571,+.011915] | 2020/2272 |
+
+WIN CONDITION MET: 3/5 metrics significantly better (absrel, a1, ATE −4.0%
+with 62.6% per-scene win rate); rpe_rot statistically flat (+0.5%);
+rpe_trans +1.9% (the one small cost). augfull_cg_g7ema85 (EMA .85) is the
+confirming sibling: absrel −.000801*, a1 +.000913*, ATE −.002766*, rot
++.004942 n.s., trans +.000146* — same shape, so the operating point is not
+a lottery ticket. Full-harness costs came in SMALLER than the 430 subset
+predicted (rot +1.4%* → +0.5% n.s.).
+
+Both rows merged into summary/averages_table.csv (honest inference-time
+arms; no oracle information — the gate signal is the model's own conf).
+
+### Why this worked where the GRU could not (one paragraph)
+The GRU campaign died because drift is unobservable from trajectory-only
+inputs. This gate never estimates drift: it only needs to detect frame
+badness, and image-derived confidence carries that signal (Spearman −.6 to
+−.8 vs per-scene error). Skipping writes trades staleness for wrongness —
+and the prev_gt result (staleness nearly free, wrongness compounds) said
+that trade is favorable. The two refinements that made it a clean win:
+(1) floor attenuation (GMIN) so no frame's state goes fully stale (the
+attribution showed stale frames themselves pay the RPE cost), and (2) EMA
+on the signal so gate flicker cannot inject frame-to-frame jitter.
