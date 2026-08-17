@@ -108,6 +108,10 @@ def _state_gate_cfg():
         # dstate trust-region term min(1, CAP_TAU/dstate). 0 disables the
         # cap term.
         cap_tau=float(os.environ.get("STATE_GATE_CAP_TAU", "0") or 0.0),
+        # Temporal EMA on the gating signal: s_t <- ema*s_{t-1} + (1-ema)*s_t.
+        # Damps single-frame conf flickers so adjacent frames get similar
+        # treatment. 0 disables (no smoothing).
+        ema=float(os.environ.get("STATE_GATE_EMA", "0") or 0.0),
     )
 
 
@@ -2616,6 +2620,11 @@ class ARCroco3DStereo(CroCoNet):
                 # per scene in the eval workers, so view 0 is the reset point.
                 self._sg_hist = []
                 self._sg_skiprun = 0
+                self._sg_ema = None
+            if sg_cfg["ema"] > 0:
+                prev = getattr(self, "_sg_ema", None)
+                s = s if prev is None else sg_cfg["ema"] * prev + (1 - sg_cfg["ema"]) * s
+                self._sg_ema = s
             mode = sg_cfg["mode"]
             tau = -sg_cfg["tau"] if sg_cfg["invert"] else sg_cfg["tau"]
             if mode == "log" or vi < sg_cfg["warmup"]:

@@ -108,3 +108,16 @@ metrics), `cg_bytecheck.sh`.
 - 2026-08-17 round-3 launched (44696338-43): combo1 (soft g.5 τ p30 ×
   cap .1837), combo2 (soft g.7 × cap .21), soft_g7, cap_p95, cap_p98,
   soft_g5t3 (τ p20, temp 3 — smoother sigmoid).
+- 2026-08-17 ROUND-3 RESULTS (evidence/cg_round3_430.json): the 3/5
+  majority is REACHED with all three wins significant —
+  - combo1: absrel −.00106* a1 +.00209* ATE −.00414* | rot +.0534* (+4.8%)
+    trans +.00046* (+5.6%)
+  - soft_g7: absrel −.00085* a1 +.00185* ATE −.00293* | rot +.0326* (+2.9%)
+    trans +.000149* (+1.8%)
+  - combo2: 3 sig wins | rot +.0281* (+2.5%) trans +.000125* (+1.5%)
+  Frontier ≈ linear in mean attenuation (ATE ≈ −.021×atten, rot ≈
+  +.26×atten); cap .1837 adds depth wins ~orthogonally (combo1 vs soft_g5:
+  same pose deltas, absrel win +50%). cap_p95/p98 shrink to washes.
+- 2026-08-17 round-4 launched (44697524-27): low-atten frontier c_g75/g8/g85
+  (combo, gmin .75/.80/.85 × cap .1837) + g7ema (EMA .7 signal smoothing,
+  jitter-mechanism test). STATE_GATE_EMA added to hook + unset list.
