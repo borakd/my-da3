@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import gc
 import glob
+import json
 import subprocess
 import sys
 import time
@@ -336,6 +337,19 @@ def main():
                             outputs, pred_dir, pose_encoding_to_camera,
                             estimate_focal_knowing_depth,
                         )
+                        if os.environ.get("STATE_GATE_MODE", "").strip():
+                            # Per-frame gate telemetry attached by the model's
+                            # STATE_GATE hook; absent when the hook is off, so
+                            # honest runs write nothing here.
+                            from src.dust3r.model import STATE_GATE_SIG_KEYS
+                            sgs = [p["state_gate_sigs"][0].tolist()
+                                   for p in outputs["pred"]
+                                   if "state_gate_sigs" in p]
+                            cfg = {k: v for k, v in os.environ.items()
+                                   if k.startswith("STATE_GATE_")}
+                            with open(os.path.join(pred_dir, "state_gate.json"), "w") as f:
+                                json.dump({"keys": STATE_GATE_SIG_KEYS + ["s", "g"],
+                                           "config": cfg, "frames": sgs}, f)
                     break
                 except torch.cuda.OutOfMemoryError as oom:
                     last_exc = oom

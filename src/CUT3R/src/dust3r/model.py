@@ -49,6 +49,57 @@ from accelerate.logging import get_logger
 printer = get_logger(__name__, log_level="DEBUG")
 
 
+# Order of the per-frame telemetry vector attached as res["state_gate_sigs"]
+# (last two slots are the chosen gating signal s and the applied gate g).
+STATE_GATE_SIG_KEYS = [
+    "conf_mean", "conf_p10", "conf_p50",
+    "conf_self_mean", "conf_self_p10",
+    "dstate", "dmem",
+]
+
+
+def _state_gate_cfg():
+    """Confidence-gated memory-write hook config from STATE_GATE_* env vars.
+
+    Returns None when STATE_GATE_MODE is unset/empty — the commit path is then
+    byte-identical to the un-hooked code (nothing else may change).
+
+    Modes:
+      log    -- compute + attach per-frame signals, never gate (g=1)
+      thresh -- hard skip the state/mem write when signal < TAU
+      soft   -- attenuate the write: g = sigmoid((signal - TAU) / TEMP)
+      rel    -- per-scene adaptive: skip when signal < median(accepted) - REL_ALPHA
+
+    Confidence signals are in log-space of (conf - 1), i.e. the raw head
+    activation before the 1+exp() mapping, so thresholds are scale-stable.
+    """
+    mode = os.environ.get("STATE_GATE_MODE", "").strip().lower()
+    if not mode:
+        return None
+    if mode not in ("log", "thresh", "soft", "rel"):
+        raise ValueError(f"STATE_GATE_MODE must be log|thresh|soft|rel, got {mode!r}")
+    signal = os.environ.get("STATE_GATE_SIGNAL", "conf_mean").strip()
+    if signal not in STATE_GATE_SIG_KEYS:
+        raise ValueError(f"STATE_GATE_SIGNAL must be one of {STATE_GATE_SIG_KEYS}, got {signal!r}")
+    scope = os.environ.get("STATE_GATE_SCOPE", "both").strip().lower()
+    if scope not in ("both", "mem", "state"):
+        raise ValueError(f"STATE_GATE_SCOPE must be both|mem|state, got {scope!r}")
+    return dict(
+        mode=mode,
+        signal=signal,
+        scope=scope,
+        tau=float(os.environ.get("STATE_GATE_TAU", "0") or 0.0),
+        temp=float(os.environ.get("STATE_GATE_TEMP", "1") or 1.0),
+        rel_alpha=float(os.environ.get("STATE_GATE_REL_ALPHA", "0") or 0.0),
+        # Never gate the first WARMUP frames (frame 0 seeds the state; rel
+        # needs history). Default 1 => frame 0 always writes.
+        warmup=int(os.environ.get("STATE_GATE_WARMUP", "1") or 1),
+        # Force a write after this many consecutive skips (0 = unlimited),
+        # bounding staleness when a scene's confidence collapses globally.
+        max_skip=int(os.environ.get("STATE_GATE_MAX_SKIP", "0") or 0),
+    )
+
+
 @dataclass
 class ARCroco3DStereoOutput(ModelOutput):
     """
@@ -2512,8 +2563,80 @@ class ARCroco3DStereo(CroCoNet):
         else:
             update_mask = img_mask_group
         update_mask = update_mask[:, None, None].float()
-        state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
-        mem = new_mem * update_mask + mem * (1 - update_mask)
+        sg_cfg = _state_gate_cfg()
+        if sg_cfg is None:
+            state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
+            mem = new_mem * update_mask + mem * (1 - update_mask)
+        else:
+            # Confidence-gated memory write. res_group already holds this
+            # frame's full predictions, so gating here changes ONLY what the
+            # next frame's decode sees. Loud failure on batch/group > 1: the
+            # 4292 harness runs (1, 1); a silent shape-gated no-op is the
+            # GT_RAY_MAP_SHUFFLE trap all over again.
+            if update_mask.shape[0] != 1 or len(view_indices) != 1:
+                raise RuntimeError(
+                    f"STATE_GATE requires batch=1, views_per_step=1; got "
+                    f"B={update_mask.shape[0]}, group={len(view_indices)}"
+                )
+            res_last = res_group[-1]
+            conf_self = res_last["conf_self"].detach().float()
+            conf_x = res_last.get("conf")
+            conf_x = conf_self if conf_x is None else conf_x.detach().float()
+            lx = torch.log(conf_x - 1.0 + 1e-8).flatten()
+            ls = torch.log(conf_self - 1.0 + 1e-8).flatten()
+            sig = {
+                "conf_mean": lx.mean().item(),
+                "conf_p10": torch.quantile(lx, 0.10).item(),
+                "conf_p50": torch.quantile(lx, 0.50).item(),
+                "conf_self_mean": ls.mean().item(),
+                "conf_self_p10": torch.quantile(ls, 0.10).item(),
+                "dstate": ((new_state_feat - state_feat).norm()
+                           / (state_feat.norm() + 1e-8)).item(),
+                "dmem": ((new_mem - mem).norm() / (mem.norm() + 1e-8)).item(),
+            }
+            s = sig[sg_cfg["signal"]]
+            vi = view_indices[0]
+            if vi == 0:
+                # Per-scene state lives on the instance; one inference() call
+                # per scene in the eval workers, so view 0 is the reset point.
+                self._sg_hist = []
+                self._sg_skiprun = 0
+            mode = sg_cfg["mode"]
+            if mode == "log" or vi < sg_cfg["warmup"]:
+                g = 1.0
+            elif mode == "thresh":
+                g = 1.0 if s >= sg_cfg["tau"] else 0.0
+            elif mode == "soft":
+                import math
+                g = 1.0 / (1.0 + math.exp(-(s - sg_cfg["tau"]) / max(sg_cfg["temp"], 1e-6)))
+            else:  # rel
+                hist = getattr(self, "_sg_hist", [])
+                if not hist:
+                    g = 1.0
+                else:
+                    srt = sorted(hist)
+                    med = srt[len(srt) // 2]
+                    g = 1.0 if s >= med - sg_cfg["rel_alpha"] else 0.0
+            if g < 0.5:
+                self._sg_skiprun = getattr(self, "_sg_skiprun", 0) + 1
+                if sg_cfg["max_skip"] > 0 and self._sg_skiprun > sg_cfg["max_skip"]:
+                    g = 1.0
+                    self._sg_skiprun = 0
+            else:
+                self._sg_skiprun = 0
+            if g >= 0.5:
+                # rel compares against what memory actually contains, so only
+                # accepted frames enter the history.
+                self._sg_hist = getattr(self, "_sg_hist", []) + [s]
+            res_last["state_gate_sigs"] = torch.tensor(
+                [[sig[k] for k in STATE_GATE_SIG_KEYS] + [s, g]], dtype=torch.float32
+            )
+            g_state = g if sg_cfg["scope"] in ("both", "state") else 1.0
+            g_mem = g if sg_cfg["scope"] in ("both", "mem") else 1.0
+            um_state = update_mask * g_state
+            um_mem = update_mask * g_mem
+            state_feat = new_state_feat * um_state + state_feat * (1 - um_state)
+            mem = new_mem * um_mem + mem * (1 - um_mem)
         reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(dim=0)
         reset_mask = reset_mask[:, None, None].float()
         state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
@@ -2602,6 +2725,8 @@ class ARCroco3DStereo(CroCoNet):
     ### DEPTH ANYTHING 3 #############################################################################
     ##################################################################################################
     def _da3_forward_impl(self, shape, feat_ls, pos, ret_state=False):
+        if _state_gate_cfg() is not None:
+            raise RuntimeError("STATE_GATE is not implemented on the _da3_forward_impl path")
         feat = feat_ls
         # print(f"DEBUG feat.shape: {feat.shape}")
 
@@ -2713,6 +2838,8 @@ class ARCroco3DStereo(CroCoNet):
     ##################################################################################################
 
     def inference_step(self, view, state_feat, state_pos, init_state_feat, mem, init_mem):
+        if _state_gate_cfg() is not None:
+            raise RuntimeError("STATE_GATE is not implemented on the inference_step path")
         batch_size = view["img"].shape[0]
         raymaps = []
         shapes = []
@@ -2773,6 +2900,8 @@ class ARCroco3DStereo(CroCoNet):
         return res, view
 
     def forward_recurrent(self, views, device, ret_state=False):
+        if _state_gate_cfg() is not None:
+            raise RuntimeError("STATE_GATE is not implemented on the forward_recurrent path")
         ress = []
         all_state_args = []
         for i, view in enumerate(views):
