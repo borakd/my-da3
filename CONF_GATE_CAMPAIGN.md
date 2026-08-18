@@ -227,6 +227,30 @@ lifted by this directive.
   rot 2.43 vs 1.52 (+0.9°) — conf-head recalibration mid-schedule (atten
   23% at ckpt-10 vs final-model 11.7%); resolve at 50-epoch verdict.
 
+## GATE-TRAINED FINAL VERDICT (2026-08-18, evidence/cg_train_verdict.json)
+
+Four-corner square COMPLETE (full 4292, all vs augfull_lr1e5):
+| corner | absrel | a1 | ate | rpe_trans | rpe_rot |
+|---|---|---|---|---|---|
+| plain/plain (augfull) | .179384 | .786312 | .075869 | .007941 | 1.100981 |
+| plain-train/gate-eval (augfull_cg_g7ema) | .178647* | .787188* | .072802* | .008091* ✗ | 1.106619 ~ |
+| gate-train/gate-eval (cgtrain_g7ema) | .178928 ~ | .787309* | .077177* ✗ | .007825* ✓ | 1.115121* ✗ |
+| gate-train/plain-eval (cgtrain_plain) | .179748 ~ | .786506 ~ | .081226* ✗ | .007704* ✓ | 1.122974* ✗ |
+
+Findings: (1) Training under the gate REDISTRIBUTES the benefit — the
+rpe_trans cost flips to a significant WIN (−.000117*, gate-off even
+−.000238*), but the ATE gain evaporates (+.0013* vs baseline): the model
+co-adapts to attenuated writes as its normal regime, so the eval-time gate
+no longer confers drift protection. (2) Mismatch corner again worse than
+matched on ATE (+.004) — four-corner symmetry holds on this axis too.
+(3) Gate-trained conf distribution shifted: frozen tau −11.99 now yields
+13.1% attenuation (vs 11.7% plain). (4) KILL-10 rot flag resolved benignly
+(final rot +.014*, not +0.9). VERDICT: **augfull_cg_g7ema (inference-only
+gate on the plain finetune) REMAINS CHAMPION** — 3 sig wins, rot flat.
+The gate-trained model is a mechanism result, not a promotion. Both rows
+merged into averages_table.csv. Pre-registered follow-up: recalibrate tau
+on the gate-trained model's own conf distribution (diag-labeled).
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
