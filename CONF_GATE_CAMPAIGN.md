@@ -251,6 +251,23 @@ The gate-trained model is a mechanism result, not a promotion. Both rows
 merged into averages_table.csv. Pre-registered follow-up: recalibrate tau
 on the gate-trained model's own conf distribution (diag-labeled).
 
+- RETAU SALVAGE (evidence/cgt_retau_430.json): aggressive tau (−11.0 /
+  −9.67 = its own p50; atten 15–17%) on the gate-trained ckpt keeps the
+  rpe_trans win (−.00029*) and depth gains but ATE remains sig-worse
+  (+.0023…+.0031*). Co-adaptation is intrinsic; eval-time tau cannot
+  recover the drift protection. BRANCH CLOSED — final standings stand:
+  **augfull_cg_g7ema is the campaign champion.**
+
+### Recommended next steps (recorded 2026-08-18, not launched)
+1. REVISIT-TRAINED model: train WITH second sweeps (update=False pass 2 +
+  losses on pass-2 predictions) so hindsight decoding becomes
+  in-distribution — the only measured-dead lever whose failure mode was
+  purely distributional; potential large ATE gains if it trains. ~520
+  GPU-h. Risk: the co-adaptation lesson (benefits may redistribute).
+2. Gate-scheduled training (gate ramped or annealed, or gate only in the
+  graded TBPTT chunks) — attacks the co-adaptation directly.
+3. Forward/backward trajectory fusion (eval-side, untested, cheap).
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
