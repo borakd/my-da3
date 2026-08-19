@@ -268,6 +268,28 @@ on the gate-trained model's own conf distribution (diag-labeled).
   graded TBPTT chunks) — attacks the co-adaptation directly.
 3. Forward/backward trajectory fusion (eval-side, untested, cheap).
 
+## PHASE 3 (2026-08-19, user-directed): execute the recorded next steps
+
+All three launched after design workflow + adversarial-derived specs + smokes:
+- REVISIT-TRAINED arm (job 44812852, cut3r_ft_augfull_revisit8_32gpu_lr1e5):
+  REVISIT_TRAIN_K=8 — K update=False copies appended per TBPTT batch,
+  encoder feats duplicated by index (free), grad chunks 2 forward + 2
+  revisit, exactly 4 optimizer steps (parity). Divisibility asserts dropped
+  (loader emits variable view counts — smoke-discovered). Pre-registered
+  ckpt-10 pair: diag_rev10_plain / diag_rev10_revisit (does hindsight stop
+  being catastrophic vs cg_revisit_430's +2.16° rot, and does causal
+  forward quality survive).
+- GATE-SCHEDULED arm (job 44812853, cut3r_ft_augfull_cgsched_p50_32gpu_lr1e5):
+  winner gate env + STATE_GATE_TRAIN_PROB=0.5, TRAIN_SEED=0 (dedicated
+  rank-seeded random.Random; global RNG streams untouched). WIN CONDITION
+  (pre-registered): plain corner NOT sig-worse than augfull on ATE (no
+  evaporation — cgtrain_plain failed at +.0053*) AND gated corner sig-better
+  than its own plain corner with magnitude ~ champion's −.003; rot flat.
+  ckpt-10 pair: diag_sch10_on / diag_sch10_off.
+- FWD/BWD FUSION (eval-side): worker REVERSE=1 (predictions un-reversed to
+  original indices) + cg_fuse_fwd_bwd.py (sim3 align bwd→fwd, slerp/midpoint
+  fuse, forward depth). diag_cg_bwd running; fusion after.
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
