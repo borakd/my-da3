@@ -159,9 +159,23 @@ def load_cams(cam_dir):
     return names, np.stack(poses), np.stack(intr)
 
 
-def fuse_scene(fwd_pred, bwd_pred, fused_pred):
+def rot_angle_deg(Ra, Rb):
+    c = (np.trace(Ra.T @ Rb) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def fuse_scene(fwd_pred, bwd_pred, fused_pred,
+               max_angle_deg=30.0, max_center_frac=0.25, max_resid_frac=0.5):
     """Fuse one scene's fwd+bwd camera trajectories into fused_pred/camera
-    and symlink fwd depth as fused_pred/depth. Returns frame count."""
+    and symlink fwd depth as fused_pred/depth.
+
+    Robust guards (v2 -- the v1 midpoint lost rpe_rot on 19/430 outlier
+    scenes despite winning 411): per-frame, if the two rotations disagree by
+    > max_angle_deg or the centers by > max_center_frac x scene extent, keep
+    the FORWARD pose for that frame instead of averaging; per-scene, if the
+    sim3 alignment residual exceeds max_resid_frac x scene extent the whole
+    scene falls back to forward verbatim. Returns (n_frames, n_frame_fallbacks,
+    scene_fell_back)."""
     f_names, f_poses, f_intr = load_cams(os.path.join(fwd_pred, "camera"))
     b_names, b_poses, _ = load_cams(os.path.join(bwd_pred, "camera"))
     if f_names != b_names:
@@ -179,14 +193,31 @@ def fuse_scene(fwd_pred, bwd_pred, fused_pred):
         T[:3, 3] = s * (R @ b_poses[i, :3, 3]) + t
         b_aligned[i] = T
 
+    f_centers = f_poses[:, :3, 3]
+    extent = float(np.sqrt(((f_centers - f_centers.mean(0)) ** 2)
+                           .sum(1).mean())) + 1e-9
+    resid = float(np.sqrt(((b_aligned[:, :3, 3] - f_centers) ** 2)
+                          .sum(1).mean()))
+    scene_fallback = resid > max_resid_frac * extent
+
     cam_out = os.path.join(fused_pred, "camera")
     os.makedirs(cam_out, exist_ok=True)
+    n_fallback = 0
     for i, name in enumerate(f_names):
-        q = slerp(rotmat_to_quat(f_poses[i, :3, :3]),
-                  rotmat_to_quat(b_aligned[i, :3, :3]), 0.5)
-        T = np.eye(4)
-        T[:3, :3] = quat_to_rotmat(q)
-        T[:3, 3] = 0.5 * (f_poses[i, :3, 3] + b_aligned[i, :3, 3])
+        use_fwd = scene_fallback
+        if not use_fwd:
+            ang = rot_angle_deg(f_poses[i, :3, :3], b_aligned[i, :3, :3])
+            dc = float(np.linalg.norm(f_poses[i, :3, 3] - b_aligned[i, :3, 3]))
+            use_fwd = (ang > max_angle_deg) or (dc > max_center_frac * extent)
+        if use_fwd:
+            n_fallback += 1
+            T = f_poses[i].copy()
+        else:
+            q = slerp(rotmat_to_quat(f_poses[i, :3, :3]),
+                      rotmat_to_quat(b_aligned[i, :3, :3]), 0.5)
+            T = np.eye(4)
+            T[:3, :3] = quat_to_rotmat(q)
+            T[:3, 3] = 0.5 * (f_poses[i, :3, 3] + b_aligned[i, :3, 3])
         np.savez(os.path.join(cam_out, name),
                  pose=T.astype(np.float32),
                  intrinsics=f_intr[i].astype(np.float32))
@@ -204,7 +235,7 @@ def fuse_scene(fwd_pred, bwd_pred, fused_pred):
             os.symlink(depth_src, depth_link)
     elif not os.path.exists(depth_link):
         os.symlink(depth_src, depth_link)
-    return len(f_names)
+    return len(f_names), n_fallback, scene_fallback
 
 
 def main():
@@ -260,9 +291,14 @@ def main():
             skipped += 1
             continue
         try:
-            nfr = fuse_scene(os.path.join(fwd_base, scene),
-                             os.path.join(bwd_base, scene),
-                             os.path.join(fused_base, scene))
+            nfr, nfb, sfb = fuse_scene(os.path.join(fwd_base, scene),
+                                       os.path.join(bwd_base, scene),
+                                       os.path.join(fused_base, scene))
+            if sfb or nfb:
+                print(f"{tag} {scene}: "
+                      + ("SCENE fallback to forward"
+                         if sfb else f"{nfb}/{nfr} frame fallbacks"),
+                      flush=True)
             if not args.skip_eval:
                 os.makedirs(eval_dir, exist_ok=True)
                 cmd = [sys.executable, args.eval_script,
