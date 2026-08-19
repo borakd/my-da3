@@ -155,12 +155,15 @@ def loss_of_one_batch_tbptt(
                       f"(seed base {torch.initial_seed()})", flush=True)
             assert views_per_step == 1, \
                 "revisit-train designed for views_per_step=1"
-            assert revisit_k % chunk_size == 0 and revisit_k <= 3 * chunk_size, (
-                f"REVISIT_TRAIN_K={revisit_k}: must be a multiple of "
-                f"chunk_size={chunk_size} and <= {3*chunk_size} so >=1 grad "
-                f"chunk stays forward")
-            assert len(batch) % chunk_size == 0, \
-                "forward views must fill whole chunks"
+            # The loader emits VARIABLE view counts (known TBPTT quirk), so no
+            # divisibility is assumed: a chunk straddling the forward/revisit
+            # boundary is fine (views are processed singly; forward views
+            # write state, copies never do). randperm[:K] self-caps K on
+            # short batches. K<=3*chunk_size keeps >=1 forward grad chunk on
+            # full-length (64-view) batches.
+            assert revisit_k <= 3 * chunk_size, (
+                f"REVISIT_TRAIN_K={revisit_k} > {3*chunk_size}: would leave "
+                f"no forward grad chunk on full-length batches")
             n_fwd = len(batch)
             src_idxs = sorted(torch.randperm(
                 n_fwd, generator=_REVISIT_TRAIN_GEN)[:revisit_k].tolist())
