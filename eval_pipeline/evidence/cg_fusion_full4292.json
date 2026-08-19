@@ -1,0 +1,171 @@
+{
+  "augfull_cg_fuse_g7": {
+    "n_paired": 4292,
+    "metrics": {
+      "absrel": {
+        "n": 4292,
+        "clean_mean": 0.1793835771644282,
+        "gated_mean": 0.17493165544474074,
+        "delta": -0.0044519217196874955,
+        "ci": [
+          -0.005246459973511628,
+          -0.0036610797323511457
+        ],
+        "wins": 2615,
+        "ties": 0,
+        "losses": 1677,
+        "better": true,
+        "significant": true
+      },
+      "a1": {
+        "n": 4292,
+        "clean_mean": 0.786312090261757,
+        "gated_mean": 0.7915296534885856,
+        "delta": 0.0052175632268286615,
+        "ci": [
+          0.003937494244162021,
+          0.006498358851759195
+        ],
+        "wins": 2479,
+        "ties": 0,
+        "losses": 1813,
+        "better": true,
+        "significant": true
+      },
+      "ate": {
+        "n": 4292,
+        "clean_mean": 0.0758688524010949,
+        "gated_mean": 0.06408861023321434,
+        "delta": -0.01178024216788054,
+        "ci": [
+          -0.01255383860000872,
+          -0.010982652601358356
+        ],
+        "wins": 3210,
+        "ties": 0,
+        "losses": 1082,
+        "better": true,
+        "significant": true
+      },
+      "rpe_trans": {
+        "n": 4292,
+        "clean_mean": 0.007941449615563638,
+        "gated_mean": 0.007184350737056622,
+        "delta": -0.0007570988785070141,
+        "ci": [
+          -0.0008047169934733196,
+          -0.000707423612982358
+        ],
+        "wins": 3225,
+        "ties": 0,
+        "losses": 1067,
+        "better": true,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 4292,
+        "clean_mean": 1.100981168197141,
+        "gated_mean": 0.9603940495317532,
+        "delta": -0.140587118665388,
+        "ci": [
+          -0.14935402453095262,
+          -0.1315754994396749
+        ],
+        "wins": 3615,
+        "ties": 0,
+        "losses": 677,
+        "better": true,
+        "significant": true
+      }
+    }
+  },
+  "augfull_cg_g7ema_bwd": {
+    "n_paired": 4292,
+    "metrics": {
+      "absrel": {
+        "n": 4292,
+        "clean_mean": 0.1793835771644282,
+        "gated_mean": 0.17493165544474074,
+        "delta": -0.0044519217196874955,
+        "ci": [
+          -0.005246459973511628,
+          -0.0036610797323511457
+        ],
+        "wins": 2615,
+        "ties": 0,
+        "losses": 1677,
+        "better": true,
+        "significant": true
+      },
+      "a1": {
+        "n": 4292,
+        "clean_mean": 0.786312090261757,
+        "gated_mean": 0.7915296534885856,
+        "delta": 0.0052175632268286615,
+        "ci": [
+          0.003937494244162021,
+          0.006498358851759195
+        ],
+        "wins": 2479,
+        "ties": 0,
+        "losses": 1813,
+        "better": true,
+        "significant": true
+      },
+      "ate": {
+        "n": 4292,
+        "clean_mean": 0.0758688524010949,
+        "gated_mean": 0.06894405285019167,
+        "delta": -0.00692479955090321,
+        "ci": [
+          -0.0077718213938439504,
+          -0.006047556043187354
+        ],
+        "wins": 2587,
+        "ties": 0,
+        "losses": 1705,
+        "better": true,
+        "significant": true
+      },
+      "rpe_trans": {
+        "n": 4292,
+        "clean_mean": 0.007941449615563638,
+        "gated_mean": 0.007873347437990915,
+        "delta": -6.810217757272205e-05,
+        "ci": [
+          -0.00012357808759179054,
+          -1.2035728374658377e-05
+        ],
+        "wins": 2254,
+        "ties": 0,
+        "losses": 2038,
+        "better": true,
+        "significant": true
+      },
+      "rpe_rot": {
+        "n": 4292,
+        "clean_mean": 1.100981168197141,
+        "gated_mean": 1.035824942764885,
+        "delta": -0.06515622543225624,
+        "ci": [
+          -0.07417516537445548,
+          -0.055620652545557835
+        ],
+        "wins": 3001,
+        "ties": 0,
+        "losses": 1291,
+        "better": true,
+        "significant": true
+      }
+    },
+    "telemetry": {
+      "n_scenes_with_telemetry": 4292,
+      "mean_skip_frac": 0.0,
+      "mean_attenuation": 0.11050216368025448,
+      "p50_skip_frac": 0.0,
+      "p90_skip_frac": 0.0,
+      "frac_scenes_any_skip": 0.0,
+      "frac_scenes_skip_gt95": 0.0
+    }
+  }
+}
