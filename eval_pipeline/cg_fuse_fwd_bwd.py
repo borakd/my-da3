@@ -265,6 +265,12 @@ def main():
                     help="split the scene list across parallel invocations")
     ap.add_argument("--limit", type=int, default=0,
                     help="process at most N scenes (smoke test)")
+    ap.add_argument("--max_angle_deg", type=float, default=45.0,
+                    help="scene fallback when p95 fwd/bwd rotation "
+                         "disagreement exceeds this")
+    ap.add_argument("--max_resid_frac", type=float, default=1.0,
+                    help="scene fallback when sim3 residual exceeds this "
+                         "fraction of scene extent")
     ap.add_argument("--skip_eval", action="store_true",
                     help="only write fused preds, do not run the eval script")
     args = ap.parse_args()
@@ -298,7 +304,9 @@ def main():
         try:
             nfr, nfb, sfb = fuse_scene(os.path.join(fwd_base, scene),
                                        os.path.join(bwd_base, scene),
-                                       os.path.join(fused_base, scene))
+                                       os.path.join(fused_base, scene),
+                                       max_angle_deg=args.max_angle_deg,
+                                       max_resid_frac=args.max_resid_frac)
             if sfb or nfb:
                 print(f"{tag} {scene}: "
                       + ("SCENE fallback to forward"
