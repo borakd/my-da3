@@ -174,9 +174,22 @@ def main():
     if args.limit > 0:
         my_scenes = my_scenes[: args.limit]
 
+    # REVERSE=1: feed every scene's frames in reversed temporal order (a
+    # backward pass over the same frames). Input images/intrinsics are
+    # order-independent, but the recurrent memory is not, so poses AND depths
+    # both come out of a different memory trajectory. img_paths is reversed
+    # BEFORE the conditioning builders and the SKIP_FRAMES/REVISIT blocks
+    # (their frame indices then refer to reversed positions); predictions are
+    # un-reversed just before saving, so depth/camera files always land under
+    # the ORIGINAL frame indices (reversed-pass frame j == original N-1-j)
+    # and eval/fusion tooling never needs to know the pass direction.
+    reverse_order = os.environ.get("REVERSE", "").strip() == "1"
+
     tag = f"[{args.label} shard {args.shard_id}/{args.num_shards}]"
     print(f"{tag} {len(my_scenes)} scenes (of {len(all_scenes)} total). "
-          f"device={device} conditioning={args.conditioning}", flush=True)
+          f"device={device} conditioning={args.conditioning}"
+          + (" REVERSE=1 (backward frame order)" if reverse_order else ""),
+          flush=True)
 
     print(f"{tag} loading model from {args.ckpt} ...", flush=True)
     t0 = time.time()
@@ -297,6 +310,8 @@ def main():
             skipped += 1
             _release_claim(claim_path, eval_csv)
             continue
+        if reverse_order:
+            img_paths = img_paths[::-1]
 
         try:
             ts = time.time()
@@ -397,6 +412,15 @@ def main():
                                          if "state_gate_sigs" in p]
                             outputs["pred"] = outputs["pred"][half:]
                             outputs["views"] = outputs["views"][half:]
+                        # Un-reverse predictions so save_depth_camera's
+                        # sequential 000000..N-1 numbering maps back to the
+                        # ORIGINAL frame order (composes after the REVISIT
+                        # halving: the kept pass is still in reversed order).
+                        # Side effect: state_gate.json 'frames' below is then
+                        # in original-index order, not memory-write order.
+                        if reverse_order:
+                            outputs["pred"] = outputs["pred"][::-1]
+                            outputs["views"] = outputs["views"][::-1]
                         nfr = save_depth_camera(
                             outputs, pred_dir, pose_encoding_to_camera,
                             estimate_focal_knowing_depth,

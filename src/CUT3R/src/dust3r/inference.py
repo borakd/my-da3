@@ -5,7 +5,12 @@ from dust3r.utils.misc import invalid_to_nans
 from dust3r.utils.geometry import depthmap_to_pts3d, geotrf
 from dust3r.model import ARCroco3DStereo
 from accelerate import Accelerator
+import os
 import re
+
+# REVISIT-TRAIN sampler RNG: dedicated generator so the global torch stream
+# stays byte-identical to the ungated recipe (data aug / sampler order).
+_REVISIT_TRAIN_GEN = None
 
 
 def custom_sort_key(key):
@@ -133,6 +138,45 @@ def loss_of_one_batch_tbptt(
         shape = [s.detach() for s in shape]
         init_state_feat = init_state_feat.detach()
         init_mem = init_mem.detach()
+        # REVISIT-TRAIN: append K update=False copies of uniformly sampled
+        # earlier frames so hindsight decoding against the frozen whole-scene
+        # state (eval REVISIT=1) is supervised in-distribution. Appended at
+        # the END so the existing last-4-chunks grad rule lands 2 forward +
+        # 2 revisit grad chunks at K=8, keeping exactly 4 optimizer steps.
+        # Encoder feats are duplicated BY INDEX (free, already detached);
+        # copies share GT tensor storage (read-only on this path).
+        revisit_k = int(os.environ.get("REVISIT_TRAIN_K", "0") or 0)
+        if revisit_k > 0:
+            global _REVISIT_TRAIN_GEN
+            if _REVISIT_TRAIN_GEN is None:
+                _REVISIT_TRAIN_GEN = torch.Generator()
+                _REVISIT_TRAIN_GEN.manual_seed(torch.initial_seed() + 0x5EED)
+                print(f"[REVISIT_TRAIN] ACTIVE K={revisit_k} "
+                      f"(seed base {torch.initial_seed()})", flush=True)
+            assert views_per_step == 1, \
+                "revisit-train designed for views_per_step=1"
+            assert revisit_k % chunk_size == 0 and revisit_k <= 3 * chunk_size, (
+                f"REVISIT_TRAIN_K={revisit_k}: must be a multiple of "
+                f"chunk_size={chunk_size} and <= {3*chunk_size} so >=1 grad "
+                f"chunk stays forward")
+            assert len(batch) % chunk_size == 0, \
+                "forward views must fill whole chunks"
+            n_fwd = len(batch)
+            src_idxs = sorted(torch.randperm(
+                n_fwd, generator=_REVISIT_TRAIN_GEN)[:revisit_k].tolist())
+            _B = batch[0]["img_mask"].shape[0]
+            _dev = batch[0]["img_mask"].device
+            batch = list(batch)  # rebind, never mutate the caller's list
+            _upd_false = torch.zeros(_B, dtype=torch.bool, device=_dev)
+            _rst_false = torch.zeros(_B, dtype=torch.bool, device=_dev)
+            for _src in src_idxs:
+                _nv = dict(batch[_src])  # shallow: GT tensors shared
+                _nv["update"] = _upd_false
+                _nv["reset"] = _rst_false
+                batch.append(_nv)
+                feat.append(feat[_src])
+                pos.append(pos[_src])
+                shape.append(shape[_src])
         group_ranges = base_model._group_view_ranges(len(batch))
         num_chunks = (len(group_ranges) - 1) // chunk_groups + 1
         seen_views = 0

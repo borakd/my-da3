@@ -112,6 +112,12 @@ def _state_gate_cfg():
         # Damps single-frame conf flickers so adjacent frames get similar
         # treatment. 0 disables (no smoothing).
         ema=float(os.environ.get("STATE_GATE_EMA", "0") or 0.0),
+        # Gate-SCHEDULED training: at view 0 of each B>1 training batch, draw
+        # Bernoulli(train_prob) deciding whether the WHOLE batch window is
+        # gated or plain. 1.0 (default) = always gated. Consumed ONLY by
+        # _state_gate_batched; the B==1 scalar eval path never reads it.
+        train_prob=float(os.environ.get("STATE_GATE_TRAIN_PROB", "1") or 1.0),
+        train_seed=int(os.environ.get("STATE_GATE_TRAIN_SEED", "0") or 0),
     )
 
 
@@ -2710,6 +2716,39 @@ class ARCroco3DStereo(CroCoNet):
         per group step even with gradient checkpointing on.
         """
         B = update_mask.shape[0]
+        # Gate-scheduled training: per-batch Bernoulli regime draw at view 0.
+        # A dedicated random.Random (never the global torch/np/python streams:
+        # SeqColorJitter and the sampler consume those, and one stray draw
+        # would desync augmentation order vs the parity baseline). Plain
+        # batches take the exact ungated blend and skip all signal compute.
+        if sg_cfg["train_prob"] < 1.0 and self.training:
+            if vi == 0:
+                rng = getattr(self, "_sg_train_rng", None)
+                if rng is None:
+                    import random as _pyrandom
+                    _rank = int(os.environ.get("RANK", "0") or 0)
+                    try:
+                        import torch.distributed as _dist
+                        if _dist.is_available() and _dist.is_initialized():
+                            _rank = _dist.get_rank()
+                    except Exception:
+                        pass
+                    rng = _pyrandom.Random(1000003 * sg_cfg["train_seed"] + _rank)
+                    self._sg_train_rng = rng
+                    print(f"[STATE_GATE] TRAIN_PROB={sg_cfg['train_prob']} "
+                          f"sched rng: rank={_rank} "
+                          f"seed={1000003 * sg_cfg['train_seed'] + _rank}",
+                          flush=True)
+                self._sg_batch_gated = rng.random() < sg_cfg["train_prob"]
+                self._sg_sched_n = getattr(self, "_sg_sched_n", 0) + 1
+                self._sg_sched_g = getattr(self, "_sg_sched_g", 0) + int(self._sg_batch_gated)
+                if self._sg_sched_n % 500 == 0:
+                    print(f"[STATE_GATE] sched mix: {self._sg_sched_g}/"
+                          f"{self._sg_sched_n} gated", flush=True)
+            if not getattr(self, "_sg_batch_gated", True):
+                state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
+                mem = new_mem * update_mask + mem * (1 - update_mask)
+                return state_feat, mem
         conf_self = res_last["conf_self"].detach().float()
         conf_x = res_last.get("conf")
         conf_x = conf_self if conf_x is None else conf_x.detach().float()
