@@ -23,8 +23,8 @@ shift
 GATE_ENV=""
 for kv in "$@"; do
   case "$kv" in
-    STATE_GATE_*=*) GATE_ENV="$GATE_ENV,$kv" ;;
-    *) echo "REFUSING: '$kv' is not a STATE_GATE_* assignment" >&2; exit 1 ;;
+    STATE_GATE_*=*|REVERSE=*|REVISIT=*) GATE_ENV="$GATE_ENV,$kv" ;;
+    *) echo "REFUSING: '$kv' is not a STATE_GATE_*/REVERSE/REVISIT assignment" >&2; exit 1 ;;
   esac
 done
 [ -n "$GATE_ENV" ] || { echo "REFUSING: no STATE_GATE_* vars given" >&2; exit 1; }
