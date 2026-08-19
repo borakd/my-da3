@@ -165,17 +165,21 @@ def rot_angle_deg(Ra, Rb):
 
 
 def fuse_scene(fwd_pred, bwd_pred, fused_pred,
-               max_angle_deg=30.0, max_center_frac=0.25, max_resid_frac=0.5):
+               max_angle_deg=45.0, max_center_frac=0.25, max_resid_frac=1.0):
     """Fuse one scene's fwd+bwd camera trajectories into fused_pred/camera
     and symlink fwd depth as fused_pred/depth.
 
-    Robust guards (v2 -- the v1 midpoint lost rpe_rot on 19/430 outlier
-    scenes despite winning 411): per-frame, if the two rotations disagree by
-    > max_angle_deg or the centers by > max_center_frac x scene extent, keep
-    the FORWARD pose for that frame instead of averaging; per-scene, if the
-    sim3 alignment residual exceeds max_resid_frac x scene extent the whole
-    scene falls back to forward verbatim. Returns (n_frames, n_frame_fallbacks,
-    scene_fell_back)."""
+    v3 guards, ALL-OR-NOTHING per scene: v1's plain midpoint won rpe_rot on
+    411/430 scenes but 19 outliers detonated the mean; v2's per-frame
+    fallback was WORSE — mixing forward poses and midpoint poses inside one
+    trajectory injects relative-pose jumps at every fallback boundary
+    (exactly what RPE measures, evidence/cg_fusion2_430.json). So the
+    decision is per scene: if the p95 per-frame rotation disagreement
+    exceeds max_angle_deg, or the sim3 alignment residual exceeds
+    max_resid_frac x scene extent, the WHOLE scene stays forward; otherwise
+    EVERY frame is midpoint-fused. max_center_frac feeds the p95 center
+    disagreement into the same scene-level decision. Returns (n_frames,
+    n_frame_fallbacks(0|n), scene_fell_back)."""
     f_names, f_poses, f_intr = load_cams(os.path.join(fwd_pred, "camera"))
     b_names, b_poses, _ = load_cams(os.path.join(bwd_pred, "camera"))
     if f_names != b_names:
@@ -198,19 +202,20 @@ def fuse_scene(fwd_pred, bwd_pred, fused_pred,
                            .sum(1).mean())) + 1e-9
     resid = float(np.sqrt(((b_aligned[:, :3, 3] - f_centers) ** 2)
                           .sum(1).mean()))
-    scene_fallback = resid > max_resid_frac * extent
+    angles = np.array([rot_angle_deg(f_poses[i, :3, :3],
+                                     b_aligned[i, :3, :3])
+                       for i in range(len(f_names))])
+    dcent = np.linalg.norm(f_centers - b_aligned[:, :3, 3], axis=1)
+    scene_fallback = (
+        float(np.percentile(angles, 95)) > max_angle_deg
+        or float(np.percentile(dcent, 95)) > max_center_frac * extent * 4.0
+        or resid > max_resid_frac * extent)
 
     cam_out = os.path.join(fused_pred, "camera")
     os.makedirs(cam_out, exist_ok=True)
-    n_fallback = 0
+    n_fallback = len(f_names) if scene_fallback else 0
     for i, name in enumerate(f_names):
-        use_fwd = scene_fallback
-        if not use_fwd:
-            ang = rot_angle_deg(f_poses[i, :3, :3], b_aligned[i, :3, :3])
-            dc = float(np.linalg.norm(f_poses[i, :3, 3] - b_aligned[i, :3, 3]))
-            use_fwd = (ang > max_angle_deg) or (dc > max_center_frac * extent)
-        if use_fwd:
-            n_fallback += 1
+        if scene_fallback:
             T = f_poses[i].copy()
         else:
             q = slerp(rotmat_to_quat(f_poses[i, :3, :3]),
