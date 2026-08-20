@@ -35,6 +35,7 @@ Usage:
 """
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
@@ -164,8 +165,20 @@ def rot_angle_deg(Ra, Rb):
     return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
 
 
+def load_conf_means(pred_dir):
+    """Per-frame conf_mean (signal 0) from a gated pass's state_gate.json,
+    in original frame order; None when absent."""
+    p = os.path.join(pred_dir, "state_gate.json")
+    if not os.path.isfile(p):
+        return None
+    with open(p) as f:
+        d = json.load(f)
+    return np.array([fr[0] for fr in d["frames"]], dtype=float)
+
+
 def fuse_scene(fwd_pred, bwd_pred, fused_pred,
-               max_angle_deg=45.0, max_center_frac=0.25, max_resid_frac=1.0):
+               max_angle_deg=45.0, max_center_frac=0.25, max_resid_frac=1.0,
+               conf_weight_temp=0.0):
     """Fuse one scene's fwd+bwd camera trajectories into fused_pred/camera
     and symlink fwd depth as fused_pred/depth.
 
@@ -211,6 +224,17 @@ def fuse_scene(fwd_pred, bwd_pred, fused_pred,
         or float(np.percentile(dcent, 95)) > max_center_frac * extent * 4.0
         or resid > max_resid_frac * extent)
 
+    # Confidence-weighted blend: t_i = sigmoid((conf_b - conf_f)/temp) pulls
+    # each frame toward whichever pass was more confident there (conf_mean
+    # telemetry, log-space). temp<=0 or missing telemetry => fixed midpoint.
+    w = np.full(len(f_names), 0.5)
+    if conf_weight_temp > 0:
+        cf = load_conf_means(fwd_pred)
+        cb = load_conf_means(bwd_pred)
+        if cf is not None and cb is not None and len(cf) == len(f_names) \
+                and len(cb) == len(f_names):
+            w = 1.0 / (1.0 + np.exp(-(cb - cf) / conf_weight_temp))
+
     cam_out = os.path.join(fused_pred, "camera")
     os.makedirs(cam_out, exist_ok=True)
     n_fallback = len(f_names) if scene_fallback else 0
@@ -219,10 +243,11 @@ def fuse_scene(fwd_pred, bwd_pred, fused_pred,
             T = f_poses[i].copy()
         else:
             q = slerp(rotmat_to_quat(f_poses[i, :3, :3]),
-                      rotmat_to_quat(b_aligned[i, :3, :3]), 0.5)
+                      rotmat_to_quat(b_aligned[i, :3, :3]), float(w[i]))
             T = np.eye(4)
             T[:3, :3] = quat_to_rotmat(q)
-            T[:3, 3] = 0.5 * (f_poses[i, :3, 3] + b_aligned[i, :3, 3])
+            T[:3, 3] = ((1.0 - w[i]) * f_poses[i, :3, 3]
+                        + w[i] * b_aligned[i, :3, 3])
         np.savez(os.path.join(cam_out, name),
                  pose=T.astype(np.float32),
                  intrinsics=f_intr[i].astype(np.float32))
@@ -268,6 +293,9 @@ def main():
     ap.add_argument("--max_angle_deg", type=float, default=45.0,
                     help="scene fallback when p95 fwd/bwd rotation "
                          "disagreement exceeds this")
+    ap.add_argument("--conf_weight_temp", type=float, default=0.0,
+                    help="if >0, per-frame slerp weight from the two passes' "
+                         "conf_mean telemetry (sigmoid temp); 0 = midpoint")
     ap.add_argument("--max_resid_frac", type=float, default=1.0,
                     help="scene fallback when sim3 residual exceeds this "
                          "fraction of scene extent")
@@ -306,7 +334,8 @@ def main():
                                        os.path.join(bwd_base, scene),
                                        os.path.join(fused_base, scene),
                                        max_angle_deg=args.max_angle_deg,
-                                       max_resid_frac=args.max_resid_frac)
+                                       max_resid_frac=args.max_resid_frac,
+                                       conf_weight_temp=args.conf_weight_temp)
             if sfb or nfb:
                 print(f"{tag} {scene}: "
                       + ("SCENE fallback to forward"
