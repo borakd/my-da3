@@ -1,13 +1,15 @@
 # my-da3 — notes for Claude
 
-## Confidence-gate campaign (2026-08-17): WON — see CONF_GATE_CAMPAIGN.md
+## Confidence-gate campaign (2026-08-17→20): CLOSED, ALL-5 SWEEP — see CONF_GATE_CAMPAIGN.md
 
-Inference-time confidence-gated memory writes (STATE_GATE_* hook in
-src/CUT3R/src/dust3r/model.py) beat augfull_lr1e5 on absrel/a1/ATE
-(all significant) on the full 4292 harness with rpe_rot statistically flat.
-Winner config + full ledger in CONF_GATE_CAMPAIGN.md; gate arms for the full
-harness MUST launch via eval_pipeline/cg_launch_full.sh (arm_eval_for_run.sh
-strips STATE_GATE_* by design).
+GRAND CHAMPION augfull_cg_fuse_g7: confidence-gated (STATE_GATE g7ema)
+forward × backward passes fused per scene (cg_fuse_fwd_bwd.py) beats
+augfull_lr1e5 on ALL FIVE metrics significantly on the full 4292 harness
+(ATE −15.5%, rot −12.8%); zero training, 2× inference. Training-side gate
+variants (constant/scheduled/revisit) are all measured-dead. Gate/REVERSE/
+REVISIT arms MUST launch via eval_pipeline/cg_launch_full.sh
+(arm_eval_for_run.sh strips those envs by design). NEVER purge
+augfull_cg_g7ema_bwd/preds — augfull_cg_fuse_g7 depth symlinks into it.
 
 ## GRU v4 campaign (2026-08-13→15): read before any GRU/conditioning work
 

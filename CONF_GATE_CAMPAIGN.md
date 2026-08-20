@@ -290,6 +290,44 @@ All three launched after design workflow + adversarial-derived specs + smokes:
   original indices) + cg_fuse_fwd_bwd.py (sim3 align bwd→fwd, slerp/midpoint
   fuse, forward depth). diag_cg_bwd running; fusion after.
 
+## PHASE 3 FINAL STANDINGS (2026-08-20) — exploration closed
+
+**GRAND CHAMPION: augfull_cg_fuse_g7** — confidence-gated forward pass ×
+confidence-gated backward pass, sim3-aligned, all-or-nothing per-scene
+midpoint fusion (guards 75°/1.5, base = gated backward). Full 4292, all
+five metrics significantly better than augfull_lr1e5:
+| | absrel | a1 | ate | rpe_trans | rpe_rot |
+|---|---|---|---|---|---|
+| baseline | .179384 | .786312 | .075869 | .007941 | 1.100981 |
+| **fuse_g7** | **.174932*** | **.791530*** | **.064089*** | **.007184*** | **.960394*** |
+| Δ rel | −2.5% | +0.7% | −15.5% | −9.5% | −12.8% |
+| scene wins | 61% | 58% | 75% | 75% | 84% |
+Cost: 2× inference + CPU fusion; zero training. Notably absrel/a1 also beat
+the GT-fed gtray topline (.1886/.7866). Runner-up: augfull_cg_g7ema_bwd
+(single gated-backward pass) — 5/5 better, 4 significant.
+
+### Phase-3 verdict ledger
+- BACKWARD PASS (diag_cg_bwd): beats clean on all 5 alone — reversed frame
+  order is a strictly better single pass on DROID (rot −.070*, 311/119).
+- FUSION mechanism lessons (triple-confirmed): any PER-FRAME variation in
+  the fusion rule (v2 fallbacks, conf-weighted slerp fuse7w) re-injects
+  trajectory jitter and detonates rpe_rot; ALL-OR-NOTHING per scene with
+  fixed midpoint is optimal. Guard loosening plateaus at ~75-100°.
+- REVISIT-TRAINED (44812852): FAILED both corners — plain eval worse on
+  all 5 (rot +.384*), hindsight still catastrophic (rot +2.39, unchanged
+  from untrained). 8/72-view hindsight supervision taught nothing and
+  stole causal supervision. Family closed.
+- GATE-SCHEDULED p=0.5 (44812853): FAILED pre-registered bars — both-corner
+  mediocrity (gated corner ATE −.0025* < champion; plain corner depth
+  sig-worse). Family closed: training-side interventions (constant gate,
+  scheduled gate, revisit-train) ALL lose to the eval-side stack.
+- Conf-weighted fusion (fuse7w): ATE holds, rot flips to +.120* — killed.
+- W&B: all three 32-GPU finetunes synced (g7ema, revisit8, cgsched_p50).
+- Solution space judged EXHAUSTED at this rung: signals {conf ✓, dstate,
+  GT-error ✗, trajectory ✗}, mechanisms {hard/soft/EMA/cap/rel/scene-τ/
+  oracle-mask/revisit-inference/fwd-bwd-fusion/conf-weighted}, training
+  {constant/scheduled/revisit} — every cell measured, winner promoted.
+
 ### Why this worked where the GRU could not (one paragraph)
 The GRU campaign died because drift is unobservable from trajectory-only
 inputs. This gate never estimates drift: it only needs to detect frame
