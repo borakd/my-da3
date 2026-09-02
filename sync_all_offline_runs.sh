@@ -25,7 +25,7 @@ set -o pipefail
 INTERVAL=${1:?usage: sync_all_offline_runs.sh <interval_s> <jobid>:<dir> ...}
 shift
 SYNC_TIMEOUT=${SYNC_TIMEOUT:-1800}
-LOG=${SYNC_ALL_LOG:-/gpfs/projects/etur59/koc821022/checkpoints/sync_all.log}
+LOG=${SYNC_ALL_LOG:-/gpfs/scratch/etur59/koc821022/checkpoints/sync_all.log}
 
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything

@@ -18,7 +18,7 @@ assert os.path.isfile(
 # A keep_freq snapshot, NOT checkpoint-last/best: those are rewritten every
 # epoch by the live training job and torch.load races the writer.
 CKPT = (
-    "/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_sim3rmse/"
+    "/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_sim3rmse/"
     "captain_gru_v2/checkpoint-10.pth"
 )
 BASE_CKPT = os.path.join(WT, "src", "CUT3R", "src", "cut3r_512_dpt_4_64.pth")

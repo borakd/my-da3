@@ -7,6 +7,10 @@ For each setup (best/final/regular):
   - collect per-scene metrics -> per_scene_<label>.csv
   - average (nanmean) each metric across all scenes
 Emit averages_table.{csv,md,txt} comparing the setups.
+
+A label whose tree also carries <label>/eval_gru (written by the prev_pred_gru
+worker: the GRU-refined pose scored by the identical eval script) automatically
+gets a second row "<label>_gru", aggregated with exactly the same math.
 """
 import argparse
 import csv
@@ -97,6 +101,14 @@ def main():
         res = aggregate_setup(label, eval_base, summary_dir, scene_list)
         results.append(res)
         print(f"{label}: aggregated {res['n_scenes']} scenes")
+        # GRU-refined pose trajectory of the same run (prev_pred_gru arms):
+        # scored per scene by the identical eval script into <label>/eval_gru,
+        # aggregated here with the identical math as a companion row.
+        gru_base = os.path.join(args.out_root, label, "eval_gru")
+        if os.path.isdir(gru_base):
+            gres = aggregate_setup(f"{label}_gru", gru_base, summary_dir, scene_list)
+            results.append(gres)
+            print(f"{label}_gru: aggregated {gres['n_scenes']} scenes")
 
     nice = {
         "absrel": "AbsRel (depth, lower better)",

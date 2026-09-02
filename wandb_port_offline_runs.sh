@@ -43,7 +43,7 @@
 # ---------------------------------------------------------------------------
 set -eo pipefail
 
-CKPT_ROOT=${CKPT_ROOT:-/gpfs/projects/etur59/koc821022/checkpoints}
+CKPT_ROOT=${CKPT_ROOT:-/gpfs/scratch/etur59/koc821022/checkpoints}
 DRY=0
 NO_MEDIA=0
 ARGS=()
