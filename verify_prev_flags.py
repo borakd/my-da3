@@ -19,7 +19,7 @@ with a PASS/FAIL table and a non-zero exit code if anything failed.
 
 Run (from anywhere; conda env `cuteanything`):
 
-  cd /gpfs/home/koc/koc821022/my-da3
+  cd /gpfs/home/koc/koc821022/vggt_features
   export PYTHONPATH="$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src:$PYTHONPATH"
   export DL3DV_CACHE_DIR=/gpfs/scratch/etur59/koc821022/.dl3dv_cache
   python verify_prev_flags.py

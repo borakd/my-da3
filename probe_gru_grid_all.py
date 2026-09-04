@@ -49,7 +49,7 @@ from torch.utils.data._utils.collate import default_collate  # noqa: E402
 CKPT_ROOT = os.environ.get(
     "GRID_CKPT_ROOT",
     os.path.join(
-        os.environ.get("CKPT_ROOT", "/gpfs/projects/etur59/koc821022/checkpoints"),
+        os.environ.get("CKPT_ROOT", "/gpfs/scratch/etur59/koc821022/checkpoints_projects"),
         "captain_cut3r_sim3rmse",
     ),
 )

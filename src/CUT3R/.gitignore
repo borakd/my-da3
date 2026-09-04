@@ -51,5 +51,7 @@ docs/_build/
 
 # Ignore data and ckpts
 *.pth
+# Worktree-local symlink/dir of encoder weights (dinov2/resnet); never commit.
+src/pretrained_encoders
 data
 src/checkpoints

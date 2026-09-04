@@ -27,10 +27,10 @@
 # picks up where it left off instead of re-submitting.
 set -o pipefail
 
-WT=${WT:-/gpfs/home/koc/koc821022/my-da3}
+WT=${WT:-/gpfs/home/koc/koc821022/vggt_features}
 export OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 OUT=$OUT_ROOT/cut3r_eval
-CR=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full
+CR=/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full
 STATE=$OUT/armed
 POLL=${POLL:-300}
 CKPT_GRACE=${CKPT_GRACE:-1800}   # seconds to wait for the final ckpt after job exit

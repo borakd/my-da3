@@ -48,7 +48,7 @@ keep_freq: 0
 print_freq: 10
 print_img_freq: 50000000
 num_imgs_vis: 4
-save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/overfit'
+save_dir: '/gpfs/scratch/etur59/koc821022/checkpoints/overfit'
 exp_name: 'overfit_single_scene_v1'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs

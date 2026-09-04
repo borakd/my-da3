@@ -32,8 +32,11 @@
                              # unavailable). Memory is derived at 8G/core -> 640G. Never add --mem.
 #SBATCH --time=24:00:00
 #SBATCH --job-name=cray_eval
-#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.out
-#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.err
+# Fallback only -- every caller passes explicit --output/--error, which override
+# these. Repointed off the dead /gpfs/projects root (2026-08-14 storage move);
+# it survived that long only because nothing ever fell through to it.
+#SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.out
+#SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_cray_%j.err
 
 # Source the conda hook directly so the job never depends on an interactive shell rc.
 # No 'set -u' (MKL activation scripts read unset vars).
@@ -58,6 +61,9 @@ CLAIM_DIR=$OUT/$LABEL/claims
 BASE_SHARD=${BASE_SHARD:-0}
 NUM_SHARDS=${NUM_SHARDS:-12}
 LIMIT=${LIMIT:-0}
+# DIAGNOSTIC only (mirrors the worker's --oracle): ORACLE=gt feeds the GRU the
+# current view's GT pose. Requires CONDITIONING=prev_pred_gru; never an arm.
+ORACLE=${ORACLE:-off}
 
 [ -n "$CKPT" ] || { echo "ERROR: CKPT is required, e.g. CKPT=\$CKPT_ROOT/captain_cut3r_finetune_aug_full/<run>/checkpoint-final.pth" >&2; exit 1; }
 mn5_require f "$CKPT" f "$EVAL_SCRIPT" d "$SCENES_ROOT" s "$SCENE_LIST"
@@ -69,7 +75,7 @@ mkdir -p "$OUT/logs" "$CLAIM_DIR"
 
 NUM_GPUS=$(mn5_require_gpus) || exit 1
 echo "Node: $(hostname)  GPUs visible: $NUM_GPUS  BASE_SHARD=$BASE_SHARD  NUM_SHARDS=$NUM_SHARDS  LIMIT=$LIMIT"
-echo "Ckpt: $CKPT  conditioning=$CONDITIONING  label=$LABEL"
+echo "Ckpt: $CKPT  conditioning=$CONDITIONING  oracle=$ORACLE  label=$LABEL"
 echo "Scenes: $(wc -l < "$SCENE_LIST")   Start: $(date)"
 
 # One worker process per GPU; all share the cooperative claim queue.
@@ -80,7 +86,7 @@ for g in $(seq 0 $((NUM_GPUS - 1))); do
     echo "[$(hostname) g$g shard$SHARD] starting at $(date)"
     python "$CRAY/eval_pipeline/infer_and_eval_worker_ray.py" \
       --ckpt "$CKPT" --label "$LABEL" --size 320 \
-      --conditioning "$CONDITIONING" \
+      --conditioning "$CONDITIONING" --oracle "$ORACLE" \
       --scenes_root "$SCENES_ROOT" --scene_list "$SCENE_LIST" \
       --pred_base "$OUT/$LABEL/preds" --eval_base "$OUT/$LABEL/eval" \
       --eval_script "$EVAL_SCRIPT" --cut3r_dir "$CUT3R_DIR" \

@@ -798,7 +798,7 @@ run dirs.
    unlearnable until this lands, so doing it first changes how the rest
    should be tuned.
 0b. **Rung 0 before any GPU-hours**: `bash eval_pipeline/arm_eval_for_run.sh
-   /gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_oracle_finetune_32gpu
+   /gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full/captain_gru_v3_a4_g3_oracle_finetune_32gpu
    gru_a4g3oracle`. Zero training, and it converts "the oracle recovers
    83–93%" from a 50-scene claim into a full-benchmark bound. If the oracle
    turns out NOT to dominate at 4292 scenes, the §4 observability program
@@ -844,7 +844,7 @@ call-site region on 2026-08-11 *while this directive was being written*, so
 treat every `file:line` here as a hint and the SYMBOL as the truth.
 
 ```
-cd /gpfs/home/koc/koc821022/my-da3
+cd /gpfs/home/koc/koc821022/vggt_features
 python verify_plan_anchors.py          # 0 = all anchors exact; 1 = drift/unresolved
 python verify_plan_anchors.py --fix-doc   # rewrite stale numbers into this file
 ```
@@ -866,7 +866,7 @@ region before editing, never edit blind.
 - **Finished but NEVER scored at 4292 scenes**:
   `captain_gru_v3_a4_g3_oracle_finetune_32gpu` (idle since 08-07). Rung 0.
 - **Baselines A/B/C live in
-  `/gpfs/projects/etur59/koc821022/checkpoints/cut3r_finetune_baselines/`**
+  `/gpfs/scratch/etur59/koc821022/checkpoints_projects/cut3r_finetune_baselines/`**
   as `cut3r_finetune_aug_full{,_gtray,_prevpred}_32gpu_lr1e5`. NOTE:
   `checkpoints/cut3r_multinode/` — the 64-GPU b2_lr1e5 family — **has been
   deleted**, though 15 configs under `src/CUT3R/config/` still reference that

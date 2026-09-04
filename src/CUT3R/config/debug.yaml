@@ -2,7 +2,7 @@ model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, 
 # Load and freeze the pretrained encoder, nothing else.
 # This mimics the behavior of having a pretrained encoder, such as in the case of the DA3 encder substitution,
 # whilst enabling me to verify what CUT3R outputs look like after overfitting to a single robomimic scene.
-pretrained: /gpfs/home/koc/koc821022/my-da3/src/CUT3R/src/cut3r_512_dpt_4_64.pth
+pretrained: /gpfs/home/koc/koc821022/vggt_features/src/CUT3R/src/cut3r_512_dpt_4_64.pth
 load_only_encoder: True
 long_context: False
 fixed_length: True
@@ -55,7 +55,7 @@ keep_freq: 50
 print_freq: 10
 print_img_freq: 10
 num_imgs_vis: 4
-save_dir: '/gpfs/projects/etur59/koc821022/checkpoints/dist_test'
+save_dir: '/gpfs/scratch/etur59/koc821022/checkpoints/dist_test'
 exp_name: 'debug_cut3r_mvu_overfit_lift'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs

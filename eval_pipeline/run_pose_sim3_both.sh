@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --time=6:00:00
 #SBATCH --job-name=sim3_both
-#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_sim3both_%j.out
-#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_sim3both_%j.err
+#SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_sim3both_%j.out
+#SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_sim3both_%j.err
 
 set -o pipefail
 # --- self-locating worktree -------------------------------------------------

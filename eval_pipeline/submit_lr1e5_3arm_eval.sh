@@ -23,10 +23,12 @@
 #         (no args = all three arms)
 set -o pipefail
 
-WT=/gpfs/home/koc/koc821022/my-da3
+WT=${WT:-/gpfs/home/koc/koc821022/vggt_features}
 export OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs
 OUT=$OUT_ROOT/cut3r_eval
-CKPT_ROOT=/gpfs/projects/etur59/koc821022/checkpoints/cut3r_multinode
+# cut3r_multinode was deleted 2026-08-09..11; the same-named baseline run dirs
+# live in cut3r_finetune_baselines (moved to checkpoints_projects 2026-08-14).
+CKPT_ROOT=/gpfs/scratch/etur59/koc821022/checkpoints_projects/cut3r_finetune_baselines
 
 # Falsifier env vars silently contaminate a scoring run and nothing logs it.
 unset PREV_PRED_RAY_SHUFFLE GT_RAY_MAP_SHUFFLE \

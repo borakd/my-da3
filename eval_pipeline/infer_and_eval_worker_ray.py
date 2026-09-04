@@ -15,7 +15,16 @@ prepare_input:
      depth/camera demo_ray.py's prepare_output writes (conf/color are skipped).
   3. Run eval_depth_poses.py (all default args) comparing pred vs <scene>/dense GT.
 
-Resumable: a scene whose eval CSV already exists (non-empty) is skipped.
+Under --conditioning prev_pred_gru a SECOND pose trajectory is scored with the
+byte-for-byte same eval script and arguments: the GRU-refined pose res["gru_pose"]
+(previous predicted pose + the GRU's residual, quaternion renormalized) — exactly
+the tensor the decoder rendered into each view's conditioning ray map. It is
+written to <pred_base>_gru/<scene>/camera (depth symlinked from the regular
+prediction) and evaluated into <eval_base>_gru/<scene>/, so the regular eval
+tree and everything watching it are untouched.
+
+Resumable: a scene is skipped once its eval CSV exists (non-empty) — under
+prev_pred_gru, once BOTH the regular and the GRU eval CSVs exist.
 """
 import os
 # Reduce CUDA fragmentation OOMs on very long sequences (read before torch init).
@@ -34,9 +43,14 @@ import numpy as np
 import torch
 
 
-def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_knowing_depth):
+def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_knowing_depth,
+                      gru_outdir=None):
     """Replicates the depth + camera saving of demo_ray.py:prepare_output (revisit=1),
-    writing ONLY depth/ and camera/ (skips conf/ and color/)."""
+    writing ONLY depth/ and camera/ (skips conf/ and color/).
+
+    gru_outdir, when set, additionally writes the GRU-refined pose trajectory as a
+    parallel prediction root (camera/ npz files + a depth/ symlink) so the SAME
+    eval script can score it with unchanged code and arguments."""
     preds = outputs["pred"]
 
     pts3ds_self = torch.cat([p["pts3d_in_self_view"].cpu() for p in preds], 0)  # B,H,W,3
@@ -66,20 +80,83 @@ def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_k
             pose=cam2world[i].cpu().numpy(),
             intrinsics=intrinsics[i].cpu().numpy(),
         )
+
+    if gru_outdir is not None:
+        # GRU-refined trajectory (A4 closed loop): for every view x >= 1 the pose
+        # saved here is EXACTLY the tensor the decoder rendered into view x's
+        # conditioning ray map — the previous predicted pose P(x-1) plus the
+        # GRU's residual, quaternion renormalized (res["gru_pose"] stashed in
+        # _forward_decoder_group_step right where prev_pose_enc is replaced).
+        # View 0 has no GRU output (nothing precedes it); the head's own view-0
+        # pose anchors the trajectory — the same anchor the closed loop itself
+        # starts from, and identical to frame 0 of the regular eval.
+        missing = [i for i, p in enumerate(preds[1:], start=1) if "gru_pose" not in p]
+        assert not missing, (
+            f"GRU eval requested but views {missing[:5]} carry no 'gru_pose' — "
+            "is the PoseGRU active (conditioning=prev_pred_gru)?"
+        )
+        gru_cam2world = torch.cat(
+            [cam2world[:1]]
+            + [pose_encoding_to_camera(p["gru_pose"].clone().float()).cpu()
+               for p in preds[1:]]
+        )
+        gru_cam_dir = os.path.join(gru_outdir, "camera")
+        os.makedirs(gru_cam_dir, exist_ok=True)
+        for i in range(B):
+            np.savez(
+                os.path.join(gru_cam_dir, f"{i:06d}.npz"),
+                pose=gru_cam2world[i].cpu().numpy(),
+                intrinsics=intrinsics[i].cpu().numpy(),
+            )
+        # The GRU changes no depth; a relative symlink to the regular depth dir
+        # keeps the eval script's inputs shaped identically without duplicating
+        # the per-scene depth predictions.
+        gru_depth = os.path.join(gru_outdir, "depth")
+        if not os.path.lexists(gru_depth):
+            os.symlink(os.path.relpath(depth_dir, gru_outdir), gru_depth)
     return B
 
 
-def _release_claim(claim_path, eval_csv):
+def _csv_done(path):
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def _release_claim(claim_path, eval_csvs):
     """Remove a cooperative claim so the scene can be retried by another worker,
-    unless it actually completed (a non-empty eval CSV exists)."""
+    unless it actually completed (ALL required eval CSVs exist non-empty)."""
     if not claim_path:
         return
-    if os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0:
+    if all(_csv_done(p) for p in eval_csvs):
         return
     try:
         os.rmdir(claim_path)
     except OSError:
         pass
+
+
+def _run_eval(eval_script, pred_root, gt_root, out_csv):
+    """Run the vendored eval script (default args — identical math for every
+    trajectory it is pointed at) and raise unless it produced a non-empty CSV.
+
+    The CSV is written to a per-pid temp name and atomically renamed into
+    place: the skip/claim logic treats a non-empty CSV as 'done', so a
+    half-written file (or two workers racing in the narrow backfill window)
+    must never be observable at the final path."""
+    tmp_csv = f"{out_csv}.tmp.{os.getpid()}"
+    cmd = [
+        sys.executable, eval_script,
+        "--pred_root", pred_root,
+        "--gt_root", gt_root,
+        "--output_csv", tmp_csv,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not _csv_done(tmp_csv):
+        try:
+            os.remove(tmp_csv)
+        except OSError:
+            pass
+        raise RuntimeError(f"eval failed rc={r.returncode}: {r.stderr[-500:]}")
+    os.replace(tmp_csv, out_csv)
 
 
 def main():
@@ -252,6 +329,16 @@ def main():
     fail_log = os.path.join(args.eval_base, f"_failures_shard{args.shard_id}.txt")
     os.makedirs(args.eval_base, exist_ok=True)
 
+    # Second scored trajectory under the GRU arm: the pose fed into the ray map
+    # (prev pred + GRU residual), evaluated with the byte-for-byte same script
+    # and args into a parallel tree that leaves <label>/eval untouched.
+    gru_mode = args.conditioning == "prev_pred_gru"
+    gru_pred_base = args.pred_base.rstrip("/") + "_gru"
+    gru_eval_base = args.eval_base.rstrip("/") + "_gru"
+    if gru_mode:
+        print(f"{tag} GRU-pose eval active: preds -> {gru_pred_base}, "
+              f"evals -> {gru_eval_base}", flush=True)
+
     done = 0
     skipped = 0
     failed = 0
@@ -260,7 +347,15 @@ def main():
         claim_path = None
         eval_dir = os.path.join(args.eval_base, scene)
         eval_csv = os.path.join(eval_dir, "eval_depth_pose_metrics.csv")
-        if os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0:
+        gru_pred_dir = os.path.join(gru_pred_base, scene) if gru_mode else None
+        gru_eval_csv = (
+            os.path.join(gru_eval_base, scene, "eval_depth_pose_metrics.csv")
+            if gru_mode else None
+        )
+        req_csvs = [eval_csv] + ([gru_eval_csv] if gru_mode else [])
+        reg_done = _csv_done(eval_csv)
+        gru_done = (not gru_mode) or _csv_done(gru_eval_csv)
+        if reg_done and gru_done:
             skipped += 1
             continue
 
@@ -268,7 +363,14 @@ def main():
         # don't process it twice. mkdir is atomic on POSIX; FileExistsError means
         # another worker already owns it (in-progress or done).
         if args.claim_dir:
-            claim_path = os.path.join(args.claim_dir, scene)
+            # A completed scene keeps its claim forever, so a GRU backfill pass
+            # over a label evaluated BEFORE the GRU eval existed would find
+            # every scene claimed and silently do nothing. Backfill work
+            # (regular CSV done, only the gru CSV missing) therefore claims
+            # under a separate name — still one atomic mkdir per scene per
+            # kind of work, and the full pass's claim never blocks it.
+            claim_name = scene + ".gru" if reg_done else scene
+            claim_path = os.path.join(args.claim_dir, claim_name)
             try:
                 os.mkdir(claim_path)
             except FileExistsError:
@@ -283,71 +385,100 @@ def main():
                            glob.glob(os.path.join(rgb_dir, "*.jpg")))
         if len(img_paths) < 2:
             skipped += 1
-            _release_claim(claim_path, eval_csv)
+            _release_claim(claim_path, req_csvs)
             continue
 
         try:
             ts = time.time()
-            # Run inference with one OOM retry (after a cache clear) for very long
-            # sequences; silence per-frame prints.
+            # Backfill fast path: the regular eval already completed and the GRU
+            # camera trajectory was fully written by the pass that produced it —
+            # only the GRU eval subprocess is missing. Completeness is judged
+            # against the regular camera dir written by the same save call;
+            # anything short (or already cleaned up) re-runs inference.
+            need_infer = not reg_done
             nfr = None
-            last_exc = None
-            for attempt in range(2):
-                outputs = state_args = views = None
-                images = ray_maps = intrinsics_list = gt_poses = None
-                try:
-                    with open(os.devnull, "w") as _dn, contextlib.redirect_stdout(_dn):
-                        if args.conditioning == "none":
-                            views = demo_ray.prepare_input_none(img_paths, args.size)
-                        else:
-                            images, ray_maps, intrinsics_list, gt_poses = (
-                                demo_ray.load_frames_training_style(
-                                    img_paths, cam_dir, args.size))
-                            views = demo_ray.prepare_input(
-                                images=images,
-                                ray_maps=ray_maps,
-                                intrinsics_list=intrinsics_list,
-                                # Real GT camera_pose in the views: required by
-                                # --oracle gt, inert data for honest arms.
-                                gt_poses=gt_poses,
-                                # prev_pred_gru builds views exactly like
-                                # prev_pred (no data-side rays); the GRU acts
-                                # inside the decoder step, not in the inputs.
-                                conditioning=(
-                                    "prev_pred"
-                                    if args.conditioning == "prev_pred_gru"
-                                    else args.conditioning
-                                ),
+            if gru_mode and not gru_done and not need_infer:
+                n_reg_cam = len(glob.glob(os.path.join(pred_dir, "camera", "*.npz")))
+                n_gru_cam = len(glob.glob(os.path.join(gru_pred_dir, "camera", "*.npz")))
+                if n_reg_cam >= 2 and n_gru_cam == n_reg_cam:
+                    nfr = n_reg_cam
+                else:
+                    need_infer = True
+            if need_infer:
+                # Run inference with one OOM retry (after a cache clear) for very
+                # long sequences; silence per-frame prints.
+                last_exc = None
+                for attempt in range(2):
+                    outputs = state_args = views = None
+                    images = ray_maps = intrinsics_list = gt_poses = None
+                    try:
+                        with open(os.devnull, "w") as _dn, contextlib.redirect_stdout(_dn):
+                            if args.conditioning == "none":
+                                views = demo_ray.prepare_input_none(img_paths, args.size)
+                            else:
+                                images, ray_maps, intrinsics_list, gt_poses = (
+                                    demo_ray.load_frames_training_style(
+                                        img_paths, cam_dir, args.size))
+                                views = demo_ray.prepare_input(
+                                    images=images,
+                                    ray_maps=ray_maps,
+                                    intrinsics_list=intrinsics_list,
+                                    # Real GT camera_pose in the views: required by
+                                    # --oracle gt, inert data for honest arms.
+                                    gt_poses=gt_poses,
+                                    # prev_pred_gru builds views exactly like
+                                    # prev_pred (no data-side rays); the GRU acts
+                                    # inside the decoder step, not in the inputs.
+                                    conditioning=(
+                                        "prev_pred"
+                                        if args.conditioning == "prev_pred_gru"
+                                        else args.conditioning
+                                    ),
+                                )
+                            with torch.no_grad():
+                                outputs, state_args = inference(views, model, device)
+                            nfr = save_depth_camera(
+                                outputs, pred_dir, pose_encoding_to_camera,
+                                estimate_focal_knowing_depth,
+                                gru_outdir=gru_pred_dir if gru_mode else None,
                             )
-                        with torch.no_grad():
-                            outputs, state_args = inference(views, model, device)
-                        nfr = save_depth_camera(
-                            outputs, pred_dir, pose_encoding_to_camera,
-                            estimate_focal_knowing_depth,
-                        )
-                    break
-                except torch.cuda.OutOfMemoryError as oom:
-                    last_exc = oom
-                    print(f"{tag} OOM on {scene} (frames={len(img_paths)}) "
-                          f"attempt {attempt+1}/2", flush=True)
-                finally:
-                    del outputs, state_args, views, images, ray_maps, intrinsics_list, gt_poses
-                    gc.collect()
-                    if device.startswith("cuda"):
-                        torch.cuda.empty_cache()
-            if nfr is None:
-                raise last_exc if last_exc is not None else RuntimeError("no output")
+                        break
+                    except torch.cuda.OutOfMemoryError as oom:
+                        last_exc = oom
+                        print(f"{tag} OOM on {scene} (frames={len(img_paths)}) "
+                              f"attempt {attempt+1}/2", flush=True)
+                    finally:
+                        del outputs, state_args, views, images, ray_maps, intrinsics_list, gt_poses
+                        gc.collect()
+                        if device.startswith("cuda"):
+                            torch.cuda.empty_cache()
+                if nfr is None:
+                    raise last_exc if last_exc is not None else RuntimeError("no output")
+                # Inference just OVERWROTE both prediction trees with a fresh
+                # rollout — any pre-existing CSV describes a different rollout
+                # than its sibling. Remove stale CSVs NOW (not merely re-score
+                # below): if a re-score fails or the worker dies before it, a
+                # retry must see the scene as unscored, or its fast path would
+                # pair the old CSV with the new trajectory forever.
+                for stale in ([eval_csv] if reg_done else []) + (
+                    [gru_eval_csv] if (gru_mode and gru_done) else []
+                ):
+                    try:
+                        os.remove(stale)
+                    except FileNotFoundError:
+                        pass
+                reg_done = False
+                gru_done = not gru_mode
 
             os.makedirs(eval_dir, exist_ok=True)
-            cmd = [
-                sys.executable, args.eval_script,
-                "--pred_root", pred_dir,
-                "--gt_root", gt_dense,
-                "--output_csv", eval_csv,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0 or not (os.path.isfile(eval_csv) and os.path.getsize(eval_csv) > 0):
-                raise RuntimeError(f"eval failed rc={r.returncode}: {r.stderr[-500:]}")
+            if not reg_done:
+                _run_eval(args.eval_script, pred_dir, gt_dense, eval_csv)
+            if gru_mode and not gru_done:
+                # EXACT same eval invocation as the regular pass — only the
+                # prediction root (GRU camera trajectory) and the output CSV
+                # differ, so the pose math is identical by construction.
+                os.makedirs(os.path.dirname(gru_eval_csv), exist_ok=True)
+                _run_eval(args.eval_script, gru_pred_dir, gt_dense, gru_eval_csv)
 
             done += 1
             dt = time.time() - ts
@@ -366,7 +497,7 @@ def main():
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
             # Release the claim so another worker (or a later sweep) can retry.
-            _release_claim(claim_path, eval_csv)
+            _release_claim(claim_path, req_csvs)
 
     print(f"{tag} DONE done={done} skipped={skipped} failed={failed} "
           f"elapsed={(time.time()-t_start)/3600:.2f}h", flush=True)

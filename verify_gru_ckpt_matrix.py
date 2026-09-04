@@ -40,7 +40,7 @@ assert os.path.isfile(
 ), f"not a my-da3 checkout: {WORKTREE}"
 CUT3R_DIR = os.path.join(WORKTREE, "src", "CUT3R")
 # MN5: checkpoints live on gpfs_projects (scratch group quota is ~97% full).
-CKPT_ROOT = os.environ.get("CKPT_ROOT", "/gpfs/projects/etur59/koc821022/checkpoints")
+CKPT_ROOT = os.environ.get("CKPT_ROOT", "/gpfs/scratch/etur59/koc821022/checkpoints_projects")
 # The overfit episode the falsifier runs a few real frames through. The old
 # /frozen layout nested it one level deeper (<episode>/13062452+wrist/dense);
 # the MN5 copy puts dense/ directly under the episode. Keep in step with

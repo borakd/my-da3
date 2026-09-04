@@ -1,20 +1,25 @@
 # ============================================================================
-# captain_gru_v3_a4_g3_f1_noproj_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
-# FULL-DATASET finetune: A4 x G3 x F1-RAW x R1 -- two-frame image features,
-# NO projection: the 2x1024-D LayerNormed pooled features of the current view t
-# AND the previous view t-1 go straight into the GRUCell.
+# captain_gru_v3_a4_g1_f1_noproj_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
+# FULL-DATASET finetune: A4 x G1 x F1-RAW x R1 -- two-frame image features,
+# NO projection, AUX-LOSS-ONLY gradient (no e2e path).
 # ----------------------------------------------------------------------------
-# NAMING. "f1" = img_feat_frames=2 (current + previous view), the same frame
-# arm as captain_gru_v3_a4_g3_f1_finetune -- the ONLY difference vs that config
-# is pose_gru_img_feat_proj: False (no 32-D bottleneck). See the PoseGRU
-# docstring convention at model.py:455-462.
+# The G1 sibling of captain_gru_v3_a4_g3_f1_noproj_finetune.yaml: body verified
+# byte-identical to that arm except pose_gru_e2e: False, exp_name, and this
+# header -- a single-variable change that prices the e2e gradient path under
+# raw two-frame image features. (In lever-grid shorthand: a4_g1_f1_r1_noproj.)
 #
-# LEVERS: A4, G3, R1 byte-identical to captain_gru_v3_a4_g3_f1_finetune.yaml
-# (see that header for the full A/G/R documentation, the zero-init-head
-# bootstrap warning, the TBPTT gradient window, and the pose_gru_lr_scale x lr
-# interaction -- ALL of it applies here unchanged). What differs is the F arm:
+# LEVERS:
+#   A4  pose_gru_input='pose_delta' (14-d: P(x-1) + inv(P(x-2))@P(x-1)),
+#       pose_gru_mode='residual' (ZERO-INIT head, so an untrained module
+#       reproduces plain feed_prev_pred bit-for-bit).
+#   G1  pose_gru_bptt=True, pose_gru_e2e=False. The GRU is trained by the aux
+#       PoseGRULoss ALONE, with the hidden's tape kept across the views of one
+#       TBPTT chunk; the pose entering the ray build is DETACHED, so the main
+#       reconstruction loss NEVER reaches the GRU. Forward math is IDENTICAL
+#       across G0/G1/G3 -- G is purely a gradient-routing lever; an eval probe
+#       cannot tell a G1 checkpoint from a G3 one.
 #   F1-RAW  pose_gru_img_feat='input', pose_gru_img_feat_frames=2,
-#           pose_gru_img_feat_proj=False:
+#       pose_gru_img_feat_proj=False:
 #     - frames=2: the pooled PRE-ray image-encoder features of the current view
 #       t and the previous view t-1 (mean over the 240 tokens, the
 #       _get_img_level_feat statistic; view 0's stash subtracts the constant
@@ -22,48 +27,46 @@
 #       the stash is always-detached data).
 #     - proj=False: there is NO zero-init Linear(2048 -> 32). The per-frame
 #       LayerNorm (shared affine) is kept -- it is feature conditioning, not
-#       projection (model.py:529-534) -- and its output enters the cell RAW:
-#       gru_in stays pose-first 14-d, the cell input widens 14 -> 14+2048=2062.
-#       weight_ih grows from 17,664 params (46 wide, the projected F1 arm) to
-#       791,808: no low-rank bottleneck forces the module to summarise
-#       appearance. pose_gru_img_feat_dim is IGNORED when proj=False (the
-#       appended width is dictated by encoder width x frames); it is kept below
-#       only so flipping proj back on is a one-word change.
-#     - INIT-EQUIVALENCE IS WEAKER THAN THE PROJECTED ARMS. With proj=True the
-#       zero-init projector makes even the HIDDEN trajectory identical to F-off
-#       at init. With proj=False there is no zero gate: image content reaches
-#       the hidden state from step one through the cell's default-init
-#       weight_ih columns. Only mode='residual''s zero-init HEAD makes the
-#       OUTPUT identical to F-off at init (model.py:468-481). The head is still
-#       the gradient gate: until head.weight is nonzero, d(loss)/d(cell) is
-#       exactly zero and the wide input columns stay locked -- the same
-#       bootstrap window as every other arm; do NOT run the IMG_FEAT
-#       falsifiers before the head unlocks.
+#       projection -- and its output enters the cell RAW: gru_in stays
+#       pose-first 14-d, the cell input widens 14 -> 14+2048=2062.
+#       pose_gru_img_feat_dim is IGNORED when proj=False; kept below only so
+#       flipping proj back on is a one-word change.
+#     - INIT-EQUIVALENCE IS WEAKER THAN THE PROJECTED ARMS. With proj=False
+#       there is no zero gate on the image columns: image content reaches the
+#       hidden state from step one through the cell's default-init weight_ih
+#       columns. Only mode='residual''s zero-init HEAD makes the OUTPUT
+#       identical to F-off at init. The head is still the gradient gate: until
+#       head.weight is nonzero, d(loss)/d(cell) is exactly zero and the wide
+#       input columns stay locked -- do NOT run the IMG_FEAT falsifiers before
+#       the head unlocks. NB under G1 the ONLY loss that can unlock the head is
+#       the aux PoseGRULoss (there is no e2e term), so the bootstrap window is
+#       set entirely by the aux gradient.
+#   R1  pose_gru_iters=1, pose_gru_iter_gamma=0.0. One cell call per view; the
+#       gamma=0.0 value-gate keeps train and test criterion strings
+#       byte-identical (the v2 train==test symmetry).
 #
-# WHAT THIS ARM IS FOR. Paired against captain_gru_v3_a4_g3_f1_finetune (same
-# frames, proj=True) it prices the 32-D BOTTLENECK itself -- a single-variable
-# change. Paired against captain_gru_v3_a4_g3_f0_noproj_finetune (same raw
-# access, frames=1) it prices the PREVIOUS-FRAME contribution. F-off control:
-# captain_gru_v3_a4_g3_finetune.
+# WHAT THIS ARM IS FOR.
+#   vs captain_gru_v3_a4_g3_f1_noproj_finetune  (G3, same F/R): prices the e2e
+#      gradient path under F1-RAW -- the single differing key is pose_gru_e2e.
+#   vs captain_gru_v3_a4_g1_f1_r8_noproj_finetune (R8, same G/F): prices the
+#      iterate re-feed at G1 (NB that comparison also scales the aux loss
+#      4.1611x -- see that file's header).
+#   F-off / projected-F G1 controls do not exist yet at lr 1e-5; the G-lever
+#   comparison above is the clean one.
 #
 # CHECKPOINT COMPATIBILITY. img_norm.{weight,bias} exist, img_proj does NOT,
-# and cell.weight_ih is 2062 wide -- so this checkpoint is shape-incompatible
-# with F-off, projected-F, and f0_noproj configs alike: the loader HARD-FAILS
-# on any pose_gru mismatch (silent random-GRU eval is impossible). load_model
-# sniffs the arm back from the weights alone: img_norm present + img_proj
-# absent => proj=False, and frames is recovered uniquely from the cell input
-# width (14 + 2*1024; model.py:156-177). Round-trip covered by
-# verify_gru_f0_proj.py. NO WARM START EXISTS for the noproj arms --
-# pose_gru_expand_ckpt.py only emits projected destinations and refuses to
-# splice a projector onto a proj=False checkpoint; this arm trains from base
-# CUT3R like every other v3 arm (which is what keeps the comparison clean).
+# and cell.weight_ih is 2062 wide -- shape-identical to the G3 noproj twin (G
+# is invisible in weights) but shape-incompatible with F-off, projected-F, and
+# f0_noproj checkpoints: the loader HARD-FAILS on any pose_gru mismatch.
+# load_model sniffs the arm back from the weights alone (img_norm present +
+# img_proj absent => proj=False; frames from the cell input width). NO WARM
+# START EXISTS for the noproj arms -- this arm trains from base CUT3R like
+# every other v3 arm.
 #
 # ddp_grad_sync: false (explicit) -- the historical baseline behavior: the
 # TBPTT path forwards through the unwrapped module, DDP's reducer never arms,
-# and NO cross-rank gradient averaging happens (see the header block in
-# captain_gru_v3_a4_g3_ddpsync_finetune.yaml for the full story). Kept false
-# so this arm is comparable to the rest of the finetune family, which all ran
-# without sync.
+# and NO cross-rank gradient averaging happens. Kept false so this arm is
+# comparable to the rest of the finetune family, which all ran without sync.
 #
 # Falsifiers (keep_freq snapshot only, NOT before the head unlocks):
 #   PREV_PRED_RAY_SHUFFLE=1                                -- pose-feedback channel
@@ -72,8 +75,8 @@
 #
 # Run (32 GPUs; the GPU count comes from --nodes, NOT from this file):
 #   cd /gpfs/home/koc/koc821022/vggt_features && \
-#   sbatch --nodes=8 --job-name=gru_a4g3f1np_ft \
-#          train_gru_v3_finetune_64node.sbatch captain_gru_v3_a4_g3_f1_noproj_finetune
+#   sbatch --nodes=8 --job-name=gru_a4g1f1np_ft \
+#          train_gru_v3_finetune_64node.sbatch captain_gru_v3_a4_g1_f1_noproj_finetune
 # NB the launcher's #SBATCH default is --nodes=64; --nodes=8 on the command
 # line is REQUIRED.
 # ============================================================================
@@ -139,7 +142,10 @@ feed_prev_pred: True
 # (see PoseGRU in dust3r/model.py). Aux-trained by the PoseGRULoss term against
 # the current view's GT pose; hidden resets at view 0.
 #   pose_gru_mode / pose_gru_input: A4 -- pose_delta input, residual head.
-#   pose_gru_bptt (G1) / pose_gru_e2e (G2): BOTH True = G3, the superset.
+#   pose_gru_bptt (G1): True; pose_gru_e2e (G2): False -- together G1.
+#                   The GRU's output still drives the ray build (forward
+#                   identical to G3), but it enters the build DETACHED: only
+#                   the aux PoseGRULoss trains the GRU.
 #   pose_gru_img_feat (F lever): 'input' = F ON. frames=2 + proj=False = the
 #                   F1-RAW arm: the 2x1024-D LayerNormed features of views t
 #                   and t-1 enter the cell RAW; cell input width 14+2048=2062.
@@ -160,8 +166,8 @@ pose_gru_hidden_dim: 128
 pose_gru_lr_scale: 100.0           # x lr -> GRU group peaks at 1e-3; see the
                                    # f1_finetune header. img_norm rides in the
                                    # scaled group too (collected by identity).
-pose_gru_bptt: True                # G1 half of G3
-pose_gru_e2e: True                 # G2 half of G3
+pose_gru_bptt: True                # G1: within-chunk BPTT ON
+pose_gru_e2e: False                # G1: e2e OFF -- main loss never reaches the GRU
 pose_gru_iters: 1                  # R OFF
 pose_gru_iter_detach: True         # inert at iters=1 (nothing to detach between)
 pose_gru_img_feat: input           # F ON
@@ -169,8 +175,9 @@ pose_gru_img_feat_dim: 32          # IGNORED while proj=False (appended width is
                                    #   encoder x frames); kept so flipping proj
                                    #   back on is a one-word change
 pose_gru_img_feat_frames: 2        # f1: current view t + previous t-1
-pose_gru_img_feat_proj: False      # NO Linear: 2048-D raw  <-- the ONLY key that
-                                   #   differs from captain_gru_v3_a4_g3_f1_finetune
+pose_gru_img_feat_proj: False      # NO Linear: 2048-D raw  <-- with e2e above,
+                                   #   the only keys that differ from
+                                   #   captain_gru_v3_a4_g3_f1_noproj_finetune
 
 # ddp_grad_sync false = the historical baseline: no cross-rank gradient
 # averaging on the TBPTT path (see captain_gru_v3_a4_g3_ddpsync_finetune.yaml).
@@ -234,8 +241,12 @@ keep_freq: 10
 print_freq: 10
 print_img_freq: 1000
 num_imgs_vis: 4
+# The canonical NEW-runs root since 2026-08-14 (all finetune checkpoints moved
+# off /gpfs/projects, which was running out of space; pre-move runs live under
+# /gpfs/scratch/etur59/koc821022/checkpoints_projects). sync_nomedia.sh now
+# lives at this root and searches it, so W&B porting works out of the box.
 save_dir: '/gpfs/scratch/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
-exp_name: 'captain_gru_v3_a4_g3_f1_noproj_finetune'
+exp_name: 'captain_gru_v3_a4_g1_f1_noproj_finetune'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/

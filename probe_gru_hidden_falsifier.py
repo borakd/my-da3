@@ -62,7 +62,7 @@ DATA_ROOT = os.environ.get(
 DEFAULT_CKPT = os.environ.get(
     "PROBE_CKPT",
     os.path.join(
-        os.environ.get("CKPT_ROOT", "/gpfs/projects/etur59/koc821022/checkpoints"),
+        os.environ.get("CKPT_ROOT", "/gpfs/scratch/etur59/koc821022/checkpoints_projects"),
         "captain_cut3r_sim3rmse", "captain_gru_v2", "checkpoint-20.pth",
     ),
 )

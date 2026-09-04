@@ -11,8 +11,8 @@
 #SBATCH --cpus-per-task=57   # was 24; MN5 derives mem from cores (8G/core) -> 456G ~= old --mem=450G
 #SBATCH --time=72:00:00
 #SBATCH --job-name=cut3r_reg
-#SBATCH --output=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_reg_%j.out
-#SBATCH --error=/gpfs/projects/etur59/koc821022/outputs/cut3r_eval/logs/slurm_reg_%j.err
+#SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_reg_%j.out
+#SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_reg_%j.err
 
 set -o pipefail
 # --- self-locating worktree -------------------------------------------------

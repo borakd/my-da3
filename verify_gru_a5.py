@@ -46,9 +46,9 @@ V2_WORKTREE = os.environ.get("V2_WORKTREE", WORKTREE)
 # The 16 grid runs were reorganised out of captain_cut3r_sim3rmse/ into
 # captain_gru_overfit/ on 2026-07-30; fall back to the old path for safety.
 CKPT_CANDIDATES = [
-    "/gpfs/projects/etur59/koc821022/checkpoints/captain_gru_overfit/"
+    "/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_gru_overfit/"
     "captain_gru_v2_a4_g1/checkpoint-final.pth",
-    "/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_sim3rmse/"
+    "/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_sim3rmse/"
     "captain_gru_v2_a4_g1/checkpoint-final.pth",
 ]
 CKPT = next((p for p in CKPT_CANDIDATES if os.path.isfile(p)), CKPT_CANDIDATES[0])

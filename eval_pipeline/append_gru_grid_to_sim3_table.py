@@ -21,7 +21,7 @@ import subprocess
 ROOT = os.environ.get(
     "OVERFIT_EVAL_ROOT",
     os.path.join(
-        os.environ.get("OUT_ROOT", "/gpfs/projects/etur59/koc821022/outputs"),
+        os.environ.get("OUT_ROOT", "/gpfs/scratch/etur59/koc821022/outputs"),
         "cut3r_eval", "overfit_test_scene",
     ),
 )

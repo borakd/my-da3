@@ -1,27 +1,36 @@
 # ============================================================================
-# captain_gru_v3_a4_g3_oracle_finetune_32gpu -- 8 nodes x 4 = 32 GPUs
+# captain_gru_v3_a4_g3_oracle_lr1e5_finetune -- 8 nodes x 4 = 32 GPUs, peak lr 1e-5
 # FULL-DATASET oracle finetune: A4 x G3 x F0 x R1, pose_gru_oracle='gt'
 # ----------------------------------------------------------------------------
-# The full-DROID finetune recipe (38633/4292 splits, aug_crop=16 + SeqColorJitter
-# on train, ImgNorm on test, 64 views, batch 4, 50 epochs, lr 1e-6) with ONE
-# change to the model: the PoseGRU is handed the CURRENT view's GROUND-TRUTH
-# pose instead of the pose the model predicted at the previous step.
+# The ORACLE TWIN of captain_gru_v3_a4_g3_finetune.yaml at the SAME peak LR.
+# Body is byte-identical to that honest arm except for pose_gru_oracle:'gt',
+# exp_name, and this header -- verified by semantic diff at creation. The pair
+# therefore differs in EXACTLY ONE model-side bit, which is what makes
+# (honest @ 1e-5) vs (oracle @ 1e-5) a clean upper-bound comparison.
 #
-# The 64-GPU twin is captain_gru_v3_a4_g3_oracle_finetune_64gpu.yaml; the two
-# files differ ONLY in this header and in exp_name (the GPU count comes from the
-# launcher's --nodes, not from the config), exactly like the
-# cut3r_pointworld_droid_aug_mn5_prevpred_{32,64}gpu pair.
+# The standard pointworld-DROID finetune recipe is unchanged: full 38633/4292
+# per-lab stratified splits, aug_crop=16 + SeqColorJitter on train, ImgNorm on
+# test, 64 consecutive views, batch 4, 50 epochs, cosine 1e-5 -> 1e-6, warmup
+# 0.5 ep -- the lr1e5 sweep family's schedule (cf.
+# cut3r_pointworld_droid_aug_mn5_prevpred_32gpu_lr1e5).
+#
+# The older 1e-6 oracle pair, captain_gru_v3_a4_g3_oracle_finetune_{32,64}gpu
+# .yaml, is the SAME arm at the previous GRU-family LR; this file supersedes it
+# for the lr1e5 campaign.
 #
 # WHAT THE ORACLE DOES. GT enters the pipeline at exactly ONE point: the GRU
 # cell's input at iterate 0, in the exact frame and encoding PoseGRULoss targets
 # (view-0-relative absT_quaR -- see gt_pose_encoding in dust3r/model.py, which is
-# a byte-for-byte copy of the loss's own target construction). Nothing else is
-# touched:
+# a byte-for-byte copy of the loss's own target construction). The pose handed
+# to the GRU becomes the CURRENT view's GROUND-TRUTH pose instead of the pose
+# the model predicted at the previous step. Nothing else is touched:
 #   * the refined pose drives the conditioning ray build exactly as it always
 #     does, so the rest of the pipeline proceeds on the GRU's PREDICTION;
-#   * pose_gru_e2e keeps its live tape;
+#   * pose_gru_e2e keeps its live tape (G3 is LIVE under the oracle: the GRU's
+#     output still drives the ray build, so the main loss reaches the GRU);
 #   * the _prev_pred_pose_enc / _prev_prev_pred_pose_enc stashes stay the RAW
-#     HEAD poses -- the oracle never rewrites them;
+#     HEAD poses -- the oracle never rewrites them (so the A4 delta half of the
+#     input remains the HONEST velocity between the last two head predictions);
 #   * res["gru_pose"], the thing the loss scores, stays the GRU's OUTPUT.
 # So GT reaches the decoder only THROUGH the GRU. That is what makes the GRU the
 # component under test, and it is why this is an upper bound on what the GRU
@@ -57,7 +66,8 @@
 # table, and never take probe_gru_hidden_falsifier.py numbers off it (the
 # hidden's content is GT-driven). ckpt['args'].pose_gru_oracle is the provenance
 # marker; load_model deliberately does NOT read it back, so an oracle checkpoint
-# can never silently evaluate as an oracle.
+# can never silently evaluate as an oracle (and preflight_ckpt.py refuses to
+# score one).
 #
 # ----------------------------------------------------------------------------
 # LEVERS: A4 x G3 x F0 x R1 -- the MINIMAL GRU. F and R are deliberately OFF so
@@ -66,19 +76,28 @@
 #       zero-loss expectation exists only for mode='residual' (trainer asserts).
 #   G3: pose_gru_bptt=True, pose_gru_e2e=True -- the v3 superset arm, LIVE here:
 #       the GRU's output drives the ray build, so the main loss reaches the GRU.
+#       The G1 oracle twin (bptt only, aux-loss-only training) is
+#       captain_gru_v3_a4_g1_oracle_lr1e5_finetune.yaml.
 #   F0: pose_gru_img_feat='none'. img_proj/img_norm are not built at all, so this
 #       is a genuinely smaller module, not a zeroed one.
 #   R1: pose_gru_iters=1, pose_gru_iter_gamma=0.0. One cell call per view, no
 #       iterate re-feed, no RAFT sequence loss -- gru_pose_iters is never
 #       attached and there is no gru_pose_loss_iters key.
-# Same lever set as the captain_gru_v2_a4_g3 control arm. The oracle is
-# orthogonal to A/G/F/R; verify_gru_oracle.py exercises F in {none,input} x
-# R in {1,4,8} on CPU, so turning them off costs no coverage.
 #
-# Run:  sbatch --nodes=8 train_gru_oracle_finetune.sbatch \
-#              captain_gru_v3_a4_g3_oracle_finetune_32gpu
-# (the launcher refuses to start if --nodes and the config's _NNgpu suffix
-#  disagree, so a mislabelled run is not possible)
+# !! THE 10x LR ALSO MULTIPLIES THE GRU GROUP !!  pose_gru_lr_scale=100 is
+# applied ON TOP of `lr` (split_pose_gru_param_groups), so the from-scratch GRU
+# parameters peak at 1e-5 * 100 = 1e-3 -- inherited unchanged from the honest
+# lr1e5 twin ON PURPOSE: changing it here would add a second differing variable
+# and break the honest-vs-oracle pairing. Override pose_gru_lr_scale on the CLI
+# only if the honest twin is overridden identically.
+#
+# Run (32 GPUs; the GPU count comes from --nodes, NOT from this file):
+#   cd /gpfs/home/koc/koc821022/vggt_features && \
+#   sbatch --nodes=8 --job-name=gru_a4g3_oracle_lr1e5 \
+#          train_gru_oracle_finetune.sbatch captain_gru_v3_a4_g3_oracle_lr1e5_finetune
+# NB this filename deliberately carries no _NNgpu suffix (it names levers + LR,
+# like the honest twin), so the launcher's _NNgpu guard only WARNS, not
+# hard-fails -- keep the explicit --nodes=8 in the submit line.
 # ============================================================================
 model: "ARCroco3DStereo(ARCroco3DStereoConfig(freeze='encoder', state_size=768, state_pe='2d', pos_embed='RoPE100', rgb_head=True, pose_head=True, patch_embed_cls='ManyAR_PatchEmbed', img_size=(512, 512), head_type='dpt', output_mode='pts3d+pose', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), pose_mode=('exp', -inf, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, landscape_only=False))"
 # Base CUT3R weights, NOT a warm start from a trained GRU: the step-0 zero needs
@@ -154,9 +173,9 @@ pose_gru: True
 pose_gru_mode: residual
 pose_gru_input: pose_delta
 pose_gru_hidden_dim: 128
-pose_gru_lr_scale: 100.0
-pose_gru_bptt: True
-pose_gru_e2e: True
+pose_gru_lr_scale: 100.0           # x lr -> GRU group peaks at 1e-3, see header
+pose_gru_bptt: True                # G1 half of G3
+pose_gru_e2e: True                 # G2 half of G3
 pose_gru_iters: 1                  # R OFF
 pose_gru_iter_detach: True         # inert at iters=1 (nothing to detach between)
 pose_gru_img_feat: none            # F OFF
@@ -186,18 +205,19 @@ test_dataset: 4292 @ ${test_data}
 seed: 0
 # ===== MULTINODE (8 nodes x 4 GPUs = 32 processes) =====
 # Global batch per optimizer step = batch_size * accum_iter * num_gpus
-#   32 GPUs here = 4 * 1 * 32 = 128
+#   32 GPUs here = 4 * 1 * 32 = 128   (301 optimizer steps/epoch)
 # accum_iter stays 1 so the per-GPU batch_size=4 sampler micro-batch grouping is
 # unchanged. Everything else (lr schedule, epochs, dataset epoch-size) is
-# GPU-count-independent, so the 32- and 64-GPU arms differ ONLY in global batch.
+# GPU-count-independent, so a 32- and a 64-GPU run of this config would differ
+# ONLY in global batch.
 batch_size: 4
 accum_iter: 1
 gradient_checkpointing: True
 epochs: 50
 start_epoch: 0
 weight_decay: 0.05
-lr: 1e-6
-min_lr: 1e-7
+lr: 1e-5                 # the lr1e5 family peak -- matches the honest twin
+min_lr: 1e-6             # scaled by the same 10x: cosine shape preserved
 warmup_epochs: 0.5
 amp: 1
 
@@ -221,7 +241,7 @@ print_freq: 10
 print_img_freq: 1000
 num_imgs_vis: 4
 save_dir: '/gpfs/scratch/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full'
-exp_name: 'captain_gru_v3_a4_g3_oracle_finetune_32gpu'
+exp_name: 'captain_gru_v3_a4_g3_oracle_lr1e5_finetune'
 task: 'cut3r'
 logdir: ${save_dir}/${exp_name}/logs
 output_dir: ${save_dir}/${exp_name}/

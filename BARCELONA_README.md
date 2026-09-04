@@ -24,13 +24,13 @@ silently wrong. See §3.
 
 | | |
 |---|---|
-| Repo | `/gpfs/home/koc/koc821022/my-da3`, branch `captain_gru_v3` |
+| Repo | `/gpfs/home/koc/koc821022/vggt_features`, branch `captain_gru_v3` |
 | Machine | MareNostrum5 GPP login node `glogin1` (BSC), user `koc821022`, groups `koc` + `etur59` |
 | Conda env | `~/.conda/envs/cuteanything` — complete and working (py3.11.14, torch 2.8.0+cu128) |
 | Dataset | staged at `/gpfs/scratch/etur59/koc821022` — see §3. **Paths deliberately NOT repointed yet.** |
 | Pretrained ckpt | ✅ present, 3.17 GB, at `src/CUT3R/src/cut3r_512_dpt_4_64.pth` |
 | CUDA RoPE kernel | ✅ compiled and verified (7/7 checks) — see §5 |
-| Checkpoint output | `/gpfs/projects/etur59/koc821022/checkpoints` (scratch group quota is ~97% full) |
+| Checkpoint output | `/gpfs/scratch/etur59/koc821022/checkpoints` — new runs (since 2026-08-14). Older runs moved to `/gpfs/scratch/etur59/koc821022/checkpoints_projects` |
 | `git push` | **broken** — origin is an SSH tunnel to a laptop that isn't up |
 
 **Verified working right now:** `verify_pose_gru_loss.py` (14), `verify_pose_gru_trainer.py`
@@ -169,7 +169,7 @@ one directory. On disk, `splits/` is under `dl3dv_multi/` and the scenes are its
 ```bash
 cd /gpfs/scratch/etur59/koc821022
 ln -s ../pointworld_droid_wrist_VALAR dl3dv_multi/wrist          # <- currently MISSING
-cd /gpfs/home/koc/koc821022/my-da3
+cd /gpfs/home/koc/koc821022/vggt_features
 ./regenerate_split_symlinks.sh /gpfs/scratch/etur59/koc821022/dl3dv_multi \
                                /gpfs/scratch/etur59/koc821022/pointworld_droid_splits
 ```
@@ -202,7 +202,7 @@ need room. Check with `bsc_quota`.
 | Walltime | up to `168:00:00` | `acc_ehpc` MaxWall = **72h** | ✅ clamped |
 | Conda hook | `/opt/ohpc/pub/compiler/conda3/...` | `/apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh` | ✅ migrated |
 | Worktree | `/scratch/bdursun25/cuteanything/...` | derived from `$SLURM_SUBMIT_DIR` | ✅ self-locating |
-| Checkpoints | `.../cuteanything/checkpoints` | `/gpfs/projects/etur59/koc821022/checkpoints` | ✅ migrated |
+| Checkpoints | `.../cuteanything/checkpoints` | `/gpfs/scratch/etur59/koc821022/checkpoints` (old runs: `.../checkpoints_projects`) | ✅ migrated |
 | Data | `/frozen/avg/bora_data/...` | `/gpfs/scratch/etur59/koc821022/...` (§3) | ⏸️ **deferred on purpose** |
 
 Three MN5 constraints worth internalising, all found the hard way:
@@ -229,7 +229,7 @@ Notes:
 ### PYTHONPATH — the one thing you always need
 
 ```bash
-cd /gpfs/home/koc/koc821022/my-da3
+cd /gpfs/home/koc/koc821022/vggt_features
 export PYTHONPATH="$PWD:$PWD/src:$PWD/src/CUT3R:$PWD/src/CUT3R/src"
 ```
 
@@ -269,7 +269,7 @@ absrel/a1/video-depth metrics **silently vanish** from the logs. This bit the pr
      passes `tokens.transpose(1,2)` and `kernels.cu:91` asserts `stride(3)==1 && stride(2)==D`
      on that view. Build test tensors as contiguous `(B,N,H,D)` viewed as `(B,H,N,D)`.
 3. ✅ **Paths, SLURM directives, conda hook, worktree anchors migrated** (§4).
-4. ✅ **Checkpoint/output dirs created** at `/gpfs/projects/etur59/koc821022/{checkpoints,outputs}`.
+4. ✅ **Checkpoint/output dirs created** at `/gpfs/projects/etur59/koc821022/{checkpoints,outputs}` (since moved off the dead `/gpfs/projects` root on 2026-08-14: checkpoints → `/gpfs/scratch/etur59/koc821022/checkpoints` (older runs `.../checkpoints_projects`), outputs → `/gpfs/scratch/etur59/koc821022/outputs`).
 
 **Left**:
 

@@ -24,7 +24,7 @@
 # Env overrides: OUT_ROOT, SETTLE_S, FORCE, NEED_GB
 set -o pipefail
 
-WT=${WT:-/gpfs/home/koc/koc821022/my-da3}
+WT=${WT:-/gpfs/home/koc/koc821022/vggt_features}
 export OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 OUT=$OUT_ROOT/cut3r_eval
 SETTLE_S=${SETTLE_S:-120}
@@ -66,9 +66,16 @@ s1=$(stat -c %s "$CKPT"); sleep 10; s2=$(stat -c %s "$CKPT")
 say "checkpoint settled: $(( s2 / 1000000 )) MB, mtime ${age}s ago"
 
 # --- gate 3 (cheap, do it before the 3 GB torch.load) ------------------------
-if [ "${FORCE:-0}" != "1" ] && [ -d "$OUT/$LABEL/eval" ]; then
-  n=$(find "$OUT/$LABEL/eval" -mindepth 2 -name eval_depth_pose_metrics.csv -printf . 2>/dev/null | wc -c)
-  [ "$n" -eq 0 ] || die "$OUT/$LABEL/eval already holds $n scene results -- set FORCE=1 to re-arm"
+# Checks eval_gru too: a stale GRU-pose tree left behind by a manual wipe of
+# only eval/preds/claims would otherwise pair an OLD checkpoint's <label>_gru
+# row with the new regular row in the averages table, silently. A re-arm wipe
+# must therefore cover eval/, eval_gru/, preds/, preds_gru/ and claims/.
+if [ "${FORCE:-0}" != "1" ]; then
+  for d in eval eval_gru; do
+    [ -d "$OUT/$LABEL/$d" ] || continue
+    n=$(find "$OUT/$LABEL/$d" -mindepth 2 -name eval_depth_pose_metrics.csv -printf . 2>/dev/null | wc -c)
+    [ "$n" -eq 0 ] || die "$OUT/$LABEL/$d already holds $n scene results -- set FORCE=1 to re-arm"
+  done
 fi
 
 # --- gate 4 ------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/bin/bash
-# LEGACY PATH — prefer /gpfs/projects/etur59/koc821022/checkpoints/sync_nomedia.sh
+# LEGACY PATH — prefer /gpfs/scratch/etur59/koc821022/checkpoints/sync_nomedia.sh
 # for anything but small/young runs: glogin1's hard 300s RLIMIT_CPU SIGKILLs
 # (rc=137) this script's `wandb sync` while it replays large .wandb logs, a
 # failure --no-media does NOT avoid. sync_nomedia.sh (rsync snapshot excluding
@@ -43,7 +43,7 @@
 # ---------------------------------------------------------------------------
 set -eo pipefail
 
-CKPT_ROOT=${CKPT_ROOT:-/gpfs/projects/etur59/koc821022/checkpoints}
+CKPT_ROOT=${CKPT_ROOT:-/gpfs/scratch/etur59/koc821022/checkpoints}
 DRY=0
 NO_MEDIA=0
 ARGS=()

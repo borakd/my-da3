@@ -20,10 +20,10 @@
 # Usage:  bash eval_pipeline/submit_gru_v3_eval.sh [ARM ...]
 set -o pipefail
 
-WT=/gpfs/home/koc/koc821022/my-da3
+WT=${WT:-/gpfs/home/koc/koc821022/vggt_features}
 export OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs
 OUT=$OUT_ROOT/cut3r_eval
-CR=/gpfs/projects/etur59/koc821022/checkpoints/captain_cut3r_finetune_aug_full
+CR=/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full
 
 # Falsifier env vars silently contaminate a scoring run and nothing logs it.
 # POSE_GRU_FORCE_ITERS in particular would override the restored R lever.

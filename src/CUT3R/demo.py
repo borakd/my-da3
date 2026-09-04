@@ -49,7 +49,7 @@ def parse_args():
         "--seq_path",
         type=str,
         # default="/frozen/avg/bora_data/droid_datasets/training_data/pointworld_droid_wrist/dl3dv_multi/AUTOLab+0d4edc83+2023-10-21-19h-06m-10s/18026681+wrist/dense/rgb",
-        default="/gpfs/home/koc/koc821022/my-da3/src/CUT3R/examples/001",
+        default="/gpfs/home/koc/koc821022/vggt_features/src/CUT3R/examples/001",
         help="Path to the directory containing the image sequence.",
     )
     parser.add_argument(
