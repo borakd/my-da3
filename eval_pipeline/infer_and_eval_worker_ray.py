@@ -25,6 +25,27 @@ tree and everything watching it are untouched.
 
 Resumable: a scene is skipped once its eval CSV exists (non-empty) — under
 prev_pred_gru, once BOTH the regular and the GRU eval CSVs exist.
+
+Two OPTIONAL extensions (vggt_features probe; byte-identical behaviour when unset):
+  --gt_scenes_root  root used ONLY for the evaluator's gt_root (<root>/<scene>/dense).
+                    Frames + conditioning poses still come from --scenes_root, so a
+                    pseudo-scene tree (store rgb symlinks + VGGT-derived cam npz) can
+                    drive the ray channel while scoring stays against the real GT.
+  --context_dir     <root>/<scene>/*.png (sorted) are PREPENDED to the wrist frames
+                    as unscored context views; the first len(context) predictions are
+                    dropped before saving, so saved frame 000000 is wrist frame 0.
+                    Predicted poses are then expressed relative to context view 0
+                    (CUT3R's reference = first view); the evaluator's Sim(3)
+                    alignment absorbs that. Context images must share the wrist
+                    aspect (16:9) so the loaders resize them to the same box.
+                    Under --conditioning none no pose files are needed. Under
+                    gt/prev_gt/prev_pred every context image ALSO needs
+                    <root>/<scene>/<basename>.npz ('pose' c2w in the SAME world +
+                    scale as the scene cam npz, 'intrinsic' at the image's native
+                    size) — the worker merges them with the scene cam dir through a
+                    symlink dir <pred_dir>/_ctx_cam. Not supported with
+                    prev_pred_gru (the GRU-trajectory bookkeeping assumes view 0 is
+                    the first scored frame).
 """
 import os
 # Reduce CUDA fragmentation OOMs on very long sequences (read before torch init).
@@ -44,14 +65,21 @@ import torch
 
 
 def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_knowing_depth,
-                      gru_outdir=None):
+                      gru_outdir=None, skip_first=0):
     """Replicates the depth + camera saving of demo_ray.py:prepare_output (revisit=1),
     writing ONLY depth/ and camera/ (skips conf/ and color/).
 
     gru_outdir, when set, additionally writes the GRU-refined pose trajectory as a
     parallel prediction root (camera/ npz files + a depth/ symlink) so the SAME
-    eval script can score it with unchanged code and arguments."""
+    eval script can score it with unchanged code and arguments.
+
+    skip_first: number of leading (context) predictions to DROP so the saved
+    frame 000000 is the first scored frame (default 0 = save everything)."""
     preds = outputs["pred"]
+    if skip_first:
+        assert gru_outdir is None, "context views are not supported with the GRU eval"
+        assert len(preds) > skip_first, f"{len(preds)} preds but {skip_first} context views"
+        preds = preds[skip_first:]
 
     pts3ds_self = torch.cat([p["pts3d_in_self_view"].cpu() for p in preds], 0)  # B,H,W,3
 
@@ -134,6 +162,32 @@ def _release_claim(claim_path, eval_csvs):
         pass
 
 
+def _merge_context_cam_dir(ctx_paths, scene_cam_dir, merged_dir):
+    """Build <merged_dir> holding symlinks to every npz of the scene cam dir plus
+    one <basename>.npz per context image (taken from the context image's own
+    directory) so demo_ray.load_frames_training_style can pair EVERY image in
+    the concatenated list with a pose file by basename. Raises if a context
+    image has no npz next to it. Returns merged_dir."""
+    os.makedirs(merged_dir, exist_ok=True)
+    for p in ctx_paths:
+        base = os.path.splitext(os.path.basename(p))[0]
+        src = os.path.join(os.path.dirname(p), base + ".npz")
+        if not os.path.isfile(src):
+            raise FileNotFoundError(
+                f"context view {p} needs a pose file {src} under ray conditioning "
+                "('pose' c2w in the scene's world+scale, 'intrinsic' at native size)")
+        dst = os.path.join(merged_dir, base + ".npz")
+        if os.path.lexists(dst):
+            os.remove(dst)
+        os.symlink(os.path.abspath(src), dst)
+    for src in glob.glob(os.path.join(scene_cam_dir, "*.npz")):
+        dst = os.path.join(merged_dir, os.path.basename(src))
+        if os.path.lexists(dst):
+            os.remove(dst)
+        os.symlink(os.path.abspath(src), dst)
+    return merged_dir
+
+
 def _run_eval(eval_script, pred_root, gt_root, out_csv):
     """Run the vendored eval script (default args — identical math for every
     trajectory it is pointed at) and raise unless it produced a non-empty CSV.
@@ -183,6 +237,21 @@ def main():
         "even for oracle-TRAINED checkpoints (loudly flagged either way).",
     )
     ap.add_argument("--scenes_root", required=True, help=".../test/dl3dv_multi/wrist")
+    ap.add_argument(
+        "--gt_scenes_root",
+        default=None,
+        help="Root whose <scene>/dense is handed to the evaluator as gt_root "
+        "(default: --scenes_root). Frames and conditioning poses ALWAYS come "
+        "from --scenes_root; only the scoring reference changes.",
+    )
+    ap.add_argument(
+        "--context_dir",
+        default=None,
+        help="If set, <context_dir>/<scene>/*.png (sorted) are prepended to the "
+        "wrist frames as unscored context views and their predictions are "
+        "dropped before saving (see module docstring for the pose-file "
+        "requirement under ray conditioning). Not supported with prev_pred_gru.",
+    )
     ap.add_argument("--scene_list", required=True, help="txt of scene names (one per line)")
     ap.add_argument("--pred_base", required=True)
     ap.add_argument("--eval_base", required=True)
@@ -209,6 +278,9 @@ def main():
         "that another job is handling).",
     )
     args = ap.parse_args()
+    if args.context_dir and args.conditioning == "prev_pred_gru":
+        ap.error("--context_dir is not supported with --conditioning prev_pred_gru")
+    gt_scenes_root = args.gt_scenes_root or args.scenes_root
 
     # Skip sentinel: lets us disable a specific (job, label) pass without editing
     # a running job's launch loop. OUT = parent-of-parent of eval_base.
@@ -379,7 +451,7 @@ def main():
 
         rgb_dir = os.path.join(args.scenes_root, scene, "dense", "rgb")
         cam_dir = os.path.join(args.scenes_root, scene, "dense", "cam")
-        gt_dense = os.path.join(args.scenes_root, scene, "dense")
+        gt_dense = os.path.join(gt_scenes_root, scene, "dense")
         pred_dir = os.path.join(args.pred_base, scene)
         img_paths = sorted(glob.glob(os.path.join(rgb_dir, "*.png")) +
                            glob.glob(os.path.join(rgb_dir, "*.jpg")))
@@ -387,6 +459,27 @@ def main():
             skipped += 1
             _release_claim(claim_path, req_csvs)
             continue
+        n_ctx = 0
+        if args.context_dir:
+            # Unscored context views go FIRST (CUT3R's reference view = view 0);
+            # their predictions are dropped in save_depth_camera(skip_first=).
+            ctx_paths = sorted(glob.glob(os.path.join(args.context_dir, scene, "*.png")))
+            if not ctx_paths:
+                failed += 1
+                with open(fail_log, "a") as fh:
+                    fh.write(f"{scene}\tno context images under {args.context_dir}\n")
+                print(f"{tag} FAIL {scene}: no context images in "
+                      f"{os.path.join(args.context_dir, scene)}", flush=True)
+                _release_claim(claim_path, req_csvs)
+                continue
+            n_ctx = len(ctx_paths)
+            img_paths = ctx_paths + img_paths
+            if args.conditioning != "none":
+                # load_frames_training_style looks every image's pose up in ONE
+                # cam dir by basename -> merge the scene cam dir and the context
+                # npz files (required!) into a per-scene symlink dir.
+                cam_dir = _merge_context_cam_dir(
+                    ctx_paths, cam_dir, os.path.join(pred_dir, "_ctx_cam"))
 
         try:
             ts = time.time()
@@ -441,6 +534,7 @@ def main():
                                 outputs, pred_dir, pose_encoding_to_camera,
                                 estimate_focal_knowing_depth,
                                 gru_outdir=gru_pred_dir if gru_mode else None,
+                                skip_first=n_ctx,
                             )
                         break
                     except torch.cuda.OutOfMemoryError as oom:
