@@ -9,7 +9,7 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 S = os.path.join(HERE, "sections")
-ORDER = ["00_overview.md", "10_vo_header_constants.md", "11_vo_loader_focal.md", "12_vo_tracks_geometry.md",
+ORDER = ["00_overview.md", "05_primer.md", "10_vo_header_constants.md", "11_vo_loader_focal.md", "12_vo_tracks_geometry.md",
          "13_vo_local_ba.md", "14_vo_scene_setup.md", "15_vo_bootstrap_loop.md", "16_vo_tracking_output.md",
          "17_vo_cli.md", "20_vo_eval.md", "21_build_smoke_table.md", "22_build_full_table.md",
          "30_probe_corr_bench.md", "31_probe_pnp_bench.md", "32_probe_tri_bench.md", "33_probe_e_diag.md",
