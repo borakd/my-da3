@@ -1,0 +1,40 @@
+\documentclass[border=8pt,varwidth=25cm]{standalone}
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage[T1]{fontenc}
+\usepackage[table]{xcolor}
+\usepackage{newtxtext,newtxmath}
+
+\begin{document}
+\begin{center}
+{\normalsize\bfseries OpenCV visual-odometry control arm vs.\ CUT3R on the DROID wrist smoke set (12 scenes)}\par\vspace{8pt}
+\footnotesize
+\setlength{\tabcolsep}{7pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lccccc}
+\toprule
+ & \multicolumn{4}{c}{Pose (Sim(3)-aligned, per-scene mean, then mean over scenes)} & Diagnostics \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-6}
+Method & ATE (mm) $\downarrow$ & ATE median (mm) $\downarrow$ & RPE$_{\mathrm{trans}}$ (mm) $\downarrow$ & RPE$_{\mathrm{rot}}$ ($^{\circ}$) $\downarrow$ & failed frames / re-bootstraps \\
+\midrule
+CUT3R zero-shot (pretrained ckpt) & 118.0 & 118.4 & 10.1 & 1.51 & -- \\
+CUT3R finetuned (\texttt{augfull\_lr1e5}) & 72.3 & 69.8 & 6.5 & 0.96 & -- \\
+Champion: gated fwd$\times$bwd fusion (\texttt{augfull\_cg\_fuse\_g7}) & \textbf{62.8} & \textbf{55.1} & \textbf{6.0} & 0.86 & -- \\
+\midrule
+OpenCV VO v0 + zero-shot CUT3R focal at frame $t$ & 124.8 & 109.4 & 10.3 & 1.06 & 15\,\% / 63 \\
+OpenCV VO v0 + finetuned CUT3R focal at frame $t$ & 110.4 & 91.5 & 7.5 & 0.86 & 19\,\% / 51 \\
+OpenCV VO v0 + finetuned CUT3R focal, running median to $t$ & 113.8 & 98.9 & 6.8 & \textbf{0.84} & 20\,\% / 51 \\
+OpenCV VO v0, fixed focal 203\,px (model-free) & 109.1 & 92.7 & 7.0 & 0.87 & 16\,\% / 54 \\
+\bottomrule
+\end{tabular}
+\par\vspace{6pt}
+\begin{minipage}{0.97\linewidth}\scriptsize
+OpenCV VO v0: Shi--Tomasi + LK tracks, parallax-gated essential-matrix bootstrap (0.5\,px), PnP against a
+triangulated map, keyframes every 5\,px of parallax, outlier culling, re-bootstrap after 3 failed frames with
+scale hand-off, static-track lever on; images only plus the stated focal, which at frame $t$ uses only what CUT3R
+has produced up to $t$ (inference-time). ``Failed frames'':
+pose held because PnP found $<30$ inliers; each re-bootstrap starts a new arbitrary-scale segment. Model rows
+use the same scorer on the same scenes. Depth metrics not shown (the OpenCV arm predicts poses only).
+\end{minipage}
+\end{center}
+\end{document}

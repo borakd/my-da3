@@ -1,0 +1,27 @@
+\documentclass[11pt,border=8pt]{standalone}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\newsavebox{\tblbox}
+\begin{document}
+\sbox{\tblbox}{%
+\begin{tabular}{@{}l r r | r r r@{}}
+\toprule
+ & \multicolumn{2}{c|}{Depth} & \multicolumn{3}{c}{Pose metrics} \\
+Method & AbsRel$\downarrow$ & $\delta{<}1.25\uparrow$
+ & ATE$\downarrow$ & RPE\textsubscript{trans}$\downarrow$ & RPE\textsubscript{rot}$\downarrow$ \\
+\midrule
+CUT3R zero-shot (pretrained ckpt) & \cellcolor{orange!30}0.479 & \cellcolor{orange!30}0.558 & 0.120 & \cellcolor{orange!30}0.012 & 1.713 \\
+Regular CUT3R (finetuned, augfull\_lr1e5) & \cellcolor{red!30}\textbf{0.179} & \cellcolor{red!30}\textbf{0.786} & \cellcolor{red!30}\textbf{0.076} & \cellcolor{red!30}\textbf{0.008} & \cellcolor{red!30}\textbf{1.101} \\
+\midrule
+CUT3R zero-shot + OpenCV pose backbone & \cellcolor{orange!30}0.479 & \cellcolor{orange!30}0.558 & 0.120 & \cellcolor{orange!30}0.012 & 1.301 \\
+CUT3R Finetuned + OpenCV pose backbone & \cellcolor{red!30}\textbf{0.179} & \cellcolor{red!30}\textbf{0.786} & \cellcolor{yellow!40}0.104 & \cellcolor{red!30}\textbf{0.008} & \cellcolor{yellow!40}1.114 \\
+CUT3R Finetuned + OpenCV pose backbone, GT intrinsics & \cellcolor{red!30}\textbf{0.179} & \cellcolor{red!30}\textbf{0.786} & \cellcolor{orange!30}0.103 & \cellcolor{red!30}\textbf{0.008} & \cellcolor{orange!30}1.102 \\
+\bottomrule
+\end{tabular}}%
+\begin{minipage}{\wd\tblbox}
+\usebox{\tblbox}\par\vspace{2pt}
+{\footnotesize All 4292 DROID wrist test scenes. Values = per-scene averages (eval\_depth\_poses.py default args), averaged over scenes. Depth = mean over frames (per-frame median-scaled); pose = Sim3-aligned RMSE over frames; RPE\textsubscript{rot} in degrees.\par}
+{\footnotesize OpenCV pose backbone: Shi--Tomasi + LK tracks, parallax-gated essential-matrix bootstrap, PnP against a triangulated map, keyframes every 5\,px of parallax, outlier culling, re-bootstrap after 3 failed frames with scale hand-off, static-track lever on. Inputs at frame $t$: the images and CUT3R's predicted focal for frame $t$ (closed loop, inference-time); depth columns are the paired CUT3R model's own depth. The last row replaces the predicted focal with the calibrated intrinsics (privileged, diagnostic). One non-causal step is retained: frames before each (re-)bootstrap succeeds are posed retroactively by PnP against the map built at the bootstrap frame (typically 2--16 frames per scene, plus a few after each re-bootstrap); all other frames use only past information.\par}
+{\footnotesize Highlighting: \colorbox{red!30}{\textbf{best}}, \colorbox{orange!30}{2nd}, \colorbox{yellow!40}{3rd} per column (ties share)\par}
+\end{minipage}
+\end{document}
