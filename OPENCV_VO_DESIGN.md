@@ -470,6 +470,30 @@ no-motion floor (0.0079 m) since GT moves 3.7 mm/frame median. Backbone is not d
 holds pose on 21.4% of frames, re-bootstraps 15071 times over 4292 scenes (median 2/scene), median
 85 PnP inliers; a degenerate constant-pose trajectory would score 0.1710 m ATE, not 0.1043 m.
 
+## Trivial-baseline floors on ALL 4292 scenes (2026-09-09; supersedes the 144-scene sample)
+
+Same scorer, per-scene RMSE then mean over scenes:
+
+| trajectory | ATE (m) | RPE-t (m) | RPE-rot (deg) |
+|---|---|---|---|
+| constant pose (camera never moves) | 0.1685 | 0.0079 | 1.2068 |
+| constant velocity from GT step 1 | 0.1248 | 0.0083 | 1.2150 |
+
+ATE headroom below the constant-velocity floor: zero-shot 4.1%, zs+OpenCV 3.6%, finetuned 39.2%,
+ft+OpenCV 16.4%, ft+OpenCV GT-K 17.8%. This is the cleanest statement of the whole evaluation:
+on ATE the entire zero-shot pairing lives in a 4%-wide band above a trivial baseline (so a tie
+there means "both nearly uninformative", not "both good"), whereas the finetuned model has 39%
+headroom and the OpenCV backbone gives back well over half of it.
+
+Per-scene ATE difference distributions (OpenCV minus model, mm, n=4292):
+  zero-shot pairing: mean +0.53, std 36.90, SE 0.56 (0.9 SE from zero), p25/p50/p75 = -19.0/+1.8/+21.0
+                     -> wide, near-symmetric, centred on zero = no systematic difference
+  finetuned pairing: mean +28.42, std 41.57, SE 0.63 (44.8 SE from zero), p25/p50/p75 = +1.1/+26.6/+54.1
+                     -> same spread but shifted right = a real, systematic regression
+The spread is NOT small: the two arms disagree by ~37 mm (1 sigma) per scene in both pairings.
+The zero-shot means coincide because the disagreements are symmetric, not because the trajectories
+are alike.
+
 ## Frozen v0 parameters (if all picks accepted)
 
 | Parameter | Value |

@@ -7183,8 +7183,26 @@ trajectories were pushed through the identical Sim(3) scorer on a 144-scene samp
 
 | Trajectory | ATE (m) | RPE-trans (m) | RPE-rot (°) |
 |---|---|---|---|
-| Constant pose (camera never moves) | 0.1710 | 0.0079 | 1.2105 |
-| Constant velocity from the first GT step | 0.1252 | 0.0082 | 1.2294 |
+| Constant pose (camera never moves) | 0.1685 | 0.0079 | 1.2068 |
+| Constant velocity from the first GT step | 0.1248 | 0.0083 | 1.2150 |
+
+(Computed on the same 4292 scenes with the same scorer. An earlier 144-scene sample gave
+0.1710 / 0.0079 / 1.2105 and 0.1252 / 0.0082 / 1.2294; the full-set values above supersede it.)
+
+Expressed as headroom below the constant-velocity baseline, the table reads:
+
+| Row | ATE | Better than trivial |
+|---|---|---|
+| CUT3R zero-shot | 0.1197 | 4.1% |
+| zero-shot + OpenCV | 0.1203 | 3.6% |
+| CUT3R finetuned | 0.0759 | **39.2%** |
+| finetuned + OpenCV | 0.1043 | 16.4% |
+| finetuned + OpenCV, GT K | 0.1026 | 17.8% |
+
+This is the single most useful way to read the ATE column: **the entire zero-shot pairing lives in
+a 4%-wide band above a trivial baseline**, so a tie there means "both are nearly uninformative
+about the global trajectory", not "both are good". The finetuned model is the only arm with real
+headroom, and the backbone gives back well over half of it.
 
 Ground truth moves 3.7 mm per frame at the median, 7.9 mm RMS per scene, and rotates 0.56° per
 frame at the median. Three consequences:
@@ -7217,8 +7235,23 @@ every scene because the OpenCV row's `depth/` directory *is* the model's, via a 
 (`--depth_link`). The backbone emits poses only, so there is nothing else it could report. This is
 the only genuinely identical case, and it is identity by construction, not agreement.
 
-**Mechanism 2 — cancellation across scenes (ATE against zero-shot).** Per-scene the two arms
-disagree violently; in the mean they nearly tie:
+**Mechanism 2 — symmetric disagreement across scenes (ATE against zero-shot).** "Cancellation"
+here does not mean errors cancel inside a scene; it means that across scenes the wins and losses
+are the same size and equally common, so the *average* difference is near zero while the *typical*
+difference is not. The per-scene ATE difference (OpenCV minus model, mm, n = 4292):
+
+| pairing | mean | std | SE of mean | p25 / p50 / p75 | reading |
+|---|---|---|---|---|---|
+| zero-shot | +0.53 | 36.90 | 0.56 (0.9 SE from 0) | −19.0 / +1.8 / +21.0 | wide, near-symmetric, centred on zero |
+| finetuned | +28.42 | 41.57 | 0.63 (44.8 SE from 0) | +1.1 / +26.6 / +54.1 | same spread, shifted right |
+
+The spread is the same in both pairings (~37–42 mm at one sigma): the two arms always produce very
+different trajectories. What differs is the *centre*. Against zero-shot the difference distribution
+straddles zero (biggest wins −173 mm, biggest losses +161 mm), so nothing systematic survives
+averaging. Against the finetuned model the whole distribution is shifted right and only 24% of
+scenes fall below zero, so the regression is real.
+
+Per-scene the two arms disagree violently; in the mean the zero-shot pairing ties:
 
 | pairing / metric | OpenCV better | worse | mean difference | median per-scene abs. difference | ratio |
 |---|---|---|---|---|---|
