@@ -25,6 +25,34 @@ is a **privileged diagnostic**, not a deployable configuration.
 
 ## 2. Every metric, every pairing, with the exact difference
 
+### 2.0 Verification of the table (re-run 2026-09-09)
+
+Before interpreting anything, the table was re-derived from scratch:
+
+1. **Independent aggregation.** Every one of the 4292 per-scene
+   `eval_depth_pose_metrics.csv` files was re-read and re-averaged for all five rows, without
+   going through the table builder. All five rows reproduce to four decimals, and all five have
+   n = 4292 scenes with no NaN scenes dropped.
+2. **Hand-recomputed ground truth.** For one scene the Sim(3) alignment and per-frame ATE were
+   recomputed directly from the raw `camera/*.npz` pose files and compared with what the harness
+   wrote. They agree to five decimals for all five rows, which also confirms the harness's
+   `MEAN` row holds the **RMSE** over frames, not the mean:
+
+   | label | hand-computed ATE mean | hand-computed ATE RMSE | harness `ate` |
+   |---|---|---|---|
+   | finetuned | 0.03936 | 0.04688 | 0.04688 |
+   | ft + OpenCV | 0.06281 | 0.07122 | 0.07122 |
+   | ft + OpenCV GT-K | 0.07931 | 0.08315 | 0.08315 |
+   | zs + OpenCV | 0.06462 | 0.06892 | 0.06892 |
+   | zero-shot | 0.10971 | 0.11425 | 0.11425 |
+
+3. **The OpenCV rows really contain OpenCV poses.** The per-frame camera files differ from the
+   paired model's (frame-10 translation differs by 0.01–1.44 m across sample scenes), the
+   md5 of every row's concatenated pose bytes is distinct, and **0 of 4292 scenes** share a
+   pose metric value with their base model row.
+4. **The depth directory of each OpenCV row is a symlink** to the paired model's `depth/`, which
+   is why §2.1 is exactly identical rather than approximately so.
+
 ### 2.1 Depth: AbsRel and δ<1.25 — neutral by construction
 
 | Pairing | AbsRel | δ<1.25 |
@@ -39,11 +67,11 @@ These two columns carry no information about the backbone and must not be read a
 
 ### 2.2 Zero-shot CUT3R vs zero-shot + OpenCV backbone
 
-| Metric | Base | + OpenCV | Absolute | Relative | Verdict |
-|---|---|---|---|---|---|
-| ATE | 0.1197 m | 0.1203 m | +0.0006 m (+0.6 mm) | +0.5% | **neutral** |
-| RPE-trans | 0.0120 m | 0.0124 m | +0.0004 m (+0.4 mm) | +3.3% | **neutral / marginal regression** |
-| RPE-rot | 1.7132° | 1.3011° | **−0.4121°** | **−24.1%** | **improvement** |
+| Metric | Base | + OpenCV | Absolute | Relative | Paired *t* over 4292 scenes | Verdict |
+|---|---|---|---|---|---|---|
+| ATE | 0.1197 m | 0.1203 m | +0.0006 m (+0.6 mm) | +0.5% | 0.9 (**not significant**) | **statistical tie** |
+| RPE-trans | 0.0120 m | 0.0124 m | +0.0004 m (+0.4 mm) | +3.3% | 4.8 (significant) | **significant but negligible** (0.4 mm is 5% of the 7.9 mm no-motion floor) |
+| RPE-rot | 1.7132° | 1.3011° | **−0.4121°** | **−24.1%** | −28.4 (significant) | **improvement** |
 
 This is the pairing where the backbone earns its place. Replacing the pretrained network's pose
 head with classical geometry, while still feeding the classical arm that same network's (poor)
@@ -61,11 +89,11 @@ pose metrics between the two rows.
 
 ### 2.3 Finetuned CUT3R vs finetuned + OpenCV backbone
 
-| Metric | Base | + OpenCV | Absolute | Relative | Verdict |
-|---|---|---|---|---|---|
-| ATE | 0.0759 m | 0.1043 m | **+0.0284 m (+28.4 mm)** | **+37.4%** | **regression** |
-| RPE-trans | 0.0079 m | 0.0084 m | +0.0005 m (+0.5 mm) | +6.3% | **neutral** (both at the floor) |
-| RPE-rot | 1.1010° | 1.1141° | +0.0131° | +1.2% | **neutral** |
+| Metric | Base | + OpenCV | Absolute | Relative | Paired *t* over 4292 scenes | Verdict |
+|---|---|---|---|---|---|---|
+| ATE | 0.0759 m | 0.1043 m | **+0.0284 m (+28.4 mm)** | **+37.4%** | 44.8 (significant) | **regression** |
+| RPE-trans | 0.0079 m | 0.0084 m | +0.0005 m (+0.5 mm) | +6.3% | 7.5 (significant) | **significant but negligible** (both rows sit at the no-motion floor) |
+| RPE-rot | 1.1010° | 1.1141° | +0.0131° | +1.2% | 1.5 (**not significant**) | **statistical tie** |
 
 Against the finetuned network the backbone loses decisively on global trajectory accuracy and ties
 on both local metrics. The ATE regression is the headline: 37.4% worse, 28.4 mm in absolute terms.
@@ -141,6 +169,53 @@ frame at the median. Three consequences:
 **Therefore: ATE and RPE-rot are the informative columns of this table.** RPE-trans should be read
 as "no method resolves per-frame translation at 320×192 and this frame rate", and the depth columns
 are inherited.
+
+## 4b. Why so many cells look unchanged — three distinct mechanisms
+
+Two of the five columns are *exactly* identical between a model row and its "+ OpenCV" row, and
+three more differ by less than a percent. That is suspicious on its face, so each case has a
+separate, verified explanation. None of them is shared data: **0 of 4292 scenes** share a pose
+metric value between a base row and its OpenCV row.
+
+**Mechanism 1 — architectural identity (AbsRel, δ<1.25).** These are identical to every decimal on
+every scene because the OpenCV row's `depth/` directory *is* the model's, via a filesystem symlink
+(`--depth_link`). The backbone emits poses only, so there is nothing else it could report. This is
+the only genuinely identical case, and it is identity by construction, not agreement.
+
+**Mechanism 2 — cancellation across scenes (ATE against zero-shot).** Per-scene the two arms
+disagree violently; in the mean they nearly tie:
+
+| pairing / metric | OpenCV better | worse | mean difference | median per-scene abs. difference | ratio |
+|---|---|---|---|---|---|
+| zero-shot, ATE | 2013 (46.9%) | 2279 | +0.00053 m | 0.0204 m | **39×** |
+| zero-shot, RPE-trans | 2186 (50.9%) | 2106 | +0.00040 m | 0.0024 m | 6× |
+| finetuned, RPE-rot | 2183 (50.9%) | 2109 | +0.01314° | 0.2256° | **17×** |
+
+The typical scene moves 39× further than the average of all scenes moves. Summing signed
+differences for zero-shot ATE: wins total −57.49 m and losses total +59.75 m, so 2.26 m of net
+difference survives out of 117 m of gross movement. A paired *t* test over the 4292 scenes puts
+zero-shot ATE at *t* = 0.9 and finetuned RPE-rot at *t* = 1.5, i.e. **statistically
+indistinguishable from no change**. These cells are not "the same number twice"; they are two
+different methods that are, on average over this test set, equally good.
+
+**Mechanism 3 — floor saturation (RPE-trans everywhere).** Ground truth moves 3.7 mm per frame at
+the median and 7.9 mm RMS per scene. A trajectory that never moves at all scores 0.0079 m — the
+finetuned model's exact score. Every arm in the table lands between 1.00× and 1.57× that floor,
+because none of them resolves a 3.7 mm inter-frame translation from 320×192 images. The column has
+almost no dynamic range left, so all five rows are compressed into it. The differences that *are*
+statistically significant there (*t* = 4.8 and 7.5) amount to 0.4 and 0.5 mm, which is 5–6% of the
+floor: real, and meaningless.
+
+**What this leaves.** Only two cells in the table carry a real, large effect: the backbone's
+−24.1% RPE-rot on zero-shot CUT3R (*t* = −28.4, better on 79.4% of scenes) and its +37.4% ATE on
+the finetuned model (*t* = 44.8, worse on 76.0% of scenes). Everything else is identity by
+construction, a statistical tie, or a difference below the metric's resolution.
+
+**Sanity check that the backbone is not degenerating.** If the OpenCV rows were quietly collapsing
+to "no motion" they would score the 0.1710 m constant-pose floor, not 0.1043 m. Over the full run
+the backbone holds the previous pose on 21.4% of frames and re-bootstraps 15071 times across
+4292 scenes (median 2 per scene; 669 scenes need none, 1035 need five or more), with a median of
+85 PnP inliers on the frames it does solve.
 
 ## 5. How the reported configuration was reached (smoke-set history)
 

@@ -443,6 +443,33 @@ separate arms. (2) Zero-shot CUT3R's RPE-rot (1.71) is WORSE than predicting no 
 brings it to 1.29, near the floor. (3) ATE of zero-shot and of the OpenCV rows sits at the constant-velocity floor
 (0.12); only the finetuned model and the champion beat it clearly. (4) RPE-rot and ATE are the informative columns.
 
+## Verification of the full-4292 table + why cells look unchanged (2026-09-09)
+
+Independent re-derivation: all 4292 per-scene CSVs re-aggregated outside the table builder -> all
+five rows reproduce to 4 dp, n=4292 each, no dropped scenes. One scene's ATE recomputed by hand
+from the raw camera/*.npz through Sim(3) alignment matches the harness to 5 dp for all five rows
+(and confirms the harness MEAN row = RMSE over frames). OpenCV rows contain OpenCV poses: distinct
+md5 over concatenated pose bytes, frame-10 translations differ 0.01-1.44 m, and 0/4292 scenes share
+a pose metric with their base row. Depth dirs are symlinks to the paired model's depth.
+
+Paired statistics over 4292 scenes (base -> base+OpenCV):
+
+| pairing | metric | mean diff | median abs per-scene diff | better/worse | paired t | reading |
+|---|---|---|---|---|---|---|
+| zero-shot | ATE | +0.00053 | 0.0204 (39x) | 2013/2279 | 0.9 | statistical tie |
+| zero-shot | RPE-t | +0.00040 | 0.0024 (6x) | 2186/2106 | 4.8 | significant, 0.4 mm = 5% of floor |
+| zero-shot | RPE-rot | -0.41215 | 0.4897 (1x) | 3407/885 | -28.4 | real improvement |
+| finetuned | ATE | +0.02842 | 0.0319 (1x) | 1030/3262 | 44.8 | real regression |
+| finetuned | RPE-t | +0.00046 | 0.0016 (3x) | 2034/2258 | 7.5 | significant, 0.5 mm |
+| finetuned | RPE-rot | +0.01314 | 0.2256 (17x) | 2183/2109 | 1.5 | statistical tie |
+
+Three mechanisms explain the near-identical cells: (1) depth is architecturally identical (symlink);
+(2) cancellation - per-scene differences are 6-39x the mean difference and wins/losses nearly
+offset (zero-shot ATE: -57.49 m of wins vs +59.75 m of losses); (3) RPE-trans is saturated at the
+no-motion floor (0.0079 m) since GT moves 3.7 mm/frame median. Backbone is not degenerating: it
+holds pose on 21.4% of frames, re-bootstraps 15071 times over 4292 scenes (median 2/scene), median
+85 PnP inliers; a degenerate constant-pose trajectory would score 0.1710 m ATE, not 0.1043 m.
+
 ## Frozen v0 parameters (if all picks accepted)
 
 | Parameter | Value |
