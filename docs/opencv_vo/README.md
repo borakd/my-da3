@@ -7456,6 +7456,47 @@ Two consequences worth stating plainly:
 Reproduce with `/tmp`-style scripts of the form used for the floors: build the control trajectory
 per scene, pass it through `pose_sim3_both._sim3_pose_series`, reduce by RMSE, average over scenes.
 
+## 4d. "Different poses must give different metrics" — why that intuition fails here
+
+The metric is not a fingerprint of your 4×4 poses. It is a bounded, many-to-one summary, and it is
+then averaged over 4292 scenes. Three demonstrations on the scene
+`AUTOLab+0d4edc83+2023-10-21-19h-11m-38s` (131 frames, camera confined to a 0.21 × 0.30 × 0.24 m
+box) and on a 537-scene sample.
+
+**ATE is bounded — you cannot score arbitrarily badly.**
+
+| trajectory | ATE |
+|---|---|
+| GT + noise at 2× trajectory extent | 0.1281 |
+| GT + noise at 10× | 0.1326 |
+| GT + noise at 100× | 0.1315 |
+| GT + noise at 10 000× | 0.1324 |
+| collapsed to a single point | 0.1334 |
+| **GT scaled up by 1000×** | **0.0000** |
+
+Noise ten thousand times larger than the trajectory scores 0.1324, not infinity: Sim(3) alignment
+with free scale shrinks any garbage to a point, after which you score the ground-truth trajectory's
+own spread. That is a hard ceiling, the same for every method. And the last row shows how lossy the
+metric is by design — a trajectory 1000× too large scores **zero error**, because the alignment
+absorbs scale completely.
+
+**ATE is many-to-one — very different trajectories score the same.** Ten independent random walks
+on that one scene score 0.0836, 0.1054, 0.1072, 0.0894, 0.1072, 0.1013, 0.1090, 0.0830, 0.1114,
+0.1136. The RMS distance between any two of those trajectories is 0.1406 m, comparable to the whole
+extent of the ground-truth path — they are not similar in any sense — yet their scores span 0.03.
+
+**Averaging 4292 scenes removes what is left.** Per scene, CUT3R zero-shot and zero-shot + OpenCV
+differ by 36.9 mm at one sigma. The standard error of the mean over 4292 scenes is 0.56 mm. Any two
+methods that live in the same band of this bounded metric will therefore have *means* within about
+a millimetre of each other, no matter how unrelated they are.
+
+**The proof that this needs no special explanation:** two *independent* random-walk ensembles,
+sharing nothing but the ground-truth step sizes, differ by **0.67 mm** in mean ATE over 537 scenes
+(per-scene difference std 27.3 mm). CUT3R zero-shot and zero-shot + OpenCV differ by **0.60 mm**
+over 4292. Same magnitude, from two things with no relationship whatsoever. Millimetre agreement
+between mean ATEs is what this metric does; it is not evidence that two methods are related, and
+the earlier three-decimal table (§2.0b) made it look like exact equality on top of that.
+
 ## 5. How the reported configuration was reached (smoke-set history)
 
 Every threshold was chosen by benchmark on the 12-scene smoke list before the full run. The path,

@@ -513,6 +513,22 @@ CUT3R to within a millimetre: both are on the random-walk attractor, as is an ac
 The finetuned model (0.0759) and the finetuned+OpenCV arm (0.1043) are the only rows that carry
 real global information.
 
+## Why "different poses must give different metrics" fails (2026-09-11)
+
+ATE is bounded, many-to-one, and then averaged over 4292 scenes:
+- BOUNDED: on a 131-frame scene, GT+noise at 2/10/100/10000x the trajectory extent scores
+  0.1281/0.1326/0.1315/0.1324, and a collapse to a point scores 0.1334. You cannot score worse than
+  the GT trajectory's own spread, because Sim(3) shrinks garbage to a point. GT scaled 1000x scores
+  0.0000 - the alignment absorbs scale entirely.
+- MANY-TO-ONE: ten independent random walks on one scene score 0.083-0.114 while being 0.1406 m RMS
+  apart from each other (comparable to the whole GT path extent).
+- AVERAGING: per-scene zero-shot vs zero-shot+OpenCV differ by 36.9 mm (1 sigma); SE of the mean
+  over 4292 scenes is 0.56 mm.
+PROOF it needs no explanation: two INDEPENDENT random-walk ensembles differ by 0.67 mm in mean ATE
+(537 scenes); CUT3R zero-shot vs zero-shot+OpenCV differ by 0.60 mm (4292 scenes). Millimetre
+agreement between mean ATEs is the metric's behaviour, not evidence of a relationship.
+Probe: eval_pipeline/opencv_vo_probes/ate_two_random_walks.py
+
 ## Frozen v0 parameters (if all picks accepted)
 
 | Parameter | Value |
