@@ -64,7 +64,8 @@ def main():
         prev = grp
         cells = []
         for c in cols:
-            txt = f"{v[c]:.1f}" if c != "rpe_r" else f"{v[c]:.2f}"
+            # 1 dp on mm-scale columns hid real differences in the full table; keep 2 dp here too
+            txt = f"{v[c]:.2f}" if c != "rpe_r" else f"{v[c]:.3f}"
             cells.append(r"\textbf{" + txt + "}" if abs(v[c] - best[c]) < 1e-12 else txt)
         diag = f"{v['failed']:.0f}\\,\\% / {v['reboots']}" if "failed" in v else "--"
         lines.append(f"{name} & " + " & ".join(cells) + f" & {diag} \\\\")

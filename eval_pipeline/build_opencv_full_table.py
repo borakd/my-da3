@@ -56,7 +56,7 @@ def main():
     data = [(name, lbl) + load(args.out_root, lbl, scenes) for name, lbl in ROWS]
     present = [d for d in data if d[2] > 0]
     # rank per column (ties share a rank), 3-decimal display values are what get compared, as in the reference
-    disp = {(d[1], m): round(d[3][m], 3) for d in present for m in METRICS}
+    disp = {(d[1], m): round(d[3][m], 4) for d in present for m in METRICS}
     rank = {}
     for m in METRICS:
         vs = sorted({disp[(d[1], m)] for d in present if np.isfinite(disp[(d[1], m)])}, reverse=(m in HIGHER_BETTER))
@@ -70,7 +70,9 @@ def main():
             continue
         cells = []
         for m in METRICS:
-            txt = f"{v[m]:.3f}"
+            # 4 decimals: at 3 dp, 0.1197 and 0.1203 both render as "0.120" and the ATE /
+            # RPE-trans columns look falsely identical. 4 dp matches summary/averages_table.txt.
+            txt = f"{v[m]:.4f}"
             rk = rank[(lbl, m)]
             if rk < 3:
                 txt = COLORS[rk] + txt + ("}" if rk == 0 else "")

@@ -7200,6 +7200,18 @@ Before interpreting anything, the table was re-derived from scratch:
 4. **The depth directory of each OpenCV row is a symlink** to the paired model's `depth/`, which
    is why §2.1 is exactly identical rather than approximately so.
 
+### 2.0b Correction: the table originally printed 3 decimals (fixed 2026-09-11)
+
+The first version of `build_opencv_full_table.py` formatted every cell with `%.3f`. At three
+decimals 0.1197 and 0.1203 both render as `0.120`, and 0.0120 and 0.0124 both render as `0.012`,
+so the ATE and RPE-trans columns of the zero-shot pairing **looked byte-identical when they were
+not**. That was a formatting defect, not a property of the data, and it invited exactly the wrong
+conclusion. The builder now prints four decimals, matching the repo's own
+`summary/averages_table.txt` convention, and the committed table has been regenerated.
+
+Only the two depth columns are genuinely identical, and only because the depth directory is a
+symlink (§2.1). Every pose cell differs between a model row and its OpenCV row.
+
 ### 2.1 Depth: AbsRel and δ<1.25 — neutral by construction
 
 | Pairing | AbsRel | δ<1.25 |
