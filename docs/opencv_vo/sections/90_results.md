@@ -256,7 +256,12 @@ floor: real, and meaningless.
 the finetuned model (*t* = 44.8, worse on 76.0% of scenes). Everything else is identity by
 construction, a statistical tie, or a difference below the metric's resolution.
 
-**Sanity check that the backbone is not degenerating.** If the OpenCV rows were quietly collapsing
+**Degenerate scenes.** On 26 of 4292 scenes (0.6%) the finetuned-focal backbone never bootstraps
+and emits a constant trajectory; 15 of 4292 for the zero-shot focal. Median fraction of exactly
+frozen frame-to-frame steps: 12.7% and 10.1%. The CUT3R rows have none, since a network always
+emits a fresh pose. Counted by `opencv_vo_probes/degenerate_trajectories.py`.
+
+**Sanity check that the backbone is not degenerating overall.** If the OpenCV rows were quietly collapsing
 to "no motion" they would score the 0.1710 m constant-pose floor, not 0.1043 m. Over the full run
 the backbone holds the previous pose on 21.4% of frames and re-bootstraps 15071 times across
 4292 scenes (median 2 per scene; 669 scenes need none, 1035 need five or more), with a median of
@@ -290,16 +295,35 @@ A random walk that knows only *how fast* the camera moved and nothing about *whe
 | CUT3R finetuned | 0.0765 | −0.0443 | −32.8 | better than random |
 
 **This is the real explanation of the near-tie, and it is not flattering to either arm.** 0.12 is
-not a number the two methods happened to share; it is the value any trajectory gets when its step
-magnitudes are about right and its global direction carries no usable information. Three
-independent things land there — the pretrained network, the classical backbone driven by that
-network's focal, and a literal random walk — because all three fail the same way on this metric.
+not a number the two methods happened to share; it is the value a trajectory gets when its overall
+error budget is at this level, and three independent things land there — the pretrained network,
+the classical backbone driven by that network's focal, and a literal random walk.
+
+**Correction to an earlier draft of this section.** It previously said the zero-shot arms carry
+"no usable global directional information". That is too strong, and the direct measurement
+(`opencv_vo_probes/direction_information.py`) refutes it. Sim(3)-aligning each trajectory and
+measuring the median angle between predicted and true displacement (90° = no information):
+
+| arm | gap 1 | gap 8 | gap 32 |
+|---|---|---|---|
+| random walk (GT step sizes, random directions) | 85.8° | 80.9° | 65.0° |
+| CUT3R zero-shot | 68.7° | 64.9° | 54.5° |
+| zero-shot + OpenCV | 66.5° | 59.7° | 50.3° |
+| CUT3R finetuned | **40.6°** | **32.1°** | **24.1°** |
+| finetuned + OpenCV | 44.4° | 43.2° | 35.5° |
+
+The zero-shot arms do carry real directional signal (68.7° against 85.8° for the walk) — they are
+simply weak. Their ATE matches the random walk's because the walk was handed the *correct step
+magnitudes* for free, which compensates for its lack of direction. So the honest statement is:
+**equal ATE, different failure modes** — the walk knows speed and not direction, the zero-shot
+network knows direction poorly and magnitude worse. Finetuning is what closes the direction gap,
+from 68.7° to 40.6°.
 
 Two consequences worth stating plainly:
 
-1. **Zero-shot CUT3R's ATE on this dataset is at the random-walk level.** Any comparison against it
-   on ATE is a comparison between two uninformative trajectories, and should not be reported as a
-   tie between methods without this context.
+1. **Zero-shot CUT3R's ATE on this dataset is at the random-walk level**, even though its poses are
+   not random (see the direction table above). Any ATE comparison against it should carry that
+   context rather than being reported as a tie between two competitive methods.
 2. **The classical backbone does extract real global information when it is given a usable focal.**
    Driven by the finetuned model's focal it is 10.5 sigma better than random (0.1045 vs 0.1207),
    even though it remains 37% worse than the finetuned network itself. Its failure against the

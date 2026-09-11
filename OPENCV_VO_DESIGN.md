@@ -506,8 +506,20 @@ Paired per-scene against the random walk (3 seeds/scene, 537 scenes):
   finetuned + OpenCV   0.1045  diff -0.0162  t=-10.5  better than random
   CUT3R finetuned      0.0765  diff -0.0443  t=-32.8  better than random
 
-Implication for every table in this campaign: an ATE near 0.12 on the DROID wrist set means "no
-usable global directional information", not "a competitive result". The zero-shot row and both
+CORRECTION (measured 2026-09-11, opencv_vo_probes/direction_information.py): "indistinguishable on
+ATE" does NOT mean "no directional information". Median angle between predicted and true
+displacement after Sim(3) alignment (90 deg = none), gaps 1/8/32:
+  random walk 85.8/80.9/65.0 | CUT3R zero-shot 68.7/64.9/54.5 | zero-shot+OpenCV 66.5/59.7/50.3
+  CUT3R finetuned 40.6/32.1/24.1 | finetuned+OpenCV 44.4/43.2/35.5
+The zero-shot arms carry real but weak direction; they tie the random walk on ATE because the walk
+was given correct step MAGNITUDES for free. Equal ATE, different failure modes.
+Also measured: 26/4292 scenes (0.6%) of vo_full_ft are fully constant trajectories (never
+bootstrapped), 15/4292 for vo_full_zs; median frozen-step fraction 12.7% / 10.1%; CUT3R rows 0%.
+NB comparing world-frame directions WITHOUT Sim(3) alignment gives >90 deg for every arm and is
+meaningless - the predicted world frame is arbitrary.
+
+Implication for every table in this campaign: an ATE near 0.12 on the DROID wrist set is not
+a competitive result. The zero-shot row and both
 zero-shot-focal OpenCV rows sit there. This is why the classical arm appeared to match zero-shot
 CUT3R to within a millimetre: both are on the random-walk attractor, as is an actual random walk.
 The finetuned model (0.0759) and the finetuned+OpenCV arm (0.1043) are the only rows that carry
