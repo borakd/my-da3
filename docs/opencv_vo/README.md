@@ -7409,6 +7409,53 @@ the backbone holds the previous pose on 21.4% of frames and re-bootstraps 15071 
 4292 scenes (median 2 per scene; 669 scenes need none, 1035 need five or more), with a median of
 85 PnP inliers on the frames it does solve.
 
+## 4c. The decisive control: ATE ≈ 0.12 is the *random-walk* value
+
+The obvious objection to §2.2 is that two methods as different as a learned network and a classical
+solver should not land 0.6 mm apart on ATE when the achievable range spans 0.064 to 0.169. That
+objection is answered by scoring deliberately-constructed trajectories through the identical
+scorer. On a 537-scene sample:
+
+| trajectory fed to the scorer | ATE (m) |
+|---|---|
+| constant pose (never moves) | 0.1678 |
+| ground-truth positions randomly permuted in time | 0.1673 |
+| **random walk with ground-truth step sizes, random directions** | **0.1206** |
+| ground truth + isotropic noise at 1.0× trajectory extent | 0.1406 |
+| ground truth + isotropic noise at 0.5× trajectory extent | 0.1023 |
+| ground truth + isotropic noise at 0.25× trajectory extent | 0.0603 |
+
+A random walk that knows only *how fast* the camera moved and nothing about *where* it went scores
+**0.1206**. Paired per-scene against that control on the same 537 scenes:
+
+| arm | mean ATE | vs random walk | paired *t* | verdict |
+|---|---|---|---|---|
+| random walk (3 seeds/scene) | 0.1207 | — | — | — |
+| CUT3R zero-shot | 0.1203 | −0.0004 | −0.3 | **indistinguishable from a random walk** |
+| zero-shot + OpenCV | 0.1199 | −0.0009 | −0.6 | **indistinguishable from a random walk** |
+| finetuned + OpenCV | 0.1045 | −0.0162 | −10.5 | better than random |
+| CUT3R finetuned | 0.0765 | −0.0443 | −32.8 | better than random |
+
+**This is the real explanation of the near-tie, and it is not flattering to either arm.** 0.12 is
+not a number the two methods happened to share; it is the value any trajectory gets when its step
+magnitudes are about right and its global direction carries no usable information. Three
+independent things land there — the pretrained network, the classical backbone driven by that
+network's focal, and a literal random walk — because all three fail the same way on this metric.
+
+Two consequences worth stating plainly:
+
+1. **Zero-shot CUT3R's ATE on this dataset is at the random-walk level.** Any comparison against it
+   on ATE is a comparison between two uninformative trajectories, and should not be reported as a
+   tie between methods without this context.
+2. **The classical backbone does extract real global information when it is given a usable focal.**
+   Driven by the finetuned model's focal it is 10.5 sigma better than random (0.1045 vs 0.1207),
+   even though it remains 37% worse than the finetuned network itself. Its failure against the
+   finetuned model is a matter of degree; its "tie" with the zero-shot model is not a tie at all,
+   it is two methods both sitting on the floor.
+
+Reproduce with `/tmp`-style scripts of the form used for the floors: build the control trajectory
+per scene, pass it through `pose_sim3_both._sim3_pose_series`, reduce by RMSE, average over scenes.
+
 ## 5. How the reported configuration was reached (smoke-set history)
 
 Every threshold was chosen by benchmark on the 12-scene smoke list before the full run. The path,

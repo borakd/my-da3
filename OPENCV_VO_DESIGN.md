@@ -494,6 +494,25 @@ The spread is NOT small: the two arms disagree by ~37 mm (1 sigma) per scene in 
 The zero-shot means coincide because the disagreements are symmetric, not because the trajectories
 are alike.
 
+## DECISIVE CONTROL (2026-09-11): ATE ~0.12 is the random-walk value on this dataset
+
+537-scene sample, same Sim(3)/RMSE scorer, deliberately-constructed trajectories:
+constant pose 0.1678 | GT positions permuted in time 0.1673 | RANDOM WALK with GT step sizes and
+random directions 0.1206 | GT+noise at 1.0/0.5/0.25x extent 0.1406/0.1023/0.0603.
+
+Paired per-scene against the random walk (3 seeds/scene, 537 scenes):
+  CUT3R zero-shot      0.1203  diff -0.0004  t=-0.3   INDISTINGUISHABLE FROM A RANDOM WALK
+  zero-shot + OpenCV   0.1199  diff -0.0009  t=-0.6   INDISTINGUISHABLE FROM A RANDOM WALK
+  finetuned + OpenCV   0.1045  diff -0.0162  t=-10.5  better than random
+  CUT3R finetuned      0.0765  diff -0.0443  t=-32.8  better than random
+
+Implication for every table in this campaign: an ATE near 0.12 on the DROID wrist set means "no
+usable global directional information", not "a competitive result". The zero-shot row and both
+zero-shot-focal OpenCV rows sit there. This is why the classical arm appeared to match zero-shot
+CUT3R to within a millimetre: both are on the random-walk attractor, as is an actual random walk.
+The finetuned model (0.0759) and the finetuned+OpenCV arm (0.1043) are the only rows that carry
+real global information.
+
 ## Frozen v0 parameters (if all picks accepted)
 
 | Parameter | Value |
