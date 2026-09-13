@@ -1,0 +1,13 @@
+{
+ "*": {
+  "trigger": {
+   "z": 1.0,
+   "warmup": 8
+  },
+  "token_gate": {
+   "frames": "all",
+   "q": 0.5,
+   "gmin": 0.5
+  }
+ }
+}

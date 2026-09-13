@@ -1,0 +1,10 @@
+{
+ "*": {
+  "trigger": {
+   "z": 1.5,
+   "warmup": 8,
+   "window": 16
+  },
+  "alpha_all": 0.0
+ }
+}
