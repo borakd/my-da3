@@ -157,6 +157,14 @@ def _run_eval(eval_script, pred_root, gt_root, out_csv):
             pass
         raise RuntimeError(f"eval failed rc={r.returncode}: {r.stderr[-500:]}")
     os.replace(tmp_csv, out_csv)
+    # Per-scene metrics-over-frames plots next to the CSV (never fatal).
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from plot_metrics_over_time import plot_metrics_over_time
+        plot_metrics_over_time(out_csv, os.path.dirname(out_csv),
+                               title=os.path.basename(os.path.dirname(out_csv)))
+    except Exception as e:
+        print(f"WARNING: metrics plot failed for {out_csv}: {e!r}", flush=True)
 
 
 def main():

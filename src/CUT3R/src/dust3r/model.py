@@ -1881,7 +1881,82 @@ class ARCroco3DStereo(CroCoNet):
         else:
             update_mask = img_mask_group
         update_mask = update_mask[:, None, None].float()
-        state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
+        # --- optional eval-time write controls (HARMFUL_FRAME_SKIP_PLAN.md explorations) ---
+        # "update_alpha": scalar in [0,1] per view -> soft commit
+        #     state <- alpha*new + (1-alpha)*old (alpha=1 is the default path).
+        # "token_gate_q"/"token_gate_gmin": per-STATE-TOKEN commit. The 324
+        #     register tokens sit on an 18x18 grid (see _encode_state positions);
+        #     the self-view confidence map of this frame is pooled onto that
+        #     grid and the top-q fraction of tokens commit fully while the rest
+        #     commit with weight gmin. The retriever mem keeps the scalar mask.
+        # Absent keys leave the numerics byte-identical to the default path.
+        # Optional CAUSAL trigger (no GT): keys "conf_trigger_z" / "conf_trigger_warmup".
+        # The frame's mean log self-confidence is compared with the running
+        # median/MAD of the PREVIOUS frames of this sequence; the alpha / token
+        # controls below apply only when z < -conf_trigger_z. Frames seen before
+        # `warmup` never trigger. Triggered view indices are recorded on the
+        # module (self._maks_triggered) for the caller.
+        trig_keys = [views[i].get("conf_trigger_z", None) for i in view_indices]
+        triggered = True
+        if any(t is not None for t in trig_keys):
+            if view_indices[0] == 0 or not hasattr(self, "_maks_conf_hist"):
+                self._maks_conf_hist = []
+                self._maks_triggered = []
+                self._maks_z_hist = []
+            zthr = float([t for t in trig_keys if t is not None][0].reshape(-1)[0])
+            warm = [views[i].get("conf_trigger_warmup", None) for i in view_indices]
+            warm = int(float([w for w in warm if w is not None][0].reshape(-1)[0])) if any(w is not None for w in warm) else 8
+            res_last = res_group[-1]
+            conf_t = res_last.get("conf_self", res_last.get("conf"))
+            c_now = float(torch.log(conf_t.float().clamp(min=1.0)).mean().item())
+            hist = self._maks_conf_hist
+            win = [views[i].get("conf_trigger_window", None) for i in view_indices]
+            win = int(float([w for w in win if w is not None][0].reshape(-1)[0])) if any(w is not None for w in win) else 0
+            triggered = False
+            if len(hist) >= warm:
+                h = torch.tensor(hist[-win:] if win > 0 else hist)
+                med = h.median().item()
+                mad = (h - med).abs().median().item() * 1.4826
+                if mad <= 1e-8:
+                    mad = float(h.std().item()) or 1e-8
+                zval = (c_now - med) / mad
+                if not hasattr(self, "_maks_z_hist"):
+                    self._maks_z_hist = []
+                self._maks_z_hist.append((int(view_indices[0]), float(zval)))
+                if zval < -zthr:
+                    triggered = True
+                    self._maks_triggered.append(int(view_indices[0]))
+            hist.append(c_now)
+        alphas = [views[i].get("update_alpha", None) for i in view_indices] if triggered else [None] * len(view_indices)
+        if any(a is not None for a in alphas):
+            alpha = torch.stack(
+                [a.to(update_mask.dtype).reshape(-1) if a is not None
+                 else torch.ones(update_mask.shape[0], device=update_mask.device, dtype=update_mask.dtype)
+                 for a in alphas], dim=0).max(dim=0).values
+            update_mask = update_mask * alpha[:, None, None]
+        state_mask = update_mask
+        tg_q = [views[i].get("token_gate_q", None) for i in view_indices] if triggered else [None] * len(view_indices)
+        if any(q is not None for q in tg_q):
+            q = float([q for q in tg_q if q is not None][0].reshape(-1)[0])
+            gmins = [views[i].get("token_gate_gmin", None) for i in view_indices]
+            gmin = float([g for g in gmins if g is not None][0].reshape(-1)[0])
+            res_last = res_group[-1]
+            conf = res_last.get("conf_self", res_last.get("conf"))  # (B, H, W), >= 1
+            n_state = state_feat.shape[1]
+            width = int(round(n_state ** 0.5))
+            pooled = torch.nn.functional.adaptive_avg_pool2d(
+                torch.log(conf.float().clamp(min=1.0))[:, None], (width, width)
+            ).flatten(1)  # (B, width*width), row-major like the state grid
+            if pooled.shape[1] != n_state:
+                pooled = torch.nn.functional.interpolate(
+                    pooled[:, None], size=n_state, mode="linear", align_corners=False)[:, 0]
+            ranks = pooled.argsort(dim=1).argsort(dim=1).float() / max(n_state - 1, 1)
+            tok = torch.where(ranks >= 1.0 - q, torch.ones_like(ranks), torch.full_like(ranks, gmin))
+            state_mask = update_mask * tok[:, :, None].to(state_feat.dtype)
+            if not hasattr(self, "_token_gate_announced"):
+                print(f"[token_gate] ACTIVE: q={q} gmin={gmin} n_state={n_state} grid={width}x{width}", flush=True)
+                self._token_gate_announced = True
+        state_feat = new_state_feat * state_mask + state_feat * (1 - state_mask)
         mem = new_mem * update_mask + mem * (1 - update_mask)
         reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(dim=0)
         reset_mask = reset_mask[:, None, None].float()

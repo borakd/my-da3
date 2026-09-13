@@ -82,6 +82,20 @@ def parse_args():
         help="Disable the point cloud viewer.",
     )
 
+    parser.add_argument(
+        "--gt_root",
+        type=str,
+        default=None,
+        help="Optional DROID <scene>/dense GT root. When set, the saved depth/camera "
+        "are scored with eval_depth_poses.py (default args) and metrics_over_time*.png "
+        "(absrel, a1, ate, rpe_trans, rpe_rot vs frame #) are written to --output_dir.",
+    )
+    parser.add_argument(
+        "--eval_script",
+        type=str,
+        default=None,
+        help="Path to eval_depth_poses.py (default: <repo>/eval_bundle/bin/eval_depth_poses.py).",
+    )
     return parser.parse_args()
 
 
@@ -331,6 +345,31 @@ def parse_seq_path(p):
     return img_paths, tmpdirname
 
 
+def evaluate_and_plot(output_dir, gt_root, eval_script=None):
+    """Score the depth/ + camera/ that prepare_output wrote against a DROID
+    <scene>/dense GT root with eval_depth_poses.py (default args, the table
+    convention) and write metrics_over_time*.png (all five metrics vs frame #)
+    into output_dir. Returns the CSV path."""
+    import subprocess
+    import sys
+
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    eval_script = eval_script or os.path.join(repo, "eval_bundle", "bin", "eval_depth_poses.py")
+    out_csv = os.path.join(output_dir, "eval_depth_pose_metrics.csv")
+    cmd = [sys.executable, eval_script, "--pred_root", output_dir,
+           "--gt_root", gt_root, "--output_csv", out_csv]
+    print(f"Evaluating against {gt_root} ...")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.isfile(out_csv):
+        raise RuntimeError(f"eval failed rc={r.returncode}: {r.stderr[-800:]}")
+    print(open(os.path.join(output_dir, "eval_metrics_readable.txt")).read())
+    sys.path.insert(0, os.path.join(repo, "eval_pipeline"))
+    from plot_metrics_over_time import plot_metrics_over_time
+    for p in plot_metrics_over_time(out_csv, output_dir, title=os.path.basename(gt_root.rstrip("/"))):
+        print(f"Wrote {p}")
+    return out_csv
+
+
 def run_inference(args):
     """
     Execute the full inference and visualization pipeline.
@@ -393,6 +432,10 @@ def run_inference(args):
     pts3ds_other, colors, conf, cam_dict = prepare_output(
         outputs, args.output_dir, 1, True
     )
+
+    # Optional: score against GT and plot the five metrics over frame #.
+    if getattr(args, "gt_root", None):
+        evaluate_and_plot(args.output_dir, args.gt_root, getattr(args, "eval_script", None))
 
     # Convert tensors to numpy arrays for visualization.
     pts3ds_to_vis = [p.cpu().numpy() for p in pts3ds_other]
