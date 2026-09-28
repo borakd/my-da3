@@ -1,0 +1,13 @@
+{
+ "*": {
+  "token_gate": {
+   "frames": "all",
+   "q": 0.5,
+   "gmin": 0.5,
+   "align": "patch",
+   "src": "unc",
+   "ema": 0.0,
+   "unc_head": "/gpfs/scratch/etur59/koc821022/checkpoints/unc_gate/rand_v2/head.pth"
+  }
+ }
+}

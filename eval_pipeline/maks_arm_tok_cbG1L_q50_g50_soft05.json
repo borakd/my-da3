@@ -1,0 +1,12 @@
+{
+ "*": {
+  "token_gate": {
+   "frames": "all",
+   "q": 0.5,
+   "gmin": 0.5,
+   "align": "patch",
+   "conf_branch": "/gpfs/scratch/etur59/koc821022/checkpoints/unc_gate/cb_g1_lr5/conf_branch.pth",
+   "soft": 0.5
+  }
+ }
+}
