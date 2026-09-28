@@ -55,3 +55,5 @@ src/CUT3R/config/old/
 # Local W&B working dir: offline runs plus a multi-MB debug-cli log. Runs are
 # ported to wandb.ai with sync_nomedia.sh, never committed.
 wandb/
+# Per-scene write-weight replay dumps (21 MB each, regenerable from the head checkpoints)
+eval_pipeline/maks_arm_*_replay.json
