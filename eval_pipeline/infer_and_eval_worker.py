@@ -16,6 +16,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
 import contextlib
+import inspect
 import gc
 import glob
 import subprocess
@@ -69,6 +70,14 @@ def save_depth_camera(outputs, outdir, pose_encoding_to_camera, estimate_focal_k
             pose=cam2world[i].cpu().numpy(),
             intrinsics=intrinsics[i].cpu().numpy(),
         )
+        if os.environ.get("DUMP_GATE") == "1":
+            # per-frame self-view confidence and per-token gate weights (visualisation only)
+            gdir = os.path.join(outdir, "gate"); os.makedirs(gdir, exist_ok=True)
+            ex = {}
+            for k in ("conf_self", "tok_gate_w", "tok_gate_key"):
+                if k in preds[i]:
+                    ex[k] = preds[i][k][0].float().cpu().numpy() if preds[i][k].dim() > 1 and preds[i][k].shape[0] == 1 else preds[i][k].float().cpu().numpy()
+            np.savez(os.path.join(gdir, f"{fid:06d}.npz"), **ex)
     return B
 
 
@@ -120,6 +129,250 @@ def _release_claim(claim_path, eval_csv):
         pass
 
 
+# ----------------------------------------------------------------------------- wgate
+# Write-gate variants (WRITE_GATE_VARIANTS.md): confidence-weighted memory updates on
+# the frozen model. Control-json keys (under "*" or per scene):
+#   "frame_gate": {"head": <frame_conf_head.pth>, "wmin": .5}   variant 1 (state write
+#                 weight a_t from the attached FrameConfHead)
+#   "mem_gate":   {"head": <pose_sigma_head.pth>, "wmin": .5}   variant 2 (pose-memory
+#                 write weight b_t from the attached PoseSigmaHead)
+#             | {"const": b}           b_t = b for every t>0 (0 = pose memory frozen at
+#                                      its initial state) -- leverage probe / dose control
+#             | {"freeze_after": k}    b_t = 0 for t > k -- leverage probe
+#             | {"alpha": {frame: b}}  per-frame b_t (the V2 oracle; per-scene json)
+#             | {"src": "conf", "soft": .5, "wmin": .5}   b_t keyed by the model's OWN
+#                                      (untrained) self-view confidence: b_t = wmin +
+#                                      (1-wmin)*sigmoid((c_t - causal median of c)/soft),
+#                                      c = mean log conf_self of the frame, b_0 = 1 (arm mg_conf)
+# The existing "alpha_all" / "alpha" keys remain the constant / oracle controls of
+# variant 1 (they drive update_alpha, the same multiplier the frame gate uses).
+#   "frame_gate": {"const": a} | {"alpha": {frame: a}}   state-only constant / per-frame
+#                 schedule (V1 dose-matched constant and oracle; the model keeps a_0 = 1)
+# The SAME two "head" keys also take a variant-C consequence-trained checkpoint
+# ({"mode": "weight", "state_dict", "wmin", "init_logit"}, train_wgate_consequence.py):
+# attach_wgate_head dispatches on the checkpoint's "mode" ("sigma" = the Kendall-Gal
+# log_ref map of variants 1/2, the default when the key is absent; "weight" = the head
+# output IS the write weight, GateWeightHead, no log_ref). Nothing else changes: the
+# same per-view keys, the same trace dump, the same controls.
+# Per-view keys set here, (1,) float tensors like the token_gate_* keys, read by
+# _forward_decoder_group_step: frame_gate_on, frame_gate_wmin, frame_gate_const,
+# mem_gate_on, mem_gate_wmin, mem_gate_const, mem_gate_freeze_after, mem_gate_src,
+# mem_gate_conf_soft, mem_gate_conf_wmin. Absent keys = plain model.
+WGATE_HEAD_ROOT = "/gpfs/scratch/etur59/koc821022/checkpoints/wgate"
+
+
+def _v1(x):
+    """(1,) float tensor -- the per-view scalar-key convention of the eval controls."""
+    return torch.tensor(float(x)).unsqueeze(0)
+
+
+def load_wgate_head(path):
+    """Load a wgate head checkpoint and return the raw dict (sigma mode or weight mode).
+
+    sigma mode (train_wgate_heads.py, variants 1 / 2; "mode" absent or "sigma"):
+      frame_conf_head.pth = {"state_dict", "log_ref", "wmin", "args", "metrics"}
+      pose_sigma_head.pth = {"state_dict" (out layer only), "log_ref_t", "log_ref_R", "wmin",
+                             "args", "metrics"}
+    weight mode (train_wgate_consequence.py, variant C):
+      gate_head_best.pth  = {"state_dict", "mode": "weight", "wmin", "init_logit", "args", "metrics"}
+      -- the head output IS the write weight, so there is no log_ref / sigma map."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    assert "state_dict" in ck, f"{path}: not a wgate head checkpoint (no 'state_dict')"
+    return ck
+
+
+def wgate_mode(ck):
+    """"sigma" (variants 1/2, the default when the checkpoint has no "mode") or "weight" (variant C)."""
+    return str(ck.get("mode") or "sigma").lower()
+
+
+def attach_wgate_head(model, kind, ck, wmin=None):
+    """Attach a wgate head to `model` in EVAL mode, dispatching on the checkpoint's "mode".
+
+    kind: "frame" (model.attach_frame_gate) or "mem" (model.attach_mem_gate).
+    sigma mode -> the historical call (state_dict + the trainer's log_ref / log_ref_t, log_ref_R).
+    weight mode -> the WHOLE checkpoint dict is passed through and the model dispatches on
+    ck["mode"]; no log_ref is passed (there is none). `train=False` is passed only when the
+    model's attach signature has it (variant C's trainer needs train=True; inference never does),
+    and the returned head is forced to eval / requires_grad False here as a belt-and-braces check.
+    Returns (head, mode)."""
+    fn = getattr(model, "attach_frame_gate" if kind == "frame" else "attach_mem_gate", None)
+    if fn is None:
+        raise RuntimeError(f"model.py has no attach_{kind}_gate (wgate model patch missing)")
+    mode = wgate_mode(ck)
+    wmin = float(ck.get("wmin", 0.5)) if wmin is None else float(wmin)
+    kw = {"wmin": wmin}
+    try:
+        if "train" in inspect.signature(fn).parameters:
+            kw["train"] = False
+    except (TypeError, ValueError):
+        pass
+    if mode == "weight":
+        try:
+            head = fn(ck, **kw)          # whole dict: the model reads "mode" / "init_logit" / "wmin"
+        except (AssertionError, TypeError, KeyError) as e:
+            raise RuntimeError(
+                f"model.attach_{kind}_gate does not accept a weight-mode checkpoint "
+                f"({{'mode': 'weight', ...}}): {e}. Update model.py (variant C, WRITE_GATE_VARIANTS.md)."
+            ) from e
+    elif kind == "frame":
+        head = fn(ck["state_dict"], ck["log_ref"], **kw)
+    else:
+        head = fn(ck["state_dict"], ck["log_ref_t"], ck["log_ref_R"], **kw)
+    if head is None:                      # some attach implementations return None
+        head = getattr(model, "frame_gate" if kind == "frame" else "mem_gate", None)
+    if hasattr(head, "eval"):
+        head.eval()
+        for p_ in getattr(head, "parameters", list)():
+            p_.requires_grad_(False)
+    return head, mode
+
+
+def apply_wgate_controls(views, ctl, attach_fg=None, attach_mg=None):
+    """Set the wgate per-view keys on `views` from one scene's control spec `ctl`.
+
+    attach_fg(path) / attach_mg(path): callbacks for the head arms (the worker's are
+    idempotent by path and return the loaded checkpoint dict, so a "wmin" missing from
+    the json falls back to the value the trainer stored; default 0.5).
+    Returns None when `ctl` carries no wgate key, else a json-able dict of the active
+    gates that the caller stores next to the trace dump. Frame 0 gets the same keys as
+    every other view: the model itself writes frame 0 in full (a_0 = b_0 = 1)."""
+    fg = ctl.get("frame_gate")
+    mg = ctl.get("mem_gate")
+    if not fg and not mg:
+        return None
+    active = {}
+    n = len(views)
+    if fg:
+        spec = {}
+        if "head" in fg:
+            ck = attach_fg(fg["head"]) if attach_fg else None
+            wmin = float(fg.get("wmin", (ck or {}).get("wmin", 0.5)))
+            for v_ in views:
+                v_["frame_gate_on"] = _v1(1.0)
+                v_["frame_gate_wmin"] = _v1(wmin)
+            spec["head"] = fg["head"]
+            spec["wmin"] = wmin
+        # STATE-ONLY constant / per-frame schedule (model key frame_gate_const; the model keeps a_0 = 1 and
+        # leaves the retriever-mem commit untouched) -- the like-for-like controls for the frame-gate head arm.
+        # alpha_all / alpha remain the JOINT (state + retriever-mem) frame gate of the conf-gate campaign.
+        if fg.get("const") is not None:
+            for v_ in views:
+                v_["frame_gate_const"] = _v1(fg["const"])
+            spec["const"] = float(fg["const"])
+        if fg.get("alpha"):
+            nset = 0
+            for fr_, a_ in fg["alpha"].items():
+                fr_ = int(fr_)
+                if 0 <= fr_ < n:
+                    views[fr_]["frame_gate_const"] = _v1(a_)
+                    nset += 1
+            spec["alpha_frames"] = nset
+        # STATE-ONLY write weight keyed by frame t's OWN (untrained) self-view confidence (arm fg_conf):
+        # a_t = wmin + (1-wmin)*sigmoid((c_t - causal median of c)/soft), or with soft = 0 the hard rule
+        # a_t = 1 if c_t >= median else wmin; c = mean log conf_self, a_0 = 1 (model: _wgate_frame_conf).
+        if fg.get("src") is not None:
+            if str(fg["src"]).lower() != "conf":
+                raise ValueError(f"frame_gate.src must be 'conf', got {fg['src']!r}")
+            if spec:
+                raise ValueError(f"frame_gate.src cannot be combined with head / const / alpha: {fg}")
+            soft, cwmin = float(fg.get("soft", 0.5)), float(fg.get("wmin", 0.5))
+            for v_ in views:
+                v_["frame_gate_src"] = _v1(1.0)
+                v_["frame_gate_conf_soft"] = _v1(soft)
+                v_["frame_gate_conf_wmin"] = _v1(cwmin)
+            spec.update(src="conf", soft=soft, conf_wmin=cwmin)
+        if not spec:
+            raise ValueError("frame_gate needs 'head', 'const', 'alpha' or 'src'")
+        active["frame_gate"] = spec
+    if mg:
+        spec = {}
+        if "head" in mg:
+            ck = attach_mg(mg["head"]) if attach_mg else None
+            wmin = float(mg.get("wmin", (ck or {}).get("wmin", 0.5)))
+            for v_ in views:
+                v_["mem_gate_on"] = _v1(1.0)
+                v_["mem_gate_wmin"] = _v1(wmin)
+            spec["head"] = mg["head"]
+            spec["wmin"] = wmin
+        if mg.get("const") is not None:
+            for v_ in views:
+                v_["mem_gate_const"] = _v1(mg["const"])
+            spec["const"] = float(mg["const"])
+        if mg.get("freeze_after") is not None:
+            for v_ in views:
+                v_["mem_gate_freeze_after"] = _v1(mg["freeze_after"])
+            spec["freeze_after"] = int(mg["freeze_after"])
+        if mg.get("alpha"):
+            nset = 0
+            for fr_, b_ in mg["alpha"].items():
+                fr_ = int(fr_)
+                if 0 <= fr_ < n:
+                    views[fr_]["mem_gate_const"] = _v1(b_)
+                    nset += 1
+            spec["alpha_frames"] = nset
+        # Pose-memory write keyed by the model's OWN (untrained) self-view confidence (arm mg_conf):
+        # model keys mem_gate_src / mem_gate_conf_soft / mem_gate_conf_wmin. Independent of the
+        # head / const / freeze_after / alpha paths above (they may be combined).
+        if mg.get("src") is not None:
+            src = str(mg["src"]).lower()
+            if src != "conf":
+                raise ValueError(f"mem_gate.src must be 'conf', got {mg['src']!r}")
+            soft = float(mg.get("soft", 0.5))
+            cwmin = float(mg.get("wmin", 0.5))
+            for v_ in views:
+                v_["mem_gate_src"] = _v1(1.0)
+                v_["mem_gate_conf_soft"] = _v1(soft)
+                v_["mem_gate_conf_wmin"] = _v1(cwmin)
+            spec["src"] = src
+            spec["soft"] = soft
+            spec["conf_wmin"] = cwmin
+        if not spec:
+            raise ValueError(f"mem_gate has none of head / const / freeze_after / alpha / src: {mg}")
+        active["mem_gate"] = spec
+    return active
+
+
+def _trace_jsonable(trace):
+    """model._wgate_trace entries (t, weight[, ...]) -> lists of python scalars
+    (0-d / 1-element tensors and numpy scalars become floats; longer tensors become lists)."""
+    out = []
+    for e in trace:
+        row = []
+        for x in (list(e) if isinstance(e, (tuple, list)) else [e]):
+            if hasattr(x, "detach"):
+                x = x.detach().float().cpu().reshape(-1)
+                x = float(x[0]) if x.numel() == 1 else x.tolist()
+            elif isinstance(x, np.ndarray):
+                x = float(x.reshape(-1)[0]) if x.size == 1 else x.reshape(-1).tolist()
+            elif isinstance(x, (np.floating, np.integer)):
+                x = float(x)
+            row.append(x)
+        out.append(row)
+    return out
+
+
+def dump_wgate_trace(model, eval_dir, scene, active):
+    """Write <eval_dir>/wgate_trace.json = {"scene", "gates", "trace": [[t, weight], ...], ...}
+    from model._wgate_trace (the model appends (t, weight) at every gated decoder step, (t, a_t, b_t)
+    when both gates are on, and resets the lists at t == 0, so after inference they hold exactly this
+    scene). The model's per-gate lists, when present, are dumped alongside: "trace_frame" [[t, a_t]],
+    "trace_mem" [[t, b_t]], "trace_logvar" [[t, "frame"|"mem", [log sigma^2 ...]]] (the raw head
+    outputs, so weights can be recomputed for another wmin without rerunning).
+    Returns the number of "trace" rows written (0 when the model recorded nothing)."""
+    import json
+    trace = getattr(model, "_wgate_trace", None) or []
+    os.makedirs(eval_dir, exist_ok=True)
+    payload = {"scene": scene, "gates": active, "trace": _trace_jsonable(trace)}
+    for key in ("frame", "mem", "logvar", "token"):  # token: per-token gate [mean on-image, mean register, sd, min, max]
+        extra = getattr(model, f"_wgate_trace_{key}", None)
+        if extra:
+            payload[f"trace_{key}"] = _trace_jsonable(extra)
+    with open(os.path.join(eval_dir, "wgate_trace.json"), "w") as f:
+        json.dump(payload, f)
+    return len(payload["trace"])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -158,9 +411,17 @@ def main():
         "optional): block [frames] (update=False); alpha {frame: a} (soft commit "
         "state<-a*new+(1-a)*old); reset [frames] (state/mem reset to init AFTER "
         "that frame's commit); token_gate {frames: [..] | 'all', q, gmin} "
-        "(per-state-token commit keyed on the frame's own confidence). Frame 0 "
+        "(per-state-token commit keyed on the frame's own confidence); "
+        "frame_gate {head, wmin} / mem_gate {head, wmin} | {const} | "
+        "{freeze_after} | {alpha: {frame: b}} (write-gate variants, see "
+        "WRITE_GATE_VARIANTS.md and apply_wgate_controls). Frame 0 "
         "is never blocked. Combines with --skip_frames_file.",
     )
+    ap.add_argument("--unc_head", default="", help="uncgate head checkpoint (head.pth from train_unc_gate.py); "
+                    "attaches the head to the frozen model so control_json token_gate.src='unc' can key the token gate on it")
+    ap.add_argument("--unc_mode", default="", choices=["", "v1", "v2"], help="uncgate head type; read from the checkpoint if empty")
+    ap.add_argument("--conf_branch", default="", help="trained self-view confidence branch (conf_branch.pth from train_conf_gate.py); "
+                    "replaces the conf channel of the self-view head (xyz/pose untouched)")
     ap.add_argument(
         "--skip_mode",
         choices=["block", "drop"],
@@ -257,6 +518,71 @@ def main():
               flush=True)
         model.pose_gru = None
     model.eval()
+    unc_state = {"path": None}
+
+    def attach_unc(path, mode=""):
+        # uncgate: attach a trained registration-uncertainty head (frozen model untouched).
+        # Called from --unc_head and from control_json token_gate.unc_head (per-arm heads in sweeps).
+        if path == unc_state["path"]:
+            return
+        from dust3r.uncgate.heads import PixelUncHead, TokenUncHead
+        uck = torch.load(path, map_location="cpu", weights_only=False)
+        umode = mode or uck.get("mode", "")
+        assert umode in ("v1", "v2"), f"unc_mode unknown ({umode!r}); pass --unc_mode"
+        hcfg = uck.get("head_cfg", {})
+        head = PixelUncHead(**hcfg) if umode == "v1" else TokenUncHead(**hcfg)
+        head.load_state_dict(uck["head"])
+        head = head.to(device).eval()
+        model.attach_unc_gate(head, umode, train=False)
+        unc_state["path"] = path
+        print(f"{tag} uncgate head attached: mode={umode} from {path} "
+              f"({sum(p.numel() for p in head.parameters())/1e6:.2f}M params)", flush=True)
+
+    cb_state = {"path": None}
+
+    def attach_cb(path):
+        if path == cb_state["path"]:
+            return
+        ck = torch.load(path, map_location="cpu", weights_only=False)
+        model.attach_conf_branch(ck["conf"], train=False)
+        model.downstream_head.dpt_self.head.to(device).eval()
+        cb_state["path"] = path
+        print(f"{tag} conf branch attached from {path} (step {ck.get('step')})", flush=True)
+
+    # wgate (WRITE_GATE_VARIANTS.md): the two write-gate heads, attached once per path from
+    # control_json frame_gate.head / mem_gate.head; the loaded dict is cached so the
+    # per-scene control parsing can read the trainer's "wmin" without reloading.
+    fg_state = {"path": None, "ck": None}
+    mg_state = {"path": None, "ck": None}
+
+    def attach_fg(path):
+        if path != fg_state["path"]:
+            ck = load_wgate_head(path)
+            attach_wgate_head(model, "frame", ck)      # dispatches on ck["mode"] (sigma | weight)
+            fg_state["path"], fg_state["ck"] = path, ck
+            # sys.__stdout__: apply_wgate_controls runs inside the redirect_stdout(os.devnull)
+            # block that silences prepare_input, which would swallow this line.
+            print(f"{tag} frame gate head attached from {path} (mode={wgate_mode(ck)}, "
+                  + (f"log_ref={float(ck['log_ref']):.4f}, " if wgate_mode(ck) != "weight" else
+                     f"init_logit={ck.get('init_logit')}, ")
+                  + f"wmin_train={ck.get('wmin')})", file=sys.__stdout__, flush=True)
+        return fg_state["ck"]
+
+    def attach_mg(path):
+        if path != mg_state["path"]:
+            ck = load_wgate_head(path)
+            attach_wgate_head(model, "mem", ck)        # dispatches on ck["mode"] (sigma | weight)
+            mg_state["path"], mg_state["ck"] = path, ck
+            print(f"{tag} mem gate head attached from {path} (mode={wgate_mode(ck)}, "
+                  + (f"log_ref_t={float(ck['log_ref_t']):.4f}, log_ref_R={float(ck['log_ref_R']):.4f}, "
+                     if wgate_mode(ck) != "weight" else f"init_logit={ck.get('init_logit')}, ")
+                  + f"wmin_train={ck.get('wmin')})", file=sys.__stdout__, flush=True)
+        return mg_state["ck"]
+
+    if args.conf_branch:
+        attach_cb(args.conf_branch)
+    if args.unc_head:
+        attach_unc(args.unc_head, args.unc_mode)
     print(f"{tag} model loaded in {time.time()-t0:.1f}s", flush=True)
 
     skip_frames = {}
@@ -274,6 +600,10 @@ def main():
         with open(args.control_json) as f:
             controls = json.load(f)
         print(f"{tag} control json: {args.control_json} ({len(controls)} scenes)", flush=True)
+        if args.skip_mode != "block":
+            print(f"{tag} WARNING: --control_json with --skip_mode {args.skip_mode}: only the 'block' lists "
+                  "are honoured (as drops); alpha/alpha_all/reset/trigger/token_gate/frame_gate/mem_gate "
+                  "controls are IGNORED in this mode -- every scene runs plain apart from the drops", flush=True)
 
     fail_log = os.path.join(args.eval_base, f"_failures_shard{args.shard_id}.txt")
     os.makedirs(args.eval_base, exist_ok=True)
@@ -320,8 +650,15 @@ def main():
             frame_ids = None
             for attempt in range(2):
                 outputs = state_args = views = None
+                wg_active = None
                 try:
                     ctl = controls.get(scene) or controls.get("*", {})
+                    if controls and "*" not in controls and scene not in controls and attempt == 0:
+                        # per-scene control json (an oracle arm) without this scene: it runs PLAIN and
+                        # is scored under this arm's label; wgate_table.py drops it via the arm's
+                        # control.json / .skipped.txt sidecar (wgate_make_controls.py)
+                        print(f"{tag} WARNING: {scene} has no control entry in {args.control_json} -> plain",
+                              flush=True)
                     bad = set(skip_frames.get(scene, [])) | set(int(b) for b in ctl.get("block", []))
                     bad = {b for b in bad if 0 < b < len(img_paths)}
                     frame_ids = None
@@ -364,12 +701,32 @@ def main():
                                     v_["conf_trigger_warmup"] = torch.tensor(float(trig.get("warmup", 8))).unsqueeze(0)
                                     v_["conf_trigger_window"] = torch.tensor(float(trig.get("window", 0))).unsqueeze(0)
                             tg = ctl.get("token_gate")
+                            if tg and tg.get("unc_head"):
+                                attach_unc(tg["unc_head"], tg.get("unc_mode", ""))
+                            if tg and tg.get("conf_branch"):
+                                attach_cb(tg["conf_branch"])
                             if tg:
                                 frs = range(len(views)) if tg.get("frames") == "all" else [int(x) for x in tg.get("frames", [])]
                                 for fr_ in frs:
                                     if 0 <= fr_ < len(views):
                                         views[fr_]["token_gate_q"] = torch.tensor(float(tg["q"])).unsqueeze(0)
                                         views[fr_]["token_gate_gmin"] = torch.tensor(float(tg.get("gmin", 0.0))).unsqueeze(0)
+                                        # align: none (legacy, default) | patch | patch_shuffle -> model.py token gate
+                                        al_ = {"none": 0, "patch": 1, "patch_shuffle": 2}[tg.get("align", "none")]
+                                        if al_:
+                                            views[fr_]["token_gate_align"] = torch.tensor(float(al_)).unsqueeze(0)
+                                            if tg.get("offg") is not None:
+                                                views[fr_]["token_gate_offg"] = torch.tensor(float(tg["offg"])).unsqueeze(0)
+                                        # src: conf_self (default) | unc (attached uncgate head score); ema: per-token EMA
+                                        src_ = {"conf_self": 0, "unc": 3}[tg.get("src", "conf_self")]
+                                        if src_:
+                                            views[fr_]["token_gate_src"] = torch.tensor(float(src_)).unsqueeze(0)
+                                        if tg.get("ema") is not None:
+                                            views[fr_]["token_gate_ema"] = torch.tensor(float(tg["ema"])).unsqueeze(0)
+                                        if tg.get("soft") is not None:
+                                            views[fr_]["token_gate_soft"] = torch.tensor(float(tg["soft"])).unsqueeze(0)
+                            # write-gate variants: frame_gate / mem_gate keys (see apply_wgate_controls)
+                            wg_active = apply_wgate_controls(views, ctl, attach_fg, attach_mg)
                         with torch.no_grad():
                             outputs, state_args = inference(views, model, device)
                         nfr = save_depth_camera(
@@ -387,6 +744,13 @@ def main():
                                             "z": list(getattr(model, "_maks_z_hist", []))}, _f)
                             model._maks_conf_hist = []
                             model._maks_triggered = []
+                        if wg_active:
+                            # (t, weight) per gated decoder step -> <eval_dir>/wgate_trace.json;
+                            # wgate_make_controls.py reads these for the dose-matched constants.
+                            ntr = dump_wgate_trace(model, eval_dir, scene, wg_active)
+                            if ntr == 0:
+                                print(f"{tag} WARNING: {scene}: wgate controls active "
+                                      f"({sorted(wg_active)}) but model._wgate_trace is empty", flush=True)
                     if bad or ctl:
                         print(f"{tag} {scene}: {args.skip_mode} {len(bad)}/{len(img_paths)} frames"
                               + (f"; controls={sorted(ctl.keys())}" if ctl else ""), flush=True)

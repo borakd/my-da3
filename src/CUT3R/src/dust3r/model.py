@@ -814,6 +814,31 @@ class PoseGRU(nn.Module):
         return torch.cat([t, q], dim=-1), hidden
 
 
+def _wgate_ck_kind(ck):
+    """"frame" | "pose" | None: which gate a whole-dict wgate checkpoint belongs to.
+
+    Reads the variant-C trainer's "kind" / "site" metadata ("state" = the frame gate, "mem" = the
+    pose-memory gate), else GateWeightHead.checkpoint()'s head_cfg["kind"]. None = not declared, which
+    every pre-variant-C checkpoint is (they are then accepted by either gate, as before).
+    """
+    k = ck.get("kind", None) or (ck.get("head_cfg") or {}).get("kind", None)
+    if k is None:
+        site = ck.get("site", None)
+        k = {"state": "frame", "frame": "frame", "mem": "pose", "pose": "pose"}.get(str(site).lower()) if site else None
+    return None if k is None else str(k).lower()
+
+
+def _wgate_grad_ctx(train):
+    """Grad context for a wgate head's forward: no_grad unless it was attached with train=True.
+
+    Never ENABLES grad inside an outer torch.no_grad(), so inference stays graph-free even if a
+    trainable head is left attached and the eval path is untouched by the variant-C additions.
+    Module level on purpose: the wgate tests exercise the hooks on a stub that binds the methods
+    one by one (WRITE_GATE_VARIANTS.md, variant C).
+    """
+    return torch.set_grad_enabled(bool(train) and torch.is_grad_enabled())
+
+
 class ARCroco3DStereo(CroCoNet):
     config_class = ARCroco3DStereoConfig
     base_model_prefix = "arcroco3dstereo"
@@ -1803,10 +1828,27 @@ class ARCroco3DStereo(CroCoNet):
             pose_pos_group,
             init_state_feat,
         )
+        # --- wgate (WRITE_GATE_VARIANTS.md): frame-level features + confidence of the proposed
+        # state write, read from (new_state_feat, state_feat, global image feature) BEFORE the
+        # commit. (None, None) unless a frame_gate key is set or model.wgate_record is a list;
+        # the head runs detached, fp32, autocast off. The weight a_t is applied to the STATE
+        # commit only (state = a*proposal + (1-a)*old; multiplied into state_mask right before the
+        # commit, after update_alpha / the token gate, so those, resets and update=False all
+        # compose). With the per-view key "frame_gate_joint" > 0 it instead multiplies
+        # update_mask at the update_alpha site and so scales the retriever-mem commit too
+        # (the pre-2026-09-21 behaviour, kept as an explicit option for the group).
+        wg_frame_w, wg_frame_feat = self._wgate_frame_pre(
+            views, view_indices, new_state_feat, state_feat, global_img_feat_group
+        )
+        wg_tok_w = None
+        if wg_frame_w is not None and wg_frame_w.dim() == 2:
+            wg_tok_w, wg_frame_w = wg_frame_w, None  # PER-TOKEN weights (kind="token" head): state-only multiply below
+        wg_frame_joint = wg_frame_w is not None and (self._wgate_key(views, view_indices, "frame_gate_joint") or 0.0) > 0
         if self.pose_head_flag:
             out_pose_feat_group = dec[-1][:, :group_size]
             pooled_pose_feat = out_pose_feat_group.mean(dim=1, keepdim=True)
             new_mem = self.pose_retriever.update_mem(mem, global_img_feat_group, pooled_pose_feat)
+            new_mem = self._wgate_mem_gate(views, view_indices, new_mem, mem, out_pose_feat_group[:, 0])  # wgate mem gate: b*update + (1-b)*mem, b_0 = 1; identity without keys
         else:
             new_mem = mem
         assert len(dec) == self.dec_depth + 1
@@ -1838,6 +1880,24 @@ class ARCroco3DStereo(CroCoNet):
                 head_input, shape_group[local_idx], pos=pos_group[local_idx]
             )
             res_group.append(res)
+
+        # --- uncgate: registration-uncertainty head on the FROZEN model (v1 pixel / v2 token) ---
+        # Attached via attach_unc_gate(); absent => byte-identical path. Consumes only
+        # features this step already produced; writes res["unc_s"] (v1, B,2,H,W),
+        # res["unc_s_tok"] (v2, B,n_state,2) and res["unc_score_tok"] (B,n_state; NaN
+        # off-image for v1) for the token gate / telemetry / training loss.
+        if getattr(self, "unc_gate", None) is not None and group_size == 1:
+            start0, end0 = token_offsets[0]
+            img_tok = dec[self.dec_depth][:, group_size + start0 : group_size + end0] if self.pose_head_flag \
+                else dec[self.dec_depth][:, start0:end0]
+            self._unc_forward(img_tok, new_state_feat, pos_group[0], shape_group[0], res_group[-1])
+
+        # --- wgate recording hook: model.wgate_record = [] collects one dict per step
+        # {t, frame_feat (1796,), pose_feat (768,), camera_pose (7,)} on CPU (see _wgate_record_step).
+        if isinstance(getattr(self, "wgate_record", None), list):
+            self._wgate_record_step(
+                view_indices, wg_frame_feat, dec[-1][:, 0] if self.pose_head_flag else None, res_group[-1]
+            )
 
         if feed_prev_pred:
             # Stash this step's predicted pose for the next step's ray map.
@@ -1934,6 +1994,8 @@ class ARCroco3DStereo(CroCoNet):
                  else torch.ones(update_mask.shape[0], device=update_mask.device, dtype=update_mask.dtype)
                  for a in alphas], dim=0).max(dim=0).values
             update_mask = update_mask * alpha[:, None, None]
+        if wg_frame_w is not None and wg_frame_joint:
+            update_mask = update_mask * wg_frame_w.to(update_mask.dtype)[:, None, None]  # wgate frame gate, JOINT mode only ("frame_gate_joint" > 0): a_t scales state AND retriever-mem commit, exactly like update_alpha
         state_mask = update_mask
         tg_q = [views[i].get("token_gate_q", None) for i in view_indices] if triggered else [None] * len(view_indices)
         if any(q is not None for q in tg_q):
@@ -1944,20 +2006,133 @@ class ARCroco3DStereo(CroCoNet):
             conf = res_last.get("conf_self", res_last.get("conf"))  # (B, H, W), >= 1
             n_state = state_feat.shape[1]
             width = int(round(n_state ** 0.5))
-            pooled = torch.nn.functional.adaptive_avg_pool2d(
-                torch.log(conf.float().clamp(min=1.0))[:, None], (width, width)
-            ).flatten(1)  # (B, width*width), row-major like the state grid
-            if pooled.shape[1] != n_state:
-                pooled = torch.nn.functional.interpolate(
-                    pooled[:, None], size=n_state, mode="linear", align_corners=False)[:, 0]
-            ranks = pooled.argsort(dim=1).argsort(dim=1).float() / max(n_state - 1, 1)
-            tok = torch.where(ranks >= 1.0 - q, torch.ones_like(ranks), torch.full_like(ranks, gmin))
+            # "token_gate_align" (optional, int code): 0/absent = legacy path below
+            # (square adaptive pool + linear resample of the flattened grid; for the
+            # 768-token model that is 28x28=784 -> 768, i.e. progressively shifted
+            # rows). 1 = "patch": state token i sits at the RoPE position
+            # (i // w_pe, i % w_pe) with w_pe as in _encode_state (int(sqrt(n)),
+            # +1 if odd); image patches sit at (row, col) in the SAME units, so the
+            # on-image tokens (row < H/p, col < W/p) take the mean log-conf of their
+            # own patch and are ranked among themselves; off-image tokens always
+            # commit fully. 2 = "patch_shuffle": as 1 but the patch scores are
+            # permuted by a fixed per-frame permutation (alignment control: same
+            # multiset of weights, spatial correspondence destroyed).
+            al_keys = [views[i].get("token_gate_align", None) for i in view_indices]
+            align = int(float([a for a in al_keys if a is not None][0].reshape(-1)[0])) if any(a is not None for a in al_keys) else 0
+            logc = torch.log(conf.float().clamp(min=1.0))[:, None]  # (B, 1, H, W)
+            _src_keys0 = [views[i].get("token_gate_src", None) for i in view_indices]
+            if align == 0 and any(x is not None and int(float(x.reshape(-1)[0])) == 3 for x in _src_keys0):
+                raise RuntimeError("token_gate_src=3 (uncgate head) requires token_gate_align >= 1 (aligned grid)")
+            if align == 0:
+                pooled = torch.nn.functional.adaptive_avg_pool2d(
+                    logc, (width, width)
+                ).flatten(1)  # (B, width*width), row-major like the state grid
+                if pooled.shape[1] != n_state:
+                    pooled = torch.nn.functional.interpolate(
+                        pooled[:, None], size=n_state, mode="linear", align_corners=False)[:, 0]
+                ranks = pooled.argsort(dim=1).argsort(dim=1).float() / max(n_state - 1, 1)
+                tok = torch.where(ranks >= 1.0 - q, torch.ones_like(ranks), torch.full_like(ranks, gmin))
+                grid_desc = f"legacy {width}x{width}->{n_state}"
+            else:
+                w_pe = int(n_state ** 0.5)
+                w_pe = w_pe + 1 if w_pe % 2 == 1 else w_pe
+                try:
+                    psz = int(self.patch_embed.patch_size[0])
+                except Exception:
+                    psz = 16
+                ph, pw = int(conf.shape[-2]) // psz, int(conf.shape[-1]) // psz
+                Bc = conf.shape[0]
+                pooled = torch.nn.functional.adaptive_avg_pool2d(logc, (ph, pw))[:, 0]  # (B, ph, pw)
+                if align == 2:
+                    gen = torch.Generator(device="cpu").manual_seed(1000003 + int(view_indices[0]))
+                    perm = torch.randperm(ph * pw, generator=gen).to(pooled.device)
+                    pooled = pooled.reshape(Bc, ph * pw)[:, perm].reshape(Bc, ph, pw)
+                idx = torch.arange(n_state, device=pooled.device)
+                r_idx, c_idx = idx // w_pe, idx % w_pe
+                on = (r_idx < ph) & (c_idx < pw)
+                n_on = int(on.sum().item())
+                score_on = pooled[:, r_idx[on], c_idx[on]]  # (B, n_on)
+                # "token_gate_src" (optional int): 0/absent = self-view conf (above);
+                # 3 = the attached uncgate head's per-token score (higher = more
+                # confident), which requires attach_unc_gate() and align >= 1.
+                src_keys = [views[i].get("token_gate_src", None) for i in view_indices]
+                tg_src = int(float([x for x in src_keys if x is not None][0].reshape(-1)[0])) if any(x is not None for x in src_keys) else 0
+                if tg_src == 3:
+                    if "unc_score_tok" not in res_last:
+                        raise RuntimeError("token_gate_src=3 needs an attached uncgate head (attach_unc_gate)")
+                    score_on = res_last["unc_score_tok"].float()[:, on]
+                    if align == 2:
+                        # shuffled-alignment control must also permute the head's patch scores
+                        sg = torch.full((Bc, ph * pw), float("nan"), device=score_on.device, dtype=score_on.dtype)
+                        sg[:, r_idx[on] * pw + c_idx[on]] = score_on
+                        sg = sg[:, perm]
+                        score_on = sg[:, r_idx[on] * pw + c_idx[on]]
+                # "token_gate_soft" (optional float T > 0): differentiable, budget-preserving relaxation of
+                # the rank rule: w = gmin + (1-gmin) * sigmoid((score - median_frame(score)) / T) with the
+                # median detached, so the mean on-image weight stays ~(1+gmin)/2 (q=.5 by construction) and
+                # gradient flows from the commit weights back into the confidence map (trainable conf branch).
+                # "token_gate_gscale" (optional float): scales only the GRADIENT of the weights (value unchanged).
+                soft_keys = [views[i].get("token_gate_soft", None) for i in view_indices]
+                tg_soft = float([x for x in soft_keys if x is not None][0].reshape(-1)[0]) if any(x is not None for x in soft_keys) else 0.0
+                if tg_soft > 0:
+                    med = score_on.detach().median(dim=1, keepdim=True).values
+                    tok_on = gmin + (1.0 - gmin) * torch.sigmoid((score_on - med) / tg_soft)
+                    gs_keys = [views[i].get("token_gate_gscale", None) for i in view_indices]
+                    gsc = float([x for x in gs_keys if x is not None][0].reshape(-1)[0]) if any(x is not None for x in gs_keys) else 1.0
+                    if gsc != 1.0 and tok_on.requires_grad:
+                        tok_on = tok_on.detach() + gsc * (tok_on - tok_on.detach())
+                else:
+                    ranks_on = score_on.argsort(dim=1).argsort(dim=1).float() / max(n_on - 1, 1)
+                    tok_on = torch.where(ranks_on >= 1.0 - q, torch.ones_like(ranks_on), torch.full_like(ranks_on, gmin))
+                # "token_gate_offg" (optional float, default 1.0): commit weight of the
+                # OFF-image state tokens (the global registers) in aligned modes.
+                og_keys = [views[i].get("token_gate_offg", None) for i in view_indices]
+                offg = float([o for o in og_keys if o is not None][0].reshape(-1)[0]) if any(o is not None for o in og_keys) else 1.0
+                tok = torch.full((Bc, n_state), offg, device=pooled.device, dtype=tok_on.dtype)
+                tok[:, on] = tok_on
+                # "token_gate_ema" (optional float in [0,1)): per-token temporal EMA of the
+                # commit weights, tok <- ema*prev + (1-ema)*tok; reset at view 0. The
+                # anti-jitter law of the record applied at token level.
+                ema_keys = [views[i].get("token_gate_ema", None) for i in view_indices]
+                tg_ema = float([x for x in ema_keys if x is not None][0].reshape(-1)[0]) if any(x is not None for x in ema_keys) else 0.0
+                if tg_ema > 0:
+                    prev = getattr(self, "_tok_ema", None)
+                    if int(view_indices[0]) == 0 or prev is None or prev.shape != tok.shape:
+                        prev = None
+                    tok = tok if prev is None else tg_ema * prev + (1 - tg_ema) * tok
+                    self._tok_ema = tok.detach()
+                grid_desc = f"aligned{'-shuffled' if align == 2 else ''} w_pe={w_pe} patch={ph}x{pw} on_image={n_on}/{n_state} offg={offg} src={tg_src} ema={tg_ema} soft={tg_soft}"
+            # expose the per-token commit weights (and the pooled key grid) on the view's result
+            # dict for visualisation / dumps; detached, no effect on the forward pass.
+            try:
+                res_group[-1]["tok_gate_w"] = tok.detach()
+                res_group[-1]["tok_gate_key"] = pooled.detach()
+            except Exception:
+                pass
             state_mask = update_mask * tok[:, :, None].to(state_feat.dtype)
             if not hasattr(self, "_token_gate_announced"):
-                print(f"[token_gate] ACTIVE: q={q} gmin={gmin} n_state={n_state} grid={width}x{width}", flush=True)
+                print(f"[token_gate] ACTIVE: q={q} gmin={gmin} n_state={n_state} {grid_desc}", flush=True)
                 self._token_gate_announced = True
+        # wgate arm `fg_conf`: STATE-ONLY frame weight a_t keyed by frame t's OWN self-view confidence
+        # (None, so nothing below changes, unless the per-view key "frame_gate_src" is present; None at
+        # t == 0). It feeds the existing state-only frame-gate multiply; the mem commit never sees it.
+        wg_fconf_a = self._wgate_frame_conf(views, view_indices, res_group)
+        if wg_fconf_a is not None:
+            wg_frame_w = wg_fconf_a  # the hook refuses frame_gate_on/_const/_joint, so wg_frame_w was None here
+        if wg_tok_w is not None:  # per-token a_{t,i} (a_0 = 1: None at t == 0), STATE ONLY; the mem commit keeps update_mask
+            state_mask = state_mask * wg_tok_w.to(state_mask.dtype)[:, :, None]
+        if wg_frame_w is not None and not wg_frame_joint:
+            state_mask = state_mask * wg_frame_w.to(state_mask.dtype)[:, None, None]  # wgate frame gate a_t (a_0 = 1), STATE ONLY: state = a*proposal + (1-a)*old; the mem commit below keeps update_mask
         state_feat = new_state_feat * state_mask + state_feat * (1 - state_mask)
-        mem = new_mem * update_mask + mem * (1 - update_mask)
+        # wgate arm `mg_conf`: pose-memory write keyed by the model's OWN (untrained) self-view
+        # confidence -- b_t from _wgate_mem_conf (None, hence mem_mask IS update_mask and the
+        # commit is bit-identical, unless the per-view key "mem_gate_src" is present). The state
+        # commit above and the token gate are untouched by this path.
+        mem_mask = update_mask
+        wg_mem_conf_b = self._wgate_mem_conf(views, view_indices, res_group)
+        if wg_mem_conf_b is not None:
+            mem_mask = update_mask * wg_mem_conf_b.to(update_mask.dtype)[:, None, None]
+        mem = new_mem * mem_mask + mem * (1 - mem_mask)
         reset_mask = torch.stack([views[i]["reset"] for i in view_indices], dim=0).any(dim=0)
         reset_mask = reset_mask[:, None, None].float()
         state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
@@ -1966,6 +2141,619 @@ class ARCroco3DStereo(CroCoNet):
             print(f"[GroupedUpdate] committed single state/memory update for views {view_indices}")
             self._debug_grouped_updates_emitted = debug_emitted + 1
         return res_group, (state_feat, mem)
+
+    # ------------------------------------------------------------------ conf branch (trainable self-view confidence)
+    def attach_conf_branch(self, state_dict=None, train=False):
+        """Replace the self-view DPT head's output stack with ConfBranchHead: the frozen original stack
+        still produces xyz (channels 0:3) and a TRAINABLE copy of that stack (initialised from the original
+        weights) produces the confidence channel. At init the outputs are byte-identical to the plain model.
+        Returns the trainable branch module. attach_conf_branch(None, train=False) with an existing branch
+        just returns it; pass state_dict to load trained weights."""
+        from dust3r.uncgate.conf_branch import ConfBranchHead
+        head_mod = self.downstream_head.dpt_self.head  # self.head is the landscape wrapper function
+        if not isinstance(head_mod, ConfBranchHead):
+            head_mod = ConfBranchHead(head_mod)
+            self.downstream_head.dpt_self.head = head_mod
+        if state_dict is not None:
+            head_mod.conf.load_state_dict(state_dict)
+        for p_ in head_mod.base.parameters():
+            p_.requires_grad_(False)
+        for p_ in head_mod.conf.parameters():
+            p_.requires_grad_(bool(train))
+        return head_mod.conf
+
+    # ------------------------------------------------------------------ uncgate
+    def attach_unc_gate(self, head, mode, train=False):
+        """Attach a registration-uncertainty head (dust3r.uncgate.heads) to the frozen model.
+
+        mode: "v1" (PixelUncHead on the final decoder image tokens -> per-pixel s (B,2,H,W),
+              pooled to the RoPE-aligned state grid) or "v2" (TokenUncHead on
+              [new_state_feat_i ; aligned image token_i ; on_flag] -> per-token s).
+        train: if True the head runs with grad enabled (features are detached), so
+              a training loop can backprop into the head while the model stays frozen.
+        Detach with attach_unc_gate(None, None).
+        """
+        if head is None:
+            self.unc_gate = None
+            self.unc_gate_mode = None
+            self.unc_gate_train = False
+            return
+        assert mode in ("v1", "v2"), mode
+        self.unc_gate = head
+        self.unc_gate_mode = mode
+        self.unc_gate_train = bool(train)
+
+    def _unc_forward(self, img_tok, new_state_feat, pos, shape, res):
+        from dust3r.uncgate.heads import align_image_tokens_to_state, scalar_score
+        from dust3r.uncgate.flow_target import rope_token_map, pool_to_patches
+        H, W = int(shape[0, 0]), int(shape[0, 1])
+        try:
+            psz = int(self.patch_embed.patch_size[0])
+        except Exception:
+            psz = 16
+        ph, pw = H // psz, W // psz
+        n_state = new_state_feat.shape[1]
+        head = self.unc_gate
+        dev_type = "cuda" if img_tok.is_cuda else "cpu"
+        # The head always runs in fp32 with autocast OFF (the eval worker is fp32; a bf16-trained head
+        # would see features it was never trained on), and its ranking outputs are detached telemetry.
+        with torch.set_grad_enabled(bool(getattr(self, "unc_gate_train", False))), \
+             torch.autocast(device_type=dev_type, enabled=False):
+            img_tok = img_tok.detach().float()
+            if self.unc_gate_mode == "v1":
+                s = head(img_tok, (H, W))  # (B,2,H,W) log-variance (graph kept for training)
+                res["unc_s"] = s
+                score_px = scalar_score(s.detach().permute(0, 2, 3, 1))  # (B,H,W)
+                pooled = pool_to_patches(score_px[:, None], ph, pw)[:, 0]  # (B,ph,pw)
+                on, r_idx, c_idx = rope_token_map(n_state, ph, pw)
+                on = on.to(pooled.device); r_idx = r_idx.to(pooled.device); c_idx = c_idx.to(pooled.device)
+                score = torch.full((pooled.shape[0], n_state), float("nan"), device=pooled.device, dtype=pooled.dtype)
+                score[:, on] = pooled[:, r_idx[on], c_idx[on]]
+                res["unc_score_tok"] = score.detach()
+            else:
+                img_aligned, on_flag = align_image_tokens_to_state(img_tok, pos, n_state, ph, pw)
+                st_in = new_state_feat.detach().float()
+                s_tok = head(st_in, img_aligned, on_flag)  # (B,n_state,2)
+                res["unc_s_tok"] = s_tok
+                if getattr(self, "unc_gate_train", False):
+                    res["unc_inputs"] = (st_in, img_aligned.detach(), on_flag.detach())
+                score = scalar_score(s_tok.detach())
+                res["unc_score_tok"] = torch.where(on_flag[..., 0] > 0.5, score, torch.full_like(score, float("nan"))).detach()
+                res["unc_on_flag"] = on_flag.detach()
+
+    # ------------------------------------------------------------------ wgate (WRITE_GATE_VARIANTS.md)
+    # Confidence-weighted memory writes on the FROZEN model. Two independent gates, each byte-identical
+    # to the plain path unless its per-view keys are present (tensors of shape (1,), like update_alpha):
+    #   frame gate (variant 1, state write): "frame_gate_on" (> 0 => apply the attached FrameConfHead),
+    #       optional "frame_gate_wmin" (default: the wmin given to attach_frame_gate, 0.5); control
+    #       "frame_gate_const" (a_t = const for t > 0, overrides the head; per-view values give a schedule,
+    #       i.e. the V1 dose-matched constant and oracle rows run through this same branch). a_t multiplies
+    #       state_mask right before the state commit (STATE ONLY: state = a*proposal + (1-a)*old; the
+    #       retriever-mem commit keeps update_mask). "frame_gate_joint" > 0 switches to the joint mode
+    #       (a_t multiplies update_mask at the update_alpha site, so it scales the mem commit as well --
+    #       the pre-2026-09-21 behaviour and what the alpha_all / alpha controls do). a_0 = 1 (no-op at
+    #       view index 0).
+    #   mem gate (variant 2, pose-retriever memory write): "mem_gate_on" (attached PoseSigmaHead),
+    #       optional "mem_gate_wmin"; controls "mem_gate_const" (b_t = const for t > 0, overrides the head)
+    #       and "mem_gate_freeze_after" (b_t = 0 for t > k, composes with either). The write becomes
+    #       new_mem = b*update_mem(mem, key, value) + (1-b)*mem; b_0 = 1.
+    #   mem gate keyed by the model's OWN self-view confidence (arm `mg_conf`, untrained):
+    #       "mem_gate_src" (1.0 = "conf"), optional "mem_gate_conf_soft" (default .5) and
+    #       "mem_gate_conf_wmin" (default .5). b_t = wmin + (1-wmin)*sigmoid((c_t - median of the
+    #       causal history of c) / soft) with c = mean log conf_self of the frame; b_0 = 1. This
+    #       one multiplies the MEM COMMIT MASK at the commit line (_wgate_mem_conf), leaving the
+    #       state commit and the token gate bit-identical; it composes with the keys above.
+    # Trace: when a gate is on, (t, weight) is appended to self._wgate_trace (the four trace lists are
+    # reset UNCONDITIONALLY at every view index 0, keys or not, so a scene never inherits the previous
+    # scene's entries). When BOTH
+    # gates are on the entry is (t, a_t, b_t); per-gate lists self._wgate_trace_frame / _wgate_trace_mem
+    # and the raw log-variances self._wgate_trace_logvar [(t, "frame"|"mem", [s...])] are kept alongside.
+    # Recording: model.wgate_record = [] makes every decoder step append
+    # {t, frame_feat (1796,), pose_feat (768,), camera_pose (7,)} as CPU float32 (batch dim squeezed
+    # when B == 1, kept as (B, ...) otherwise). pose_h is NOT stored: recompute it from pose_feat with
+    # PoseSigmaHead.penultimate (the frozen fc1).
+    # Attached heads are ordinary submodules (self.frame_gate / self.mem_gate, like unc_gate / conf_branch):
+    # model.to()/.cuda() carries them, model.state_dict() gains "frame_gate.*" / "mem_gate.*" keys while one
+    # is attached (detach with None before saving a checkpoint of the backbone), model.train() flips their
+    # mode but neither head has a train-mode layer (LayerNorm/Linear/GELU only), and they are frozen
+    # (requires_grad False), so an optimiser built from parameters requiring grad never sees them.
+    #
+    # Variant C (WRITE_GATE_VARIANTS.md, "Variant C: the CONSEQUENCE-trained gate"). Two additions, both
+    # inert for every variant-1/2 arm:
+    #   * WEIGHT MODE. attach_*_gate also takes a dust3r.wgate.GateWeightHead, or a checkpoint dict with
+    #     "mode": "weight" ({"state_dict","wmin","init_logit",...}). The head output IS the weight then:
+    #     no sigma_to_weight / pose_sigma_to_weight, no log_ref (self.*_gate_log_ref is None), and the
+    #     resolved wmin is passed INTO the head (w = wmin + (1-wmin)*sigmoid(u)). A checkpoint without a
+    #     "mode" key, or with "mode": "sigma", takes the historical path unchanged. self.frame_gate_mode /
+    #     self.mem_gate_mode hold "sigma" | "weight". The trace records the raw logit u under the tags
+    #     "frame_u" / "mem_u" (the sigma arms keep "frame" / "mem" = log sigma^2), so a weight-mode run can
+    #     be replayed at another wmin from the trace alone.
+    #   * TRAINABLE PATH. attach_*_gate(..., train=True) keeps requires_grad=True and leaves the head in
+    #     train() mode, and the hook then runs the head WITH grad (torch.no_grad() only when train=False):
+    #     the gradient of a downstream loss reaches the head through state_mask / the mem blend. The head
+    #     INPUT features stay detached in both cases (frozen backbone; only the head's own forward carries
+    #     gradient). The mem gate's bit-exact "b == 1 for the whole batch -> return new_mem" fast path is
+    #     skipped when b requires grad (it would cut the gradient); at exactly 1 the blend is still the
+    #     identity in value. a_0 = b_0 = 1 and the const / freeze_after overrides are unchanged, and those
+    #     overrides produce a constant with no grad, as before.
+
+    @staticmethod
+    def _wgate_scalar(x):
+        """Python float of a scalar given as float / numpy / 0-d or 1-element tensor (a Python float is
+        kept exact instead of being rounded through a float32 tensor)."""
+        if torch.is_tensor(x):
+            return float(x.detach().reshape(-1)[0])
+        return float(x if not hasattr(x, "reshape") else x.reshape(-1)[0])
+
+    @staticmethod
+    def _wgate_key(views, view_indices, name):
+        """First present per-view key of the group as a Python float, else None."""
+        for i in view_indices:
+            v = views[i].get(name, None)
+            if v is not None:
+                return float(v.reshape(-1)[0]) if torch.is_tensor(v) else float(v)
+        return None
+
+    def attach_frame_gate(self, head_or_state_dict, log_ref=None, wmin=None, train=False):
+        """Attach (or detach with None) the variant-1 FrameConfHead or the variant-C GateWeightHead.
+
+        head_or_state_dict: a dust3r.wgate.FrameConfHead (sigma mode), a dust3r.wgate.GateWeightHead
+        (weight mode), a bare state_dict (sigma mode), or the whole checkpoint dict --
+        checkpoints/wgate/frame_conf_head.pth ({"state_dict","log_ref","wmin",...}) or a variant-C
+        {"state_dict","mode":"weight","wmin","init_logit",...}. The mode is read from the dict's "mode"
+        key and defaults to "sigma", so every pre-variant-C checkpoint behaves exactly as before.
+        An explicit log_ref / wmin argument always wins; when one is None it is read from the whole-dict
+        checkpoint, and wmin finally defaults to 0.5 (weight mode: to the head's own wmin first).
+        log_ref = training median of log sigma^2 (sigma mode only; weight mode has none and stores None).
+
+        train=False (default): the head is set to eval with grads off and the hook runs it under
+        torch.no_grad() -- the inference behaviour of every variant-1/2 arm. train=True (variant C's
+        trainer): requires_grad stays True, the head stays in train() mode and the hook runs it WITH
+        grad so a downstream loss can reach it through the state commit.
+
+        The head is moved to the model's device, cast to float32 and stored as the submodule
+        self.frame_gate (see the wgate comment block above).
+        """
+        if head_or_state_dict is None:
+            self.frame_gate = None
+            self.frame_gate_mode = "sigma"
+            self.frame_gate_train = False
+            return None
+        from dust3r.wgate.heads import FrameConfHead, GateWeightHead
+        mode, init_logit = "sigma", None
+        if isinstance(head_or_state_dict, GateWeightHead):
+            head, mode = head_or_state_dict, "weight"
+            assert head.kind in ("frame", "token"), f"attach_frame_gate needs a kind='frame'/'token' GateWeightHead, got {head.kind!r}"
+            if wmin is None:
+                wmin = head.wmin
+        elif isinstance(head_or_state_dict, FrameConfHead):
+            head = head_or_state_dict
+        else:
+            sd = head_or_state_dict
+            ck_kind = None
+            if "state_dict" in sd and "norm.weight" not in sd:
+                mode = str(sd.get("mode", None) or "sigma").lower()
+                if log_ref is None:
+                    log_ref = sd.get("log_ref", None)
+                if wmin is None:
+                    wmin = sd.get("wmin", None)
+                init_logit = sd.get("init_logit", None)
+                ck_kind = _wgate_ck_kind(sd)
+                assert ck_kind in (None, "frame", "token"), (
+                    f"attach_frame_gate got a {ck_kind!r}-kind wgate checkpoint (the mem gate's); "
+                    "pass it to attach_mem_gate")
+                sd = sd["state_dict"]
+            assert mode in ("sigma", "weight"), f'unknown wgate head mode {mode!r} (expected "sigma" or "weight")'
+            if mode == "weight":
+                head = GateWeightHead.from_state_dict(
+                    sd,
+                    kind="token" if ck_kind == "token" else "frame",
+                    wmin=0.5 if wmin is None else float(wmin),
+                    init_logit=2.0 if init_logit is None else float(init_logit),
+                )
+            else:
+                head = FrameConfHead.from_state_dict(sd)
+        wmin = 0.5 if wmin is None else float(wmin)
+        if mode == "weight":
+            log_ref = None  # the weight map lives inside the head; there is no reference sigma
+        else:
+            assert log_ref is not None, "attach_frame_gate needs log_ref (median log sigma^2 of the training table)"
+        dev = next(self.parameters()).device
+        head = head.to(dev).float()
+        head.train(bool(train))
+        for p_ in head.parameters():
+            p_.requires_grad_(bool(train))
+        self.frame_gate = head
+        self.frame_gate_mode = mode
+        self.frame_gate_train = bool(train)
+        self.frame_gate_log_ref = None if log_ref is None else self._wgate_scalar(log_ref)
+        self.frame_gate_wmin = float(wmin)
+        return head
+
+    def attach_mem_gate(self, head_or_state_dict, log_ref_t=None, log_ref_R=None, wmin=None, train=False):
+        """Attach (or detach with None) the variant-2 PoseSigmaHead or the variant-C GateWeightHead.
+
+        head_or_state_dict: a dust3r.wgate.PoseSigmaHead (sigma mode), a kind='pose'
+        dust3r.wgate.GateWeightHead (weight mode), the out-layer state_dict ({"weight","bias"} or
+        {"out.weight","out.bias"}, sigma mode), or the whole checkpoint dict --
+        checkpoints/wgate/pose_sigma_head.pth ({"state_dict","log_ref_t","log_ref_R","wmin",...}) or a
+        variant-C {"state_dict","mode":"weight","wmin","init_logit",...}. The mode comes from the dict's
+        "mode" key and defaults to "sigma", so every pre-variant-C checkpoint behaves exactly as before.
+        Explicit log_ref_t / log_ref_R / wmin arguments always win; a None is read from the whole-dict
+        checkpoint, and wmin finally defaults to 0.5 (weight mode: to the head's own wmin first). Weight
+        mode has no references and stores self.mem_gate_log_ref = None.
+
+        train=False (default): eval, grads off, the hook runs the head under torch.no_grad().
+        train=True (variant C's trainer): requires_grad stays True, train() mode, and the hook runs the
+        head with grad so a downstream loss reaches it through the memory blend.
+
+        Both kinds borrow self.downstream_head.pose_head.mlp.fc1/act (frozen, shared); only the new
+        out layer is loaded / trained. Stored as the submodule self.mem_gate.
+        """
+        if head_or_state_dict is None:
+            self.mem_gate = None
+            self.mem_gate_mode = "sigma"
+            self.mem_gate_train = False
+            return None
+        from dust3r.wgate.heads import GateWeightHead, PoseSigmaHead
+        pose_dec = self.downstream_head.pose_head
+        mode, init_logit = "sigma", None
+        if isinstance(head_or_state_dict, GateWeightHead):
+            head, mode = head_or_state_dict, "weight"
+            assert head.kind == "pose", f"attach_mem_gate needs a kind='pose' GateWeightHead, got {head.kind!r}"
+            if wmin is None:
+                wmin = head.wmin
+        elif isinstance(head_or_state_dict, PoseSigmaHead):
+            head = head_or_state_dict
+        else:
+            sd = head_or_state_dict
+            if "state_dict" in sd and "weight" not in sd and "out.weight" not in sd:
+                mode = str(sd.get("mode", None) or "sigma").lower()
+                if log_ref_t is None:
+                    log_ref_t = sd.get("log_ref_t", None)
+                if log_ref_R is None:
+                    log_ref_R = sd.get("log_ref_R", None)
+                if wmin is None:
+                    wmin = sd.get("wmin", None)
+                init_logit = sd.get("init_logit", None)
+                ck_kind = _wgate_ck_kind(sd)
+                assert ck_kind in (None, "pose"), (
+                    f"attach_mem_gate got a {ck_kind!r}-kind wgate checkpoint (the frame gate's); "
+                    "pass it to attach_frame_gate")
+                sd = sd["state_dict"]
+            assert mode in ("sigma", "weight"), f'unknown wgate head mode {mode!r} (expected "sigma" or "weight")'
+            if mode == "weight":
+                head = GateWeightHead.from_state_dict(
+                    sd,
+                    kind="pose",
+                    pose_decoder=pose_dec,
+                    wmin=0.5 if wmin is None else float(wmin),
+                    init_logit=2.0 if init_logit is None else float(init_logit),
+                )
+            else:
+                head = PoseSigmaHead(pose_dec).load_head_state_dict(sd)
+        wmin = 0.5 if wmin is None else float(wmin)
+        if mode == "weight":
+            log_ref_t = log_ref_R = None  # the weight map lives inside the head
+        else:
+            assert log_ref_t is not None and log_ref_R is not None, "attach_mem_gate needs log_ref_t and log_ref_R"
+        dev = next(self.parameters()).device
+        head = head.to(dev).float()
+        head.train(bool(train))
+        for p_ in head.parameters():
+            p_.requires_grad_(bool(train))
+        self.mem_gate = head
+        self.mem_gate_mode = mode
+        self.mem_gate_train = bool(train)
+        self.mem_gate_log_ref = None if log_ref_t is None else (self._wgate_scalar(log_ref_t), self._wgate_scalar(log_ref_R))
+        self.mem_gate_wmin = float(wmin)
+        return head
+
+    def _wgate_trace_append(self, t, a=None, b=None, logvar=None, tag=None):
+        """Append this step's gate weight(s) to the trace lists (created on first use; reset by
+        _wgate_frame_pre at every t == 0). An (t, a) entry already written for this t is merged into (t, a, b)."""
+        for name in ("_wgate_trace", "_wgate_trace_frame", "_wgate_trace_mem", "_wgate_trace_logvar"):
+            if not hasattr(self, name):
+                setattr(self, name, [])
+
+        def _f(w):
+            w = w.detach().float().reshape(-1).cpu()
+            return float(w[0]) if w.numel() == 1 else w.tolist()
+
+        if logvar is not None:
+            self._wgate_trace_logvar.append((int(t), tag, logvar.detach().float().reshape(-1).cpu().tolist()))
+        if a is not None:
+            self._wgate_trace_frame.append((int(t), _f(a)))
+            self._wgate_trace.append((int(t), _f(a)))
+        if b is not None:
+            self._wgate_trace_mem.append((int(t), _f(b)))
+            last = self._wgate_trace[-1] if self._wgate_trace else None
+            if last is not None and len(last) == 2 and last[0] == int(t) and self._wgate_trace_frame \
+                    and self._wgate_trace_frame[-1][0] == int(t):
+                self._wgate_trace[-1] = (int(t), last[1], _f(b))  # both gates on this step
+            else:
+                self._wgate_trace.append((int(t), _f(b)))
+
+    def _wgate_frame_pre(self, views, view_indices, new_state_feat, state_feat, global_img_feat):
+        """Frame-gate front half, run right after _recurrent_rollout (before any commit).
+
+        Returns (weight, frame_feat): weight is a (B,) float32 tensor a_t that the decoder step multiplies
+        into state_mask right before the state commit (state only; or into update_mask when
+        "frame_gate_joint" > 0), or None when nothing is to be applied (no frame_gate_on / frame_gate_const
+        key, or t == 0 where a_0 = 1 and the multiplication is skipped so numerics stay untouched).
+        a_t comes from the attached head ("frame_gate_on" > 0) -- a FrameConfHead through
+        sigma_to_weight, or, in weight mode (variant C), a GateWeightHead whose output IS a_t --
+        overridden by "frame_gate_const"
+        (the raw head log-variance is still traced when the head is on). frame_feat is the (B, 1796)
+        feature vector, computed only when the head is on or model.wgate_record is a list. The four trace
+        lists are reset UNCONDITIONALLY at t == 0 (keys or not), so a scene never inherits the previous
+        scene's trace.
+        """
+        t = int(view_indices[0])
+        if t == 0:
+            self._wgate_trace, self._wgate_trace_frame, self._wgate_trace_mem, self._wgate_trace_logvar = [], [], [], []
+            self._wgate_trace_token = []
+        on = self._wgate_key(views, view_indices, "frame_gate_on")
+        const = self._wgate_key(views, view_indices, "frame_gate_const")
+        gate_on = on is not None and on > 0
+        recording = isinstance(getattr(self, "wgate_record", None), list)
+        if not gate_on and const is None and not recording:
+            return None, None
+        assert len(view_indices) == 1, "wgate: views_per_step must be 1"
+        feat = None
+        if gate_on or recording:
+            from dust3r.wgate.heads import frame_features
+            assert global_img_feat is not None, "wgate: the model needs pose_head=True (global image feature)"
+            feat = frame_features(new_state_feat, state_feat, global_img_feat)  # (B, 1796) fp32, detached
+        if not gate_on and const is None:
+            return None, feat  # recording only
+        B, dev = new_state_feat.shape[0], new_state_feat.device
+        if t == 0:
+            self._wgate_trace_append(t, a=torch.ones(B, dtype=torch.float32, device=dev))
+            return None, feat  # a_0 = 1: the first frame is always written in full
+        w = None
+        if gate_on:
+            head = getattr(self, "frame_gate", None)
+            if head is None:
+                raise RuntimeError("frame_gate_on is set but no head is attached (call attach_frame_gate)")
+            wmin = self._wgate_key(views, view_indices, "frame_gate_wmin")
+            wmin = float(getattr(self, "frame_gate_wmin", 0.5)) if wmin is None else float(wmin)
+            mode = str(getattr(self, "frame_gate_mode", "sigma"))
+            train = bool(getattr(self, "frame_gate_train", False))
+            with _wgate_grad_ctx(train), torch.autocast(device_type=dev.type, enabled=False):
+                if mode == "weight" and getattr(head, "kind", "frame") == "token":
+                    # variant C, PER-TOKEN: one weight per state token from token_features (the frame
+                    # descriptor + the token's own proposed change); w is (B, N) and the caller applies it
+                    # to the STATE commit only. Joint (state + mem) mode has no per-token meaning.
+                    if (self._wgate_key(views, view_indices, "frame_gate_joint") or 0.0) > 0:
+                        raise RuntimeError("a kind='token' frame gate cannot run in frame_gate_joint mode")
+                    from dust3r.wgate.heads import token_features
+                    u = head.logit(token_features(new_state_feat, state_feat, global_img_feat))  # (B, N)
+                    w = head.weight_from_logit(u, wmin=wmin)  # (B, N) = wmin + (1-wmin)*sigmoid(u)
+                    s, tag = u.mean(dim=1), "token_u"  # trace the per-frame mean logit (not 768 numbers)
+                    self._wgate_trace_token_append(views, view_indices, t, w)
+                elif mode == "weight":  # variant C: the head output IS the weight (no sigma, no log_ref)
+                    u = head.logit(feat)  # (B,) raw logit, float32
+                    w = head.weight_from_logit(u, wmin=wmin)  # (B,) = wmin + (1-wmin)*sigmoid(u)
+                    s, tag = u, "frame_u"
+                else:
+                    from dust3r.wgate.heads import sigma_to_weight
+                    s, tag = head(feat), "frame"  # (B,) log sigma^2, float32
+                    w = sigma_to_weight(s, self.frame_gate_log_ref, wmin)  # (B,) in [wmin, 1]
+            self._wgate_trace_append(t, logvar=s, tag=tag)
+        if const is not None:
+            w = torch.full((B,), float(const), dtype=torch.float32, device=dev)  # control: overrides the head
+        self._wgate_trace_append(t, a=w if w.dim() == 1 else w.mean(dim=1))  # per-token: the frame's mean weight
+        return w, feat
+
+    def _wgate_trace_token_append(self, views, view_indices, t, w):
+        """Per-token frame gate: append (t, [mean on-image, mean register, sd, min, max]) of this frame's
+        (B, N) weights (batch-averaged) to self._wgate_trace_token. On-image tokens are those whose RoPE
+        position (i // w_pe, i % w_pe) falls on the image patch grid, as in the aligned token gate."""
+        if not hasattr(self, "_wgate_trace_token"):
+            self._wgate_trace_token = []
+        with torch.no_grad():
+            wd = w.detach().float()
+            N = wd.shape[1]
+            w_pe = int(N ** 0.5)
+            w_pe = w_pe + 1 if w_pe % 2 == 1 else w_pe
+            try:
+                psz = int(self.patch_embed.patch_size[0])
+            except Exception:
+                psz = 16
+            H, W = (int(x) for x in views[view_indices[0]]["img"].shape[-2:])
+            idx = torch.arange(N, device=wd.device)
+            on = ((idx // w_pe) < H // psz) & ((idx % w_pe) < W // psz)
+            row = [float(wd[:, on].mean()) if on.any() else float("nan"),
+                   float(wd[:, ~on].mean()) if (~on).any() else float("nan"),
+                   float(wd.std(dim=1, unbiased=False).mean()), float(wd.min()), float(wd.max())]
+        self._wgate_trace_token.append((int(t), row))
+
+    def _wgate_mem_gate(self, views, view_indices, new_mem, mem, pose_feat):
+        """Mem-gate wrapper of the pose-retriever write: returns b*new_mem + (1-b)*mem.
+
+        b_t comes from the attached PoseSigmaHead on pose_feat = dec[-1][:, 0] (the exact fp32 feature the
+        pose head reads), overridden by "mem_gate_const", then zeroed by "mem_gate_freeze_after" for
+        t > k. Returns new_mem itself (bit-identical) when no key is present, at t == 0 (b_0 = 1) and
+        whenever b == 1 for the whole batch WITHOUT requiring grad; otherwise the blend is computed in
+        float32. In weight mode (variant C) the attached GateWeightHead outputs b directly.
+        """
+        t = int(view_indices[0])
+        on = self._wgate_key(views, view_indices, "mem_gate_on")
+        const = self._wgate_key(views, view_indices, "mem_gate_const")
+        freeze = self._wgate_key(views, view_indices, "mem_gate_freeze_after")
+        gate_on = on is not None and on > 0
+        if not gate_on and const is None and freeze is None:
+            return new_mem
+        assert len(view_indices) == 1, "wgate: views_per_step must be 1"
+        B = new_mem.shape[0]
+        dev = new_mem.device
+        if t == 0:
+            self._wgate_trace_append(t, b=torch.ones(B, dtype=torch.float32, device=dev))
+            return new_mem  # b_0 = 1: frame 0 always written in full
+        b = None
+        if gate_on:
+            head = getattr(self, "mem_gate", None)
+            if head is None:
+                raise RuntimeError("mem_gate_on is set but no head is attached (call attach_mem_gate)")
+            wmin = self._wgate_key(views, view_indices, "mem_gate_wmin")
+            wmin = float(getattr(self, "mem_gate_wmin", 0.5)) if wmin is None else float(wmin)
+            mode = str(getattr(self, "mem_gate_mode", "sigma"))
+            train = bool(getattr(self, "mem_gate_train", False))
+            with _wgate_grad_ctx(train), torch.autocast(device_type=dev.type, enabled=False):
+                x_ = pose_feat.detach().float()  # the head input is detached in BOTH modes
+                if mode == "weight":  # variant C: the head output IS the weight (no sigma, no refs)
+                    u2 = head.logit(x_)  # (B,) raw logit
+                    b = head.weight_from_logit(u2, wmin=wmin)  # (B,) = wmin + (1-wmin)*sigmoid(u)
+                    s2, tag = u2, "mem_u"
+                else:
+                    from dust3r.wgate.heads import pose_sigma_to_weight
+                    s2, tag = head(x_), "mem"  # (B, 2) = (s_t, s_R)
+                    b = pose_sigma_to_weight(s2, self.mem_gate_log_ref, wmin)  # (B,) in [wmin, 1]
+            self._wgate_trace_append(t, logvar=s2, tag=tag)
+        if const is not None:
+            b = torch.full((B,), float(const), dtype=torch.float32, device=dev)
+        if freeze is not None and t > int(round(freeze)):
+            b = torch.zeros(B, dtype=torch.float32, device=dev)
+        if b is None:
+            b = torch.ones(B, dtype=torch.float32, device=dev)  # freeze_after with t <= k: full write
+        self._wgate_trace_append(t, b=b)
+        if bool((b == 1.0).all()) and not b.requires_grad:
+            # bit-exact fast path (b == 1 is the identity blend anyway), skipped while b carries
+            # gradient -- returning new_mem there would cut the variant-C trainer's only path to the head.
+            return new_mem
+        bb = b.float()[:, None, None]
+        return bb * new_mem.float() + (1.0 - bb) * mem.float()
+
+    def _wgate_mem_conf(self, views, view_indices, res_group):
+        """Arm `mg_conf`: pose-memory write weight from the model's OWN self-view confidence.
+
+        Returns None -- and the caller's mem commit stays bit-identical to the plain model --
+        unless the per-view key "mem_gate_src" is present (1.0 = "conf", the only source so far).
+        With it, for THIS frame
+
+            c_t = mean over pixels of log(conf_self.clamp(min=1))     (the quantity the existing
+                                                                       conf trigger computes)
+            b_t = wmin + (1 - wmin) * sigmoid((c_t - median(c_0..c_{t-1})) / soft)
+
+        over a CAUSAL history kept on the model as self._memconf_hist (reset at view index 0,
+        c_t appended AFTER it is used, so the median never sees the current frame). b_0 = 1
+        exactly (empty history) and that step returns None, so frame 0 is written in full and
+        bit-exactly. Temperature and floor come from "mem_gate_conf_soft" (default 0.5) and
+        "mem_gate_conf_wmin" (default 0.5).
+
+        fp32, autocast off, no grad (inference-only arm). b_t is appended to self._wgate_trace /
+        _wgate_trace_mem exactly like the other gates, so the worker's trace dump and
+        wgate_make_controls.py work unchanged. Orthogonal to _wgate_mem_gate (which rescales
+        new_mem at the update_mem site): both may be on, and then the write is b_head * b_conf.
+        """
+        src = self._wgate_key(views, view_indices, "mem_gate_src")
+        if src is None:
+            return None
+        assert int(round(src)) == 1, f"mem_gate_src: only 1.0 ('conf') is defined, got {src}"
+        assert len(view_indices) == 1, "wgate: views_per_step must be 1"
+        t = int(view_indices[0])
+        if t == 0 or not hasattr(self, "_memconf_hist"):
+            self._memconf_hist = []
+        res_last = res_group[-1]
+        conf_t = res_last.get("conf_self", res_last.get("conf"))
+        assert conf_t is not None, "mem_gate_src='conf' needs the self-view confidence in res_group[-1]"
+        dev = conf_t.device
+        soft = self._wgate_key(views, view_indices, "mem_gate_conf_soft")
+        soft = 0.5 if soft is None else float(soft)
+        wmin = self._wgate_key(views, view_indices, "mem_gate_conf_wmin")
+        wmin = 0.5 if wmin is None else float(wmin)
+        with torch.no_grad(), torch.autocast(device_type=dev.type, enabled=False):
+            c_now = float(torch.log(conf_t.float().clamp(min=1.0)).mean().item())
+            from dust3r.wgate.heads import conf_mem_weight
+            b_val = float(conf_mem_weight(c_now, self._memconf_hist, soft, wmin))
+        self._memconf_hist.append(c_now)
+        B = conf_t.shape[0]
+        b = torch.full((B,), b_val, dtype=torch.float32, device=dev)
+        self._wgate_trace_append(t, b=b)
+        if b_val == 1.0:
+            return None  # b == 1 is the identity blend: keep the commit bit-exact (t == 0 lands here)
+        return b
+
+    def _wgate_frame_conf(self, views, view_indices, res_group):
+        """Arm `fg_conf`: STATE-ONLY frame write weight a_t from the model's OWN self-view confidence.
+
+        The per-frame counterpart of the aligned token gate: the same signal (log conf_self, whose
+        per-frame mean is the mean of the token gate's 240 patch keys), one number per frame instead
+        of one per state token. Returns None -- and the state commit stays bit-identical to the plain
+        model -- unless the per-view key "frame_gate_src" is present (1.0 = "conf", the only source).
+        With it, for THIS frame
+
+            c_t = mean over pixels of log(conf_self.clamp(min=1))
+            soft > 0 : a_t = wmin + (1 - wmin) * sigmoid((c_t - median(c_0..c_{t-1})) / soft)
+            soft == 0: a_t = 1 if c_t >= median(c_0..c_{t-1}) else wmin    (the token gate's hard
+                       rank rule at q = .5, with the median taken over the scene's past frames
+                       instead of over the current frame's tokens)
+
+        over a CAUSAL history self._frameconf_hist (reset at view index 0, c_t appended AFTER use, so
+        the median never sees the current frame). a_0 = 1 exactly (empty history -> None). Keys:
+        "frame_gate_conf_soft" (default 0.5), "frame_gate_conf_wmin" (default 0.5). Refuses to share a
+        frame with frame_gate_on / frame_gate_const / frame_gate_joint (one a_t source per arm).
+        fp32, autocast off, no grad. Traces (t, a_t) into trace/trace_frame and (t, "frame_conf", [c_t])
+        into trace_logvar, so the dose and the per-frame confidence series are both on disk.
+        """
+        src = self._wgate_key(views, view_indices, "frame_gate_src")
+        if src is None:
+            return None
+        assert int(round(src)) == 1, f"frame_gate_src: only 1.0 ('conf') is defined, got {src}"
+        assert len(view_indices) == 1, "wgate: views_per_step must be 1"
+        if (self._wgate_key(views, view_indices, "frame_gate_on") or 0.0) > 0 \
+                or self._wgate_key(views, view_indices, "frame_gate_const") is not None \
+                or (self._wgate_key(views, view_indices, "frame_gate_joint") or 0.0) > 0:
+            raise RuntimeError("frame_gate_src cannot be combined with frame_gate_on / _const / _joint")
+        t = int(view_indices[0])
+        if t == 0 or not hasattr(self, "_frameconf_hist"):
+            self._frameconf_hist = []
+        res_last = res_group[-1]
+        conf_t = res_last.get("conf_self", res_last.get("conf"))
+        assert conf_t is not None, "frame_gate_src='conf' needs the self-view confidence in res_group[-1]"
+        dev = conf_t.device
+        soft = self._wgate_key(views, view_indices, "frame_gate_conf_soft")
+        soft = 0.5 if soft is None else float(soft)
+        wmin = self._wgate_key(views, view_indices, "frame_gate_conf_wmin")
+        wmin = 0.5 if wmin is None else float(wmin)
+        assert soft >= 0 and 0.0 <= wmin <= 1.0, f"frame_gate_conf: soft {soft} must be >= 0, wmin {wmin} in [0, 1]"
+        with torch.no_grad(), torch.autocast(device_type=dev.type, enabled=False):
+            c_now = float(torch.log(conf_t.float().clamp(min=1.0)).mean().item())
+            hist = self._frameconf_hist
+            if not hist:
+                a_val = 1.0  # a_0 = 1: frame 0 is always written in full
+            elif soft > 0:
+                from dust3r.wgate.heads import conf_mem_weight
+                a_val = float(conf_mem_weight(c_now, hist, soft, wmin))
+            else:
+                med = float(torch.as_tensor(list(hist), dtype=torch.float32).median())
+                a_val = 1.0 if c_now >= med else wmin
+        self._frameconf_hist.append(c_now)
+        a = torch.full((conf_t.shape[0],), a_val, dtype=torch.float32, device=dev)
+        self._wgate_trace_append(t, logvar=torch.tensor([c_now]), tag="frame_conf")
+        self._wgate_trace_append(t, a=a)
+        if a_val == 1.0:
+            return None  # a == 1 is the identity blend: keep the commit bit-exact (t == 0 lands here)
+        return a
+
+    def _wgate_record_step(self, view_indices, frame_feat, pose_feat, res):
+        """Recording hook body: append this step's {t, frame_feat, pose_feat, camera_pose} (CPU fp32)."""
+        assert frame_feat is not None, "wgate_record: frame features missing (pose_head model required)"
+        assert pose_feat is not None and "camera_pose" in res, "wgate_record needs the pose head"
+
+        def _cpu(x):
+            x = x.detach().float().cpu()
+            return x[0] if x.shape[0] == 1 else x
+
+        self.wgate_record.append(
+            {
+                "t": int(view_indices[0]),
+                "frame_feat": _cpu(frame_feat),
+                "pose_feat": _cpu(pose_feat),
+                "camera_pose": _cpu(res["camera_pose"]),
+            }
+        )
 
     def _forward_decoder_step(
         self,
