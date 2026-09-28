@@ -1,0 +1,8 @@
+{
+ "*": {
+  "frame_gate": {
+   "head": "/gpfs/scratch/etur59/koc821022/checkpoints/wgate/smoke/frame_conf_head.pth",
+   "wmin": 1.0
+  }
+ }
+}

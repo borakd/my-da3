@@ -1,0 +1,8 @@
+{
+ "*": {
+  "mem_gate": {
+   "head": "/gpfs/scratch/etur59/koc821022/checkpoints/wgate/smoke/pose_sigma_head.pth",
+   "wmin": 0.5
+  }
+ }
+}
