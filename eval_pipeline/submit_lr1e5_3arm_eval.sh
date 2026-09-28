@@ -23,7 +23,7 @@
 #         (no args = all three arms)
 set -o pipefail
 
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 export OUT_ROOT=/gpfs/scratch/etur59/koc821022/outputs
 OUT=$OUT_ROOT/cut3r_eval
 # cut3r_multinode was deleted 2026-08-09..11; the same-named baseline run dirs

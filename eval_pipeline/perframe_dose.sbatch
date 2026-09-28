@@ -20,7 +20,7 @@
 #SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/pfdose_%j.out
 #SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/pfdose_%j.out
 set -o pipefail
-WT=/gpfs/home/koc/koc821022/maks_idea
+WT=/gpfs/home/koc/koc821022/using_ext_cams
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 source "$WT/eval_pipeline/mn5_paths.sh"

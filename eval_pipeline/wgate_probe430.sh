@@ -27,7 +27,7 @@
 # Afterwards: python eval_pipeline/wgate_make_controls.py   (constants + oracles from the head arms)
 #             python eval_pipeline/wgate_table.py --scene_list eval_pipeline/maks_subset430.txt
 set -uo pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 OUT=${OUT:-/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval}
 PILOT=${PILOT:-wgate430}
 LIST=${SCENE_LIST_OVERRIDE:-$WT/eval_pipeline/maks_subset430.txt}

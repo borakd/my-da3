@@ -18,7 +18,7 @@
 #SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_winprops_%j.err
 
 set -o pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 export OPENCV_FOR_THREADS_NUM=1 OMP_NUM_THREADS=1

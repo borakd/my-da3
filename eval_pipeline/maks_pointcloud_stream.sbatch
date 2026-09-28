@@ -21,7 +21,7 @@
 #SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_pcstream_%j.err
 
 set -o pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh
 conda activate cuteanything
 OUT=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval

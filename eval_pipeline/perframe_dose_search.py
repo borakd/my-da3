@@ -51,7 +51,7 @@ ap.add_argument("--grid", default="0,0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.65,0.8,1.0"
 ap.add_argument("--ckpt", required=True)
 ap.add_argument("--scenes_root", default="/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi/wrist")
 ap.add_argument("--plain_preds", default="", help="worker preds dir of the plain run of this backbone (parity check)")
-ap.add_argument("--cut3r_dir", default="/gpfs/home/koc/koc821022/maks_idea/src/CUT3R")
+ap.add_argument("--cut3r_dir", default="/gpfs/home/koc/koc821022/using_ext_cams/src/CUT3R")
 ap.add_argument("--out_dir", required=True)
 ap.add_argument("--size", type=int, default=320)
 ap.add_argument("--max_t", type=int, default=0, help="smoke: stop pass 1 after this many frames")

@@ -11,7 +11,7 @@
 #SBATCH --output=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_posefix_%j.out
 #SBATCH --error=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/logs/slurm_posefix_%j.err
 set -o pipefail
-WT=/gpfs/home/koc/koc821022/maks_idea
+WT=/gpfs/home/koc/koc821022/using_ext_cams
 source /apps/GPP/MINICONDA/24.1.2/etc/profile.d/conda.sh; conda activate cuteanything
 export PYTHONPATH="$WT/src:$WT/src/CUT3R:$WT/src/CUT3R/src:$PYTHONPATH"
 echo "Node $(hostname)  start $(date)"

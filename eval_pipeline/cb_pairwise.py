@@ -1,5 +1,5 @@
 import sys, os, numpy as np
-sys.path.insert(0, "/gpfs/home/koc/koc821022/maks_idea/eval_pipeline")
+sys.path.insert(0, "/gpfs/home/koc/koc821022/using_ext_cams/eval_pipeline")
 from maks_subset_compare import load_label, boot_ci
 OUT = "/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval"; R = f"{OUT}/unc_full4292"
 scenes = [l.strip() for l in open(f"{OUT}/scene_list.txt") if l.strip()]

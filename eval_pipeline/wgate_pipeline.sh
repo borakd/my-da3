@@ -14,7 +14,7 @@
 # State: $ROOT/stage (S1..S6, DONE, FAILED), $ROOT/pipeline.log, $ROOT/heartbeat, $ROOT/<arm>.<stage>.jid.
 # Re-running is safe: finished stages are skipped; scored arms are not resubmitted.
 set -uo pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 OUT=/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval
 ROOT=$OUT/wgate_pipeline; mkdir -p "$ROOT" "$OUT/logs"
 LOG=$ROOT/pipeline.log

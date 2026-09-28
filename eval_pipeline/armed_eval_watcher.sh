@@ -27,7 +27,7 @@
 # picks up where it left off instead of re-submitting.
 set -o pipefail
 
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 export OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 OUT=$OUT_ROOT/cut3r_eval
 CR=/gpfs/scratch/etur59/koc821022/checkpoints_projects/captain_cut3r_finetune_aug_full

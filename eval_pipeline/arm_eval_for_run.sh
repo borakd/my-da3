@@ -24,7 +24,7 @@
 # Env overrides: OUT_ROOT, SETTLE_S, FORCE, NEED_GB
 set -o pipefail
 
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 export OUT_ROOT=${OUT_ROOT:-/gpfs/scratch/etur59/koc821022/outputs}
 OUT=$OUT_ROOT/cut3r_eval
 SETTLE_S=${SETTLE_S:-120}

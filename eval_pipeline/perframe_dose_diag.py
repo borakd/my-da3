@@ -13,10 +13,10 @@ import numpy as np
 import torch
 
 S_ = "RAIL+80edfcb1+2023-07-14-14h-28m-45s"
-CK = "/gpfs/home/koc/koc821022/maks_idea/src/CUT3R/src/cut3r_512_dpt_4_64.pth"
+CK = "/gpfs/home/koc/koc821022/using_ext_cams/src/CUT3R/src/cut3r_512_dpt_4_64.pth"
 ROOT = "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi/wrist"
 STORED = f"/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/cut3r_zeroshot/preds/{S_}/camera"
-sys.path.insert(0, "/gpfs/home/koc/koc821022/maks_idea/src/CUT3R")
+sys.path.insert(0, "/gpfs/home/koc/koc821022/using_ext_cams/src/CUT3R")
 from add_ckpt_path import add_path_to_dust3r
 add_path_to_dust3r(CK)
 import demo

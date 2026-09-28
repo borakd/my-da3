@@ -16,7 +16,7 @@ from multiprocessing import Pool
 
 OUT = "/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval"
 ROOT = "/gpfs/scratch/etur59/koc821022/pointworld_droid_splits/test/dl3dv_multi/wrist"
-EVAL = "/gpfs/home/koc/koc821022/maks_idea/eval_bundle/bin/eval_depth_poses.py"
+EVAL = "/gpfs/home/koc/koc821022/using_ext_cams/eval_bundle/bin/eval_depth_poses.py"
 T_GAIN = 200.0
 EMA_T, EMA_R = 0.25, 0.40
 

@@ -3,7 +3,7 @@
 # LOGIN node detached from any session (setsid + nohup; its own CPU use is negligible, every heavy step is a Slurm
 # job). All state lives on disk under $ROOT so it can be killed and restarted at any time (idempotent):
 #
-#   cd /gpfs/home/koc/koc821022/maks_idea && setsid nohup bash eval_pipeline/unc_gate_pipeline.sh \
+#   cd /gpfs/home/koc/koc821022/using_ext_cams && setsid nohup bash eval_pipeline/unc_gate_pipeline.sh \
 #       >> /gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/unc_gate_pipeline/supervisor.out 2>&1 < /dev/null &
 #   status: tail /gpfs/scratch/etur59/koc821022/outputs/cut3r_eval/unc_gate_pipeline/pipeline.log ; cat .../heartbeat
 #
@@ -17,7 +17,7 @@
 #   TABLE  unc_gate_table.py (CPU job): paired vs augfull_lr1e5, LaTeX -> PDF -> PNG. Rebuilt whenever a run's
 #          evaluation completes, so the table always shows every finished run.
 set -uo pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 OUT=${OUT:-/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval}
 CKROOT=/gpfs/scratch/etur59/koc821022/checkpoints/unc_gate
 ROOT=$OUT/unc_gate_pipeline; mkdir -p "$ROOT"

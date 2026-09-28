@@ -37,7 +37,7 @@
 # Env: WT, POLL (300 s), JIDS, SUBSET430/SUBSET4292 (table names), ARMS, N430_OK (427),
 #      WGATE_CONS_LIB=1 (source the file for its functions only -- used by the dry run; no stages run).
 set -uo pipefail
-WT=${WT:-/gpfs/home/koc/koc821022/maks_idea}
+WT=${WT:-/gpfs/home/koc/koc821022/using_ext_cams}
 OUT=${OUT:-/gpfs/scratch/etur59/koc821022/outputs/cut3r_eval}
 CKROOT=${CKROOT:-/gpfs/scratch/etur59/koc821022/checkpoints/wgate}
 ROOT=$OUT/wgate_cons_pipeline; mkdir -p "$ROOT" "$OUT/logs"
