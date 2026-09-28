@@ -1,0 +1,8 @@
+{
+ "*": {
+  "frame_gate": {
+   "head": "/gpfs/scratch/etur59/koc821022/checkpoints/wgate/smoke_identity/identity_frame.pth",
+   "wmin": 0.5
+  }
+ }
+}

@@ -1,0 +1,8 @@
+{
+ "*": {
+  "frame_gate": {
+   "head": "/gpfs/scratch/etur59/koc821022/checkpoints/wgate/consequence/cg1_head_lr5/gate_head_best.pth",
+   "wmin": 0.5
+  }
+ }
+}
