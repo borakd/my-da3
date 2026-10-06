@@ -1,0 +1,10 @@
+TRI+52ca9b6a+2024-01-10-13h-56m-03s birth50 45 birth100 67 ext1_first50 45 ext2_first50 0 n 189 max 1.0 1.0
+REAL+4dbb5646+2023-07-25-14h-32m-51s birth50 21 birth100 27 ext1_first50 21 ext2_first50 0 n 170 max 1.0 1.0
+CLVR+236539bc+2023-05-29-23h-42m-29s birth50 40 birth100 50 ext1_first50 0 ext2_first50 40 n 150 max 1.0 1.0
+ILIAD+5e938e3b+2023-07-19-18h-08m-59s birth50 37 birth100 58 ext1_first50 37 ext2_first50 0 n 195 max 1.0 1.0
+IRIS+7dfa2da3+2023-05-05-10h-32m-20s birth50 34 birth100 63 ext1_first50 19 ext2_first50 34 n 154 max 1.0 1.0
+PennPAL+acda9df3+2023-06-18-21h-11m-53s birth50 40 birth100 60 ext1_first50 40 ext2_first50 0 n 174 max 1.0 1.0
+IPRL+edf28ef3+2023-12-19-22h-17m-20s birth50 33 birth100 41 ext1_first50 33 ext2_first50 0 n 146 max 1.0 1.0
+RPL+32cba90c+2023-12-08-17h-53m-24s birth50 41 birth100 52 ext1_first50 36 ext2_first50 41 n 315 max 1.0 1.0
+TRI+52ca9b6a+2023-11-01-11h-15m-22s birth50 -1 birth100 -1 ext1_first50 103 ext2_first50 -1 n 123 max 0.67 0.31
+TRI+52ca9b6a+2024-01-25-13h-35m-10s birth50 -1 birth100 -1 ext1_first50 0 ext2_first50 -1 n 166 max 1.0 0.17

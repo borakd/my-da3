@@ -1,0 +1,31 @@
+episode,n_frames,ext1_serial,ext2_serial,ext1_max_frac,ext2_max_frac,ext1_first_f050,ext2_first_f050,birth_f025,verdict,note
+CLVR+13759f6e+2023-06-03-00h-37m-51s,197,20103212,20655732,0.44,1.00,-1,0,19,borderline,gripper at the top edge of ext1 for much of the episode; projection says max 44 %
+CLVR+13759f6e+2023-06-03-00h-51m-46s,290,20103212,20655732,0.39,1.00,-1,0,92,extrinsics,gripper visible top-centre of ext1; projection 0.22
+CLVR+13759f6e+2023-06-03-17h-19m-53s,300,20103212,20655732,0.19,1.00,-1,21,-1,extrinsics,gripper fully visible in ext1 (power strip); projection 0.00
+CLVR+13759f6e+2023-06-03-17h-24m-42s,193,20103212,20655732,0.30,1.00,-1,0,133,extrinsics,gripper fully visible in ext1 (kettle); projection 0.15
+CLVR+236539bc+2023-08-06-19h-44m-31s,208,20103212,20655732,0.09,1.00,-1,0,-1,genuine,"ext1 looks at a kitchen counter, robot never in view"
+ILIAD+7ae1bcff+2023-05-24-18h-47m-07s,348,23897859,27904255,1.00,0.20,0,-1,-1,extrinsics,gripper visible top-right of ext2 above the bin; projection 0.00
+IPRL+7790ec0a+2023-06-30-17h-15m-06s,259,21582473,28221883,0.67,0.31,0,-1,-1,extrinsics,gripper visible in BOTH exterior views; projections 0.15 / 0.28
+IPRL+7790ec0a+2023-06-30-17h-28m-48s,243,21582473,28221883,0.85,0.31,50,-1,50,extrinsics,gripper visible in both; projections 0.48 / 0.09
+IPRL+edf28ef3+2024-01-02-20h-28m-23s,295,27432424,28221883,0.00,1.00,-1,0,-1,extrinsics,gripper visible top-centre of ext1 (bag); projection 0.00
+IPRL+edf28ef3+2024-01-02-20h-59m-43s,776,27432424,28221883,0.00,1.00,-1,0,-1,extrinsics,gripper visible in ext1; projection 0.00
+IPRL+edf28ef3+2024-01-02-21h-03m-31s,404,27432424,28221883,0.00,1.00,-1,0,-1,extrinsics,gripper visible in ext1; projection 0.00
+IPRL+edf28ef3+2024-01-02-21h-13m-34s,499,27432424,28221883,0.26,1.00,-1,0,0,extrinsics,gripper visible in ext1; projection 0.00
+IRIS+226b9f35+2023-07-11-13h-15m-33s,367,23404442,29838012,1.00,0.22,0,-1,-1,extrinsics,gripper visible top-right of ext2 by the microwave; projection 0.00
+IRIS+7dfa2da3+2023-05-25-14h-00m-19s,231,23404442,29838012,1.00,0.00,0,-1,-1,extrinsics,gripper visible top-right of ext2 at the drawer; projection 0.00
+PennPAL+acda9df3+2023-06-18-20h-09m-33s,287,25455306,27085680,0.44,1.00,-1,0,225,genuine,"a curtain hides the robot from ext1 (occlusion, which the model does not represent)"
+PennPAL+acda9df3+2023-06-18-20h-21m-34s,260,25455306,27085680,0.37,1.00,-1,0,210,genuine,curtain hides the robot from ext1
+RAIL+c3d50939+2023-10-20-17h-36m-30s,297,20521388,24259877,0.48,0.85,-1,167,176,genuine,neither exterior camera shows the robot at the sampled frames
+TRI+52ca9b6a+2023-10-17-13h-51m-19s,564,28451778,28813166,1.00,0.28,0,-1,0,genuine,ext2 aimed at a shelf with cables in front; gripper not in view
+TRI+52ca9b6a+2023-10-17-13h-59m-42s,466,28451778,28813166,1.00,0.17,0,-1,-1,genuine,same rig as above
+TRI+52ca9b6a+2023-10-19-10h-00m-12s,196,28451778,28813166,0.02,1.00,-1,0,-1,extrinsics,arm + gripper centred in ext1; projection 0.00
+TRI+52ca9b6a+2023-11-01-11h-15m-22s,123,28451778,28813166,0.67,0.31,103,-1,105,genuine,"both cameras face a door, robot at the edge of view"
+TRI+52ca9b6a+2023-11-28-17h-48m-01s,168,20252535,25947356,0.39,1.00,-1,0,0,extrinsics,gripper visible top-centre of ext1; projection 0.22
+TRI+52ca9b6a+2023-11-28-17h-51m-50s,239,20252535,25947356,0.22,1.00,-1,0,-1,extrinsics,gripper visible right of centre in ext1; projection 0.00
+TRI+52ca9b6a+2023-11-28-18h-03m-23s,216,20252535,25947356,0.07,1.00,-1,0,-1,extrinsics,gripper visible in both views; projections 0.00
+TRI+52ca9b6a+2024-01-02-13h-34m-47s,176,28451778,28813166,0.04,1.00,-1,0,-1,extrinsics,gripper with TV remote centred in ext1; projection 0.00
+TRI+52ca9b6a+2024-01-25-13h-35m-10s,166,20252535,25947356,1.00,0.17,0,-1,-1,borderline,gripper appears at the top-left corner of ext2 at times; projection max 0.17
+TRI+52ca9b6a+2024-02-05-10h-45m-15s,186,28451778,28813166,1.00,0.28,0,-1,0,extrinsics,gripper visible top-right of ext2; projection 0.00
+TRI+52ca9b6a+2024-02-06-10h-45m-47s,355,28451778,28813166,1.00,0.33,0,-1,0,extrinsics,gripper visible in both views; projections 0.00
+TRI+52ca9b6a+2024-02-06-10h-49m-08s,307,28451778,28813166,1.00,0.28,0,-1,220,extrinsics,gripper visible in both views; projections 0.00
+WEIRD+d5edb57c+2023-12-01-16h-02m-20s,185,23804457,28834630,0.93,0.37,0,-1,145,extrinsics,gripper visible top-right of ext2; projection 0.00

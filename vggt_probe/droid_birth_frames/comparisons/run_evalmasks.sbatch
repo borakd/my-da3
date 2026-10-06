@@ -1,0 +1,10 @@
+#!/bin/bash
+#SBATCH --job-name=rs_evalmasks
+#SBATCH --account=AIFAC_S07_110
+#SBATCH --partition=boost_usr_prod
+#SBATCH --qos=normal
+#SBATCH --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=8 --time=00:30:00
+#SBATCH --output=/leonardo_work/AIFAC_S07_110/bora/outputs/droid_birth_frames/comparisons/evalmasks_%j.out
+source ~/miniforge3/etc/profile.d/conda.sh; conda activate robotseg
+cd ~/RobotSeg/test
+python eval_masks_for_tracks.py --items AUTOLab+5d05c5aa+2023-08-12-20h-31m-55s:ext1 AUTOLab+5d05c5aa+2023-08-12-20h-31m-55s:ext2 AUTOLab+5d05c5aa+2023-09-02-09h-55m-32s:ext1 AUTOLab+5d05c5aa+2023-09-02-09h-55m-32s:ext2 --every 3

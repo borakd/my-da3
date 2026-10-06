@@ -1,0 +1,27 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Track-On-R vs.\ Track-On2 on two DROID scenes (four exterior-camera videos), identical query points sampled inside the RobotSeg gripper mask at the birth frame, causal tracking to the end of the episode. Mask metrics use RobotSeg masks on every 3rd frame as pseudo ground truth, pooled over frames where the gripper is in view; kinematic metrics use the three cameras with trustworthy extrinsics. $\uparrow$/$\downarrow$: higher/lower is better. Best in bold.}
+\label{tab:trackon_compare}
+\begin{tabular}{lcc}
+\toprule
+Metric & Track-On-R & Track-On2 \\
+\midrule
+Visible points inside gripper mask (+5 px) $\uparrow$ & \textbf{0.982} & 0.980 \\
+Visible points inside gripper mask (0 px) $\uparrow$ & 0.940 & \textbf{0.943} \\
+All points inside gripper mask (+5 px) $\uparrow$ & \textbf{0.971} & 0.965 \\
+Points on gripper at last valid frame $\uparrow$ & \textbf{0.954} & 0.912 \\
+Points lost ($>60$ px from mask) $\downarrow$ & \textbf{0.007} & 0.008 \\
+Visibility recall (in-mask points) $\uparrow$ & \textbf{0.872} & 0.848 \\
+False visible while gripper out of view $\downarrow$ & \textbf{0.047} & 0.091 \\
+Visibility flicker (toggles / pt / 100 fr) $\downarrow$ & \textbf{2.42} & 3.57 \\
+Kinematic centroid drift (px) $\downarrow$ & \textbf{11.1} & 12.2 \\
+Kinematic step error (px) $\downarrow$ & 2.19 & \textbf{2.08} \\
+Jitter (px / frame$^2$) $\downarrow$ & \textbf{1.84} & 2.17 \\
+Steps $>30$ px (fraction) $\downarrow$ & \textbf{0.003} & 0.006 \\
+Speed (median fps, A100) & 19.6 & 19.6 \\
+\midrule
+Agreement where both visible (median px / within 8 px) & \multicolumn{2}{c}{1.5--2.0 px / 87--96\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
