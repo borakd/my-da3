@@ -1,4 +1,4 @@
-> Snapshot of `$WORK/bora/outputs/droid_birth_frames` on Leonardo (2026-10-06), small files only. The per-scene masks (`masks_run/`, 3.6 GB), tracks (`trackon_run/tracks/`, 1.1 GB), QA videos, `examples/*.mp4`, `failed_scenes_video_*.mp4`, raw `metadata/` and `logs/` stay on `$WORK`.
+> Snapshot of `$WORK/bora/outputs/droid_birth_frames` on Leonardo (2026-10-06), small files only. The per-scene masks (`masks_run/`, 3.6 GB), tracks (`trackon_run/tracks/`, 1.1 GB), QA videos, `examples/*.mp4`, `failed_scenes_video_*.mp4`, raw `metadata/` and `logs/` stay on `$WORK`. Stage code: `../robotseg_stage/` (RobotSeg masks) and `../trackon_stage/` (Track-On-R tracks, checkpoint comparison, videos), folded from `~/RobotSeg/test` and `~/track_on/leonardo` on 2026-10-06.
 
 # DROID gripper birth frames + RobotSeg birth-frame masks (test split, 4292 scenes)
 
