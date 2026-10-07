@@ -1,0 +1,3 @@
+TRI+52ca9b6a+2023-11-07-14h-29m-08s	MP4s are the success recording, store wrist poses are the failure recording with the same id (MN5 check 2026-10-07); no PointWorld entry either. Tracks pair video and poses from different episodes: exclude.
+IRIS+226b9f35+2023-07-11-11h-46m-06s	no v2 birth frame; ext2 (serial 29838012) fits neither calibration, MN5 depth check fails too.
+IRIS+f94b8622+2023-12-12-19h-39m-25s	no v2 birth frame; ext2 (serial 29838012) fits neither calibration, MN5 depth check fails too.

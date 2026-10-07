@@ -87,3 +87,10 @@ Shipping: `ship/trackon_run_v2.tar` (+ `.sha256` manifests, symlinks dereference
 run_segment_birth_frames_v2.sbatch, run_refine_v2.sbatch}`,
 `trackon_stage/{build_worklist.py, build_trackon_v2.py --phase worklist|assemble, track_gripper_birth_v2.sbatch,
 summarize_gripper_tracks.py --run}`.
+
+## Exclusions (after the MN5 cross-check, 2026-10-07)
+
+`trackon_run_v2/scenes_to_exclude.tsv`: `TRI+52ca9b6a+2023-11-07-14h-29m-08s` has tracks in v1 and v2 but its MP4s
+are the success recording while the store wrist poses are the failure recording with the same id (video and poses
+from different episodes) — exclude it. The two IRIS scenes without a v2 birth frame are listed for completeness;
+MN5's depth-based extrinsics check fails on their ext2 camera as well.
