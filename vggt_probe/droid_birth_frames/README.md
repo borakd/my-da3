@@ -63,3 +63,10 @@ Re-estimate each exterior camera's pose per scene from the data itself: RobotSeg
 (2D) against the FK gripper centre (3D), PnP + RANSAC with the ZED intrinsics; accept when the reprojection error is small,
 then recompute the birth frames with the corrected extrinsics. The 1548 suspect scenes are the obvious target and the
 consistent scenes give a built-in check.
+
+## v2 (2026-10-07): PointWorld exterior extrinsics
+
+The raw DROID `ext{1,2}_cam_extrinsics` are wrong for ~23 % of cameras; the PointWorld `optimized_extrinsics` fix
+almost all of it (b050 projection_disagree 23.1 % -> 4.6 %). Birth frames, masks and Track-On-R tracks were recomputed
+with them into `*_v2` outputs (v1 untouched); 1301 scenes' b050 frame moved, 29 of the 30 failures recovered.
+See `v2/README.md`; the PnP re-estimation suggested above is unnecessary.

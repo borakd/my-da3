@@ -34,6 +34,12 @@ def sheet(rows, path, cols=4, tile=(480, 270), max_tiles=40):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--suffix", default="", help="'_v2': read masks_run_v2/, write birth_masks_v2.csv etc.")
+    sfx = ap.parse_args().suffix
+    global RUN
+    RUN = f"{OUT_ROOT}/masks_run{sfx}"
     src = f"{RUN}/results_refined.jsonl" if os.path.isfile(f"{RUN}/results_refined.jsonl") else None
     rows = []
     if src:
@@ -47,7 +53,7 @@ def main():
     keys = ["episode", "cam", "which", "frame", "n_frames", "mp4_frames", "serial", "status", "kin_frac",
             "prompt_used", "spill_auto", "area_auto", "auto_empty", "projection_disagree", "spill_box", "area_box",
             "spill_final", "area_final", "mask"]
-    with open(f"{OUT_ROOT}/birth_masks.csv", "w", newline="") as fh:
+    with open(f"{OUT_ROOT}/birth_masks{sfx}.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         for r in rows:
@@ -87,7 +93,7 @@ def main():
     both = sum(1 for v in percam.values() if v == {"ext1", "ext2"})
     L.append(f"scenes with projection_disagree in at least one camera: {len(scenes_dis)} of {len(set(r['episode'] for r in ok))} "
              f"(both cameras at b050: {both}); listed in `scenes_extrinsics_suspect.txt`")
-    open(f"{OUT_ROOT}/scenes_extrinsics_suspect.txt", "w").write("\n".join(scenes_dis) + "\n")
+    open(f"{OUT_ROOT}/scenes_extrinsics_suspect{sfx}.txt", "w").write("\n".join(scenes_dis) + "\n")
     L.append("")
     L.append("## Per lab (b050, projection_disagree rate = extrinsics-suspect rate)")
     L.append("")
@@ -100,7 +106,7 @@ def main():
     for lab, fl in sorted(bylab.items(), key=lambda kv: -len(kv[1])):
         L.append(f"| {lab} | {len(fl)} | {sum(fl)} | {100*sum(fl)/len(fl):.1f}% |")
     L.append("")
-    with open(f"{OUT_ROOT}/birth_masks_flagged.csv", "w", newline="") as fh:
+    with open(f"{OUT_ROOT}/birth_masks_flagged{sfx}.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         for r in ok:
@@ -109,11 +115,11 @@ def main():
     # QA sheets
     random.seed(0)
     accepted = [r for r in ok if r["which"] == "b050" and not r.get("projection_disagree")]
-    n1 = sheet(random.sample(accepted, min(40, len(accepted))), f"{OUT_ROOT}/qa_random_consistent_b050.jpg")
+    n1 = sheet(random.sample(accepted, min(40, len(accepted))), f"{OUT_ROOT}/qa_random_consistent_b050{sfx}.jpg")
     dis = [r for r in ok if r.get("projection_disagree")]
-    n2 = sheet(random.sample(dis, min(40, len(dis))) if len(dis) > 40 else dis, f"{OUT_ROOT}/qa_random_projection_disagree.jpg")
+    n2 = sheet(random.sample(dis, min(40, len(dis))) if len(dis) > 40 else dis, f"{OUT_ROOT}/qa_random_projection_disagree{sfx}.jpg")
     empt = [r for r in ok if r.get("auto_empty")]
-    n3 = sheet(empt, f"{OUT_ROOT}/qa_auto_empty_box_used.jpg")
+    n3 = sheet(empt, f"{OUT_ROOT}/qa_auto_empty_box_used{sfx}.jpg")
     L.append("")
     L.append(f"QA sheets: `qa_random_consistent_b050.jpg` ({n1} random masks consistent with the projection), "
              f"`qa_random_projection_disagree.jpg` ({n2} random masks that disagree with it), "
@@ -121,7 +127,7 @@ def main():
     L.append("")
     L.append("Files: `masks_run/masks/<ep>/<cam>_f<t>.png` (binary mask), `masks_run/frames/...jpg` (the decoded birth frame),")
     L.append("`masks_run/overlays/...jpg`; `birth_masks.csv` has one row per mask with the frame index, prompt used and scores.")
-    open(f"{OUT_ROOT}/birth_masks_summary.md", "w").write("\n".join(L) + "\n")
+    open(f"{OUT_ROOT}/birth_masks_summary{sfx}.md", "w").write("\n".join(L) + "\n")
     print("\n".join(L))
 
 

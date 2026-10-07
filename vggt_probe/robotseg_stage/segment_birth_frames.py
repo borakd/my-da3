@@ -70,15 +70,25 @@ def spill_area(mask, uv, vis):
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--nshards", type=int, default=1)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--birth_json", default=f"{bf.OUT_ROOT}/birth_frames.json")
+    ap.add_argument("--out", default=OUT, help="run dir (v2: .../masks_run_v2)")
+    ap.add_argument("--scenes", default=None, help="file with one episode per line: restrict the run to these")
+    ap.add_argument("--extrinsics", choices=("raw", "pointworld"), default="pointworld")
     args = ap.parse_args()
+    OUT = args.out
+    bf.EXTRINSICS = args.extrinsics
     for sub in ("frames", "masks", "overlays", "tmp"):
         os.makedirs(f"{OUT}/{sub}", exist_ok=True)
     tmpdir = f"{OUT}/tmp/shard{args.shard}"
-    rows = json.load(open(f"{bf.OUT_ROOT}/birth_frames.json"))
+    rows = json.load(open(args.birth_json))
+    if args.scenes:
+        keep = set(l.strip() for l in open(args.scenes) if l.strip())
+        rows = [r for r in rows if r["episode"] in keep]
     rows = [r for i, r in enumerate(rows) if i % args.nshards == args.shard]
     if args.limit:
         rows = rows[: args.limit]
@@ -113,7 +123,10 @@ def main():
             sn = meta[f"{cam}_cam_serial"]
             mp4 = f"{RAW_ROOT}/{ep}/recordings/MP4/{sn}.mp4"
             K = bf.load_zed_K(sn)
-            T_bc = np.linalg.inv(bf.pose6_to_T(np.array(meta[f"{cam}_cam_extrinsics"])))
+            try:
+                T_bc = bf.load_T_bc(ep, meta, cam)
+            except KeyError:  # serial absent from the PointWorld cameras file (birth_frames.py did the same)
+                T_bc = bf.load_T_bc(ep, meta, cam, "raw")
             for which, t in targets.items():
                 if (ep, cam, which) in done:
                     continue

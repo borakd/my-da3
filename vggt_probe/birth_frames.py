@@ -13,9 +13,12 @@ Method
   2. Gripper point model: a box in the EE (flange) frame, x,y in +-HALF_W, z in [Z0, Z1] along
      the approach axis (fingertips ~0.16-0.18 m from the flange), mapped once into the wrist-
      camera frame with T_ee_cam calibrated from RAIL+80edfcb1 (`--calibrate`).
-  3. Exterior cameras: `ext{1,2}_cam_extrinsics` from the DROID raw metadata json (cam->base,
-     xyz + scipy 'xyz' Euler; convention verified against the store) and the per-serial ZED
-     factory intrinsics (calib.stereolabs.com/?SN=<serial>, [LEFT_CAM_HD], MP4s are 1280x720).
+  3. Exterior cameras: `--extrinsics pointworld` (default) takes the PointWorld `optimized_extrinsics`
+     (<ep>_cameras.json, keyed by serial, 4x4 base->camera used as-is); `--extrinsics raw` takes
+     `ext{1,2}_cam_extrinsics` from the DROID raw metadata json (cam->base, xyz + scipy 'xyz' Euler;
+     convention verified against the store; wrong for ~23 % of cameras, see recheck_pointworld/).
+     Intrinsics: per-serial ZED factory calibration (calib.stereolabs.com/?SN=<serial>, [LEFT_CAM_HD],
+     MP4s are 1280x720).
   4. A point is "seen" if it projects inside the image with positive depth (occlusion by the
      arm/objects is NOT modelled). Per frame we record the fraction of points seen by each
      camera; the birth frame at threshold f is the first t with both fractions >= f.
@@ -40,6 +43,8 @@ STORE = "/leonardo_scratch/large/userexternal/bdursun0/pointworld_droid_splits/t
 OUT_ROOT = "/leonardo_work/AIFAC_S07_110/bora/outputs/droid_birth_frames"
 META_DIR = f"{OUT_ROOT}/metadata"
 CALIB_DIR = f"{OUT_ROOT}/zed_calib"
+CAMERAS_DIR = "/leonardo_scratch/large/userexternal/bdursun0/ext_build/meta/cameras"  # PointWorld <ep>_cameras.json
+EXTRINSICS = "pointworld"  # default source of the exterior extrinsics ('raw' | 'pointworld'), see load_T_bc
 HERE = os.path.dirname(os.path.abspath(__file__))
 EE_CAM_JSON = os.path.join(HERE, "ee_cam_offset.json")
 RAIL_EP = "RAIL+80edfcb1+2023-07-14-14h-28m-45s"
@@ -58,6 +63,17 @@ def pose6_to_T(p):
     T[:3, :3] = R.from_euler("xyz", p[3:6]).as_matrix()
     T[:3, 3] = p[:3]
     return T
+
+
+def load_T_bc(ep, meta, tag, extrinsics=None):
+    """4x4 base->camera for exterior camera `tag` ('ext1'/'ext2') of episode `ep`.
+    'raw': DROID metadata `<tag>_cam_extrinsics` (cam->base, inverted); 'pointworld': PointWorld
+    `optimized_extrinsics` from CAMERAS_DIR (base->camera, as-is). KeyError if the serial is absent."""
+    extrinsics = extrinsics or EXTRINSICS
+    if extrinsics == "raw":
+        return np.linalg.inv(pose6_to_T(np.array(meta[f"{tag}_cam_extrinsics"])))
+    cams = json.load(open(f"{CAMERAS_DIR}/{ep}_cameras.json"))
+    return np.array(cams[str(meta[f"{tag}_cam_serial"])]["optimized_extrinsics"], dtype=np.float64)
 
 
 def gripper_points_ee():
@@ -138,7 +154,12 @@ def analyze_episode(ep, P_cam=None, keep_curves=True):
         except Exception as e:  # noqa: BLE001
             out["error"] = f"calib:{sn}:{e}"
             return out
-        T_bc = np.linalg.inv(pose6_to_T(np.array(meta[f"{tag}_cam_extrinsics"])))
+        try:
+            T_bc = load_T_bc(ep, meta, tag)
+            out[f"{tag}_extrinsics"] = EXTRINSICS
+        except KeyError:  # serial absent from the PointWorld cameras file: fall back to the raw metadata
+            T_bc = load_T_bc(ep, meta, tag, "raw")
+            out[f"{tag}_extrinsics"] = "raw_fallback"
         cams[tag] = (sn, K, T_bc)
         out[f"{tag}_serial"] = sn
     # gripper points in base frame for every frame: (T, N, 3)
@@ -174,7 +195,7 @@ def visualize(ep, frames, raw_dir, out_dir):
     for tag in ("ext1", "ext2"):
         sn = meta[f"{tag}_cam_serial"]
         K = load_zed_K(sn)
-        T_bc = np.linalg.inv(pose6_to_T(np.array(meta[f"{tag}_cam_extrinsics"])))
+        T_bc = load_T_bc(ep, meta, tag)
         cap = cv2.VideoCapture(f"{raw_dir}/recordings/MP4/{sn}.mp4")
         for t in frames:
             cap.set(cv2.CAP_PROP_POS_FRAMES, t)
@@ -227,7 +248,11 @@ def main():
     ap.add_argument("--raw_dir", default=None, help="<raw>/<EP> dir holding recordings/MP4/*.mp4")
     ap.add_argument("--viz_out", default=None)
     ap.add_argument("--out", default=f"{OUT_ROOT}/birth_frames")
+    ap.add_argument("--extrinsics", choices=("raw", "pointworld"), default="pointworld",
+                    help="exterior extrinsics: PointWorld optimized_extrinsics (default) or the raw DROID metadata")
     args = ap.parse_args()
+    global EXTRINSICS
+    EXTRINSICS = args.extrinsics  # inherited by the forked workers
 
     if args.calibrate:
         calibrate()
@@ -275,7 +300,7 @@ def main():
         rows.sort(key=lambda r: r["episode"])
         json.dump(rows, open(args.out + ".json", "w"), indent=0)
         keys = ["episode", "n_frames", "ext1_serial", "ext2_serial", "error",
-                "ext1_max_frac", "ext2_max_frac", "post_birth_both_visible_frac"]
+                "ext1_max_frac", "ext2_max_frac", "post_birth_both_visible_frac", "ext1_extrinsics", "ext2_extrinsics"]
         for thr in THRESHOLDS:
             k = f"f{int(thr*100):03d}"
             keys += [f"birth_{k}", f"ext1_first_{k}", f"ext2_first_{k}"]

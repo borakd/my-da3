@@ -20,6 +20,11 @@ def q(xs, p):
 
 
 def main():
+    global OUT
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", default=OUT, help="run dir (v2: .../trackon_run_v2)")
+    OUT = ap.parse_args().run
     rows = []
     for f in sorted(glob.glob(f"{OUT}/logs/track_shard*.jsonl")):
         for line in open(f):

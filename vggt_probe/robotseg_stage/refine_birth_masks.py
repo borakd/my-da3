@@ -55,6 +55,14 @@ def overlay(img, mask, text):
 
 
 def main():
+    global RUN
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", default=RUN, help="masks run dir (v2: .../masks_run_v2)")
+    ap.add_argument("--extrinsics", choices=("raw", "pointworld"), default="pointworld")
+    args = ap.parse_args()
+    RUN = args.run
+    bf.EXTRINSICS = args.extrinsics
     rows = []
     for f in sorted(glob.glob(f"{RUN}/results_shard*.jsonl")):
         rows += [json.loads(l) for l in open(f) if l.strip()]
@@ -79,7 +87,10 @@ def main():
                 shutil.copy(f"{RUN}/masks/{ep}/{stem}.png", box_mask_path)
             meta = json.load(open(f"{bf.META_DIR}/{ep}.json"))
             K = bf.load_zed_K(meta[f"{cam}_cam_serial"])
-            T_bc = np.linalg.inv(bf.pose6_to_T(np.array(meta[f"{cam}_cam_extrinsics"])))
+            try:
+                T_bc = bf.load_T_bc(ep, meta, cam)
+            except KeyError:
+                T_bc = bf.load_T_bc(ep, meta, cam, "raw")
             with np.load(f"{bf.STORE}/{ep}/dense/cam/{t:06d}.npz") as z:
                 pose = z["pose"]
             Pb = (pose[:3, :3] @ P_cam.T).T + pose[:3, 3]
