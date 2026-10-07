@@ -33,7 +33,7 @@ def main():
     # keep the last record per (episode, cam) (resumed runs may append twice)
     last = {}
     for r in rows:
-        last[(r["episode"], r["cam"])] = r
+        last[(r["episode"], r["cam"], r.get("birth_frame"))] = r  # several events per camera in v3
     rows = list(last.values())
     work = json.load(open(f"{OUT}/worklist.json"))
     keys = ["episode", "cam", "birth_frame", "status", "n_points", "grid_stride", "mask_area", "n_frames_store",

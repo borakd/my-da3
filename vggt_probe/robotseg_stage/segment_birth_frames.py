@@ -17,6 +17,7 @@ Outputs under $WORK/bora/outputs/droid_birth_frames/masks_run/:
 Usage: segment_birth_frames.py --shard K --nshards N
 """
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -79,6 +80,8 @@ def main():
     ap.add_argument("--out", default=OUT, help="run dir (v2: .../masks_run_v2)")
     ap.add_argument("--scenes", default=None, help="file with one episode per line: restrict the run to these")
     ap.add_argument("--extrinsics", choices=("raw", "pointworld"), default="pointworld")
+    ap.add_argument("--events", default=None, help="events CSV (episode,event,entry_frame): segment frame entry_frame of "
+                    "every event >= 1 as which='e<event>' instead of the b050/b100 birth frames (v3 re-entries)")
     args = ap.parse_args()
     OUT = args.out
     bf.EXTRINSICS = args.extrinsics
@@ -89,6 +92,13 @@ def main():
     if args.scenes:
         keep = set(l.strip() for l in open(args.scenes) if l.strip())
         rows = [r for r in rows if r["episode"] in keep]
+    events = None
+    if args.events:
+        events = {}
+        for e in csv.DictReader(open(args.events)):
+            if int(e["event"]) >= 1:
+                events.setdefault(e["episode"], {})[f"e{int(e['event']):02d}"] = int(e["entry_frame"])
+        rows = [r for r in rows if r["episode"] in events]
     rows = [r for i, r in enumerate(rows) if i % args.nshards == args.shard]
     if args.limit:
         rows = rows[: args.limit]
@@ -118,6 +128,8 @@ def main():
         targets = {"b050": r["birth_f050"]}
         if r["birth_f100"] >= 0 and r["birth_f100"] != r["birth_f050"]:
             targets["b100"] = r["birth_f100"]
+        if events is not None:
+            targets = events[ep]
         meta = json.load(open(f"{bf.META_DIR}/{ep}.json"))
         for cam in ("ext1", "ext2"):
             sn = meta[f"{cam}_cam_serial"]
