@@ -65,3 +65,10 @@ and the `_zeroshot` variants.
 
 Automatic seeding (`seed_*.py`), the per-episode trackers (`rig_track.py`, `rig_track2.py`) and the seeding-study
 reports under `$OUT/ext_cams/seedstudy*/` are candidates under evaluation, not the reference.
+
+## Later result, for comparison with this shelf (2026-09-30)
+
+`ext_cams/rig_fuse2.py`: the honest fusion (no GT anywhere in the method path; tracker v2 anchors; segment-aware; CUT3R's own
+rotation). RAIL, shelf masks, finetuned: fused all frames 0.0169 / 0.0038 / 0.694 against 0.0073 / 0.0027 / 0.557 for the
+shelf fusion that used the GT lens pose at the reference frame. Full tables, both backbones, plus the smoke-13 means with the
+dino_exemplar and verified_motion_v2 anchors: `$OUT/ext_cams/fuse2/fuse2_results.md`.
