@@ -35,6 +35,28 @@ def load(d):
             q = q[q.rot_err_deg.notna()]; q = q.assign(ep=ep, dt=q.frame - row["t_ref"]); pf.append(q[["ep", "frame", "dt", "pos_err_cm", "rot_err_deg"] + [c for c in ("inc_rot_err_deg",) if c in q]])
     return pd.DataFrame(rows).set_index("ep"), (pd.concat(pf) if pf else pd.DataFrame())
 
+def bias_from_anchors(d, ep):
+    """(gain, lag1): gain = sum(<w_est, w_gt>) / sum(|w_gt|^2) over consecutive solved frames (world-frame rotation increments,
+    frames with |w_gt| >= 0.3 deg); lag1 = autocorrelation of the increment error vectors at lag 1 (white -0.5, walk 0, bias -> 1)."""
+    f = f"{d}/{ep}/anchors.npz"
+    if not os.path.isfile(f): return np.nan, np.nan
+    from scipy.spatial.transform import Rotation as Rot
+    z = np.load(f); fr = z["frames"]; M = z["motions"] if "motions" in z.files else None
+    if M is None: return np.nan, np.nan
+    gt = rt.load_poses(f"{rt.STORE_ROOT}/{ep}/dense/cam", int(fr.max()) + 1, "gt"); b = int(fr[0])
+    Mi = {int(a_): m for a_, m in zip(fr, M)}; we, wg = [], []
+    for t in fr[1:]:
+        t = int(t)
+        if t - 1 not in Mi or t not in gt or t - 1 not in gt: continue
+        A = gt[t - 1] @ np.linalg.inv(gt[b]); B = gt[t] @ np.linalg.inv(gt[b])
+        wg.append(Rot.from_matrix(B[:3, :3] @ A[:3, :3].T).as_rotvec()); we.append(Rot.from_matrix(Mi[t][:3, :3] @ Mi[t - 1][:3, :3].T).as_rotvec())
+    if len(wg) < 5: return np.nan, np.nan
+    we, wg = np.array(we), np.array(wg); big = np.linalg.norm(wg, axis=1) >= np.radians(0.3)
+    gain = float((we[big] * wg[big]).sum() / max((wg[big] ** 2).sum(), 1e-12)) if big.sum() >= 3 else np.nan
+    e = we - wg; e = e - e.mean(0); num = (e[1:] * e[:-1]).sum(); den = (e ** 2).sum()
+    return gain, float(num / den) if den > 0 else np.nan
+
+
 def inc_from_anchors(d, ep):
     f = f"{d}/{ep}/anchors.npz"
     if not os.path.isfile(f): return []
@@ -47,6 +69,8 @@ def inc_from_anchors(d, ep):
 res = {}
 for spec in a.arms:
     name, d = spec.split("=", 1); df, pf = load(d)
+    bias = {ep: bias_from_anchors(d, ep) for ep in df.index[df.fail == ""]}
+    df["gain"] = [bias.get(e, (np.nan, np.nan))[0] for e in df.index]; df["lag1"] = [bias.get(e, (np.nan, np.nan))[1] for e in df.index]
     if (a.inc or df.inc_rot.isna().all()) and len(pf):
         inc = {ep: dict(inc_from_anchors(d, ep)) for ep in df.index[df.fail == ""]}
         df["inc_rot"] = [np.median(list(inc[e].values())) if inc.get(e) else np.nan for e in df.index]
@@ -55,11 +79,11 @@ for spec in a.arms:
     res[name] = (df, pf)
 
 pr(f"# rig scorecard: {len(eps)} scenes ({a.eps})\n")
-pr("| arm | evaluated | solved frames / window (median) | pos cm | rot deg | inc rot deg (median of scene medians) | inc rot p90 | ATE | ATE < CUT3R ft |")
-pr("|---|---|---|---|---|---|---|---|---|")
+pr("| arm | evaluated | solved frames / window (median) | pos cm | rot deg | inc rot deg (median of scene medians) | inc rot p90 | rot GAIN | lag-1 autocorr | ATE | ATE < CUT3R ft |")
+pr("|---|---|---|---|---|---|---|---|---|---|---|")
 for name, (df, pf) in res.items():
     ok = df[(df.fail == "") & (df.n_anchored >= 2)]
-    pr(f"| {name} | {len(ok)} | {(ok.n_anchored / ok.window_len).median():.2f} | {ok.pos.median():.2f} | {ok.rot.median():.2f} | {ok.inc_rot.median():.2f} | {ok.inc_rot_p90.median():.1f} | {ok.ate.median():.4f} | {(ok.ate < ok.cut_ate).mean():.0%} |")
+    pr(f"| {name} | {len(ok)} | {(ok.n_anchored / ok.window_len).median():.2f} | {ok.pos.median():.2f} | {ok.rot.median():.2f} | {ok.inc_rot.median():.2f} | {ok.inc_rot_p90.median():.1f} | {ok.gain.median():.2f} | {ok.lag1.median():.2f} | {ok.ate.median():.4f} | {(ok.ate < ok.cut_ate).mean():.0%} |")
 pr("\n## trajectory metrics on each arm's solved frames vs the CUT3R finetune (augfull_lr1e5) on the SAME frames (medians over scenes; win = rig better)")
 pr("| arm | rig RPE_rot | CUT3R RPE_rot | win | rig RPE_t cm | CUT3R RPE_t cm | win | rig ATE | CUT3R ATE | win |"); pr("|---|---|---|---|---|---|---|---|---|---|")
 for name, (df, pf) in res.items():

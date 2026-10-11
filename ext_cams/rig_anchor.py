@@ -180,13 +180,114 @@ def bilinear(F2, pts):
     return out
 
 
+def voxel_keep(X, vox, nmax):
+    """indices of one point per voxel (first occurrence), capped at nmax by uniform subsampling."""
+    if len(X) == 0: return np.zeros(0, int)
+    key = np.floor(X / vox).astype(np.int64); _, idx = np.unique(key, axis=0, return_index=True); idx = np.sort(idx)
+    if len(idx) > nmax: idx = idx[np.linspace(0, len(idx) - 1, nmax).round().astype(int)]
+    return idx
+
+
+def pca_normals(X, k=12):
+    """unit normals from the smallest principal axis of the k nearest neighbours (sign arbitrary)."""
+    from scipy.spatial import cKDTree
+    n = len(X)
+    if n < 4: return np.tile([0.0, 0.0, 1.0], (n, 1))
+    k = min(k, n); tree = cKDTree(X); _, nn = tree.query(X, k=k)
+    P_ = X[nn] - X[nn].mean(1, keepdims=True); C = np.einsum("nki,nkj->nij", P_, P_)
+    w_, v_ = np.linalg.eigh(C); return v_[:, :, 0]
+
+
+def gn_pose(Xm, obs_k, obs_c, obs_u, Kc, Rc, tc, R0, t0, iters=5, huber=2.0):
+    """Gauss-Newton on the 6-DoF motion (R, t) with X_t = R Xm + t, two cameras (Rc, tc, Kc world->cam), Huber weights."""
+    R, t = R0.copy(), t0.copy()
+    for _ in range(iters):
+        Y = Xm[obs_k] @ R.T + t                                     # (n,3) world at t
+        J = np.zeros((len(obs_k), 2, 6)); r = np.zeros((len(obs_k), 2))
+        for c in (0, 1):
+            m = obs_c == c
+            if not m.any(): continue
+            Z = Y[m] @ Rc[c].T + tc[c]; z = np.maximum(Z[:, 2], 1e-4); f = Kc[c]
+            uv = Z[:, :2] / z[:, None] * [f[0, 0], f[1, 1]] + [f[0, 2], f[1, 2]]; r[m] = uv - obs_u[m]
+            dpi = np.zeros((m.sum(), 2, 3)); dpi[:, 0, 0] = f[0, 0] / z; dpi[:, 0, 2] = -f[0, 0] * Z[:, 0] / z ** 2
+            dpi[:, 1, 1] = f[1, 1] / z; dpi[:, 1, 2] = -f[1, 1] * Z[:, 1] / z ** 2
+            RX = Y[m] - t                                          # R Xm
+            dY = np.zeros((m.sum(), 3, 6)); dY[:, :, 3:] = np.eye(3)
+            dY[:, 0, 1] = RX[:, 2]; dY[:, 0, 2] = -RX[:, 1]; dY[:, 1, 0] = -RX[:, 2]; dY[:, 1, 2] = RX[:, 0]; dY[:, 2, 0] = RX[:, 1]; dY[:, 2, 1] = -RX[:, 0]
+            J[m] = np.einsum("nij,jk,nkl->nil", dpi, Rc[c], dY)
+        e = np.linalg.norm(r, axis=1); w = np.where(e <= huber, 1.0, huber / np.maximum(e, 1e-9))
+        Jw = (J * w[:, None, None]).reshape(-1, 6); rw = (r * w[:, None]).reshape(-1)
+        H = Jw.T @ Jw + 1e-6 * np.eye(6); g = Jw.T @ rw
+        try: d = -np.linalg.solve(H, g)
+        except np.linalg.LinAlgError: break
+        R = ortho(Rotation.from_rotvec(d[:3]).as_matrix() @ R); t = Rotation.from_rotvec(d[:3]).as_matrix() @ t + d[3:]
+        if np.linalg.norm(d) < 1e-7: break
+    return R, t
+
+
+def f2_ransac(Xc, tracks, frames, Kc, Rc, tc, n_samples=300, k_sample=5, tau=1.0, min_frac=0.8, seed=0):
+    """GT-free phantom filter: candidates Xc (n,3) with plain LK chains tracks[c] (n, T, 2) (NaN = lost) over `frames` (sorted,
+    frames[0] = reference where the pose is identity). Sample k candidates, solve the pose of every frame from the sample's
+    two-view tracks (GN from the previous frame), score all candidates by their reprojection residuals; a candidate is
+    consistent if in each view it is observed in >= min_frac of the frames with median residual <= tau and p90 <= 2.5 tau.
+    Returns (inlier mask, poses dict) of the best sample (refit on its inliers)."""
+    rng = np.random.default_rng(seed); n = len(Xc); best = (-1, None, None)
+    obs_f = {}
+    for f in frames[1:]:
+        kk, cc, uu = [], [], []
+        for c in (0, 1):
+            p = tracks[c][:, f]; ok = ~np.isnan(p[:, 0])
+            kk.append(np.where(ok)[0]); cc.append(np.full(ok.sum(), c)); uu.append(p[ok])
+        obs_f[f] = (np.concatenate(kk), np.concatenate(cc), np.vstack(uu) if uu else np.zeros((0, 2)))
+    alive = np.array([all(not np.isnan(tracks[c][i, frames[-1], 0]) for c in (0, 1)) for i in range(n)])
+    pool = np.where(alive)[0]
+    if len(pool) < k_sample: pool = np.arange(n)
+
+    def run(sample, score=True):
+        R, t = np.eye(3), np.zeros(3); poses = {frames[0]: (R, t)}; res = np.full((2, n, len(frames) - 1), np.nan)
+        for j, f in enumerate(frames[1:]):
+            k, c, u = obs_f[f]; m = np.isin(k, sample)
+            if m.sum() < 4: return None, None
+            R, t = gn_pose(Xc, k[m], c[m], u[m], Kc, Rc, tc, R, t); poses[f] = (R, t)
+            Y = Xc[k] @ R.T + t
+            for cv in (0, 1):
+                mm = c == cv
+                if not mm.any(): continue
+                Z = Y[mm] @ Rc[cv].T + tc[cv]; z = np.maximum(Z[:, 2], 1e-4); fK = Kc[cv]
+                uv = Z[:, :2] / z[:, None] * [fK[0, 0], fK[1, 1]] + [fK[0, 2], fK[1, 2]]; res[cv, k[mm], j] = np.linalg.norm(uv - u[mm], axis=1)
+        nf = len(frames) - 1; ok = np.ones(n, bool)
+        for cv in (0, 1):
+            r = res[cv]; cnt = np.isfinite(r).sum(1); med = np.nanmedian(np.where(np.isfinite(r), r, np.nan), axis=1); p90 = np.nanpercentile(np.where(np.isfinite(r), r, np.nan), 90, axis=1)
+            ok &= (cnt >= min_frac * nf) & (med <= tau) & (p90 <= 2.5 * tau)
+        return ok, poses
+    for _ in range(n_samples):
+        sample = rng.choice(pool, size=min(k_sample, len(pool)), replace=False)
+        ok, poses = run(sample)
+        if ok is None: continue
+        sc = int(ok.sum())
+        if sc > best[0]: best = (sc, ok, poses)
+    if best[1] is None or best[0] < 4: return np.zeros(n, bool), {}
+    ok, poses = run(np.where(best[1])[0])        # refit on the consensus set
+    if ok is None or ok.sum() < 4: return best[1], best[2]
+    return ok, poses
+
+
 # ----------------------------------------------------------------------------- the solver
 class Anchor:
     def __init__(self, a, K, E, X_B):
-        self.a = a; self.X = X_B
+        self.a = a; self.set_model(X_B)
         self.Kc = np.array([K[c] for c in ("ext1", "ext2")]); self.Ec = np.array([E[c] for c in ("ext1", "ext2")])
         self.Rc = self.Ec[:, :3, :3]; self.tc = self.Ec[:, :3, 3]
         self.P = np.array([self.Kc[i] @ self.Ec[i][:3] for i in range(2)])
+
+    def set_model(self, X):
+        from scipy.spatial import cKDTree
+        self.X = X; self.tree = cKDTree(X); self.normals = pca_normals(X, 12) if len(X) >= 12 else None
+
+    def assoc(self, R, t, S, max_m):
+        """model index and distance for every stereo point S (world) under pose (R,t); -1 beyond max_m."""
+        Y = (S - t) @ R; d, j = self.tree.query(Y, k=1, distance_upper_bound=max_m)
+        ok = np.isfinite(d); j = np.where(ok, j, -1); return j, d, Y
 
     def project(self, ci, R, t, idx=None):
         X = self.X if idx is None else self.X[idx]
@@ -237,27 +338,49 @@ class Anchor:
         res = least_squares(fun, np.zeros(3), method="trf", loss="huber", f_scale=self.a.huber_px, x_scale=1.0, max_nfev=50)
         return R0, t0 + res.x
 
-    def refine(self, R0, t0, obs, prior=None):
+    def refine(self, R0, t0, obs, prior=None, stereo=None):
         """Huber LS of the 6-DoF motion on all given observations (both views) around (R0, t0); optional motion prior =
-        (R_pred, t_pred, sigma_deg, sigma_mm) on the deviation from the prediction (model centroid for translation)."""
+        (R_pred, t_pred, sigma_deg, sigma_mm) on the deviation from the prediction (model centroid for translation);
+        optional stereo = (S (n,3) world points of this frame, w_px_per_mm, assoc_m, iters): point-to-plane (or point-to-point
+        when the model has no normals) residuals of S against the model, re-associated `iters` times (ICP)."""
         k, ci, u = obs[:3]; Lw = obs[3] if len(obs) > 3 else None; a = self.a; cen = self.X.mean(0)
-        def fun(x):
-            Rd = Rotation.from_rotvec(x[:3]).as_matrix(); R = Rd @ R0; t = Rd @ t0 + x[3:]
-            r = []
-            for c in (0, 1):
-                m = ci == c
-                if m.any():
-                    uv, _ = self.project(c, R, t, k[m]); d = uv - u[m]
-                    if Lw is not None: d = np.einsum("nij,nj->ni", Lw[m], d)
-                    r.append(d.ravel())
-            if prior is not None:
-                Rp, tp, sd, sm = prior
-                r.append(np.degrees(Rotation.from_matrix(R @ Rp.T).as_rotvec()) / sd * a.huber_px)
-                r.append(((R @ cen + t) - (Rp @ cen + tp)) * 1000 / sm * a.huber_px)
-            return np.concatenate(r)
-        res = least_squares(fun, np.zeros(6), method="trf", loss="huber", f_scale=a.huber_px, x_scale=1.0, max_nfev=50)
-        Rd = Rotation.from_rotvec(res.x[:3]).as_matrix()
-        return ortho(Rd @ R0), Rd @ t0 + res.x[3:]
+        S, w3, amax, iters = stereo if stereo is not None else (None, 0.0, 0.0, 1)
+        R0c, t0c = R0, t0
+        for it in range(max(1, iters)):
+            if S is not None and len(S):
+                j, d, _ = self.assoc(R0c, t0c, S, amax); sel = np.where(j >= 0)[0]; Sm = S[sel]; Mm = self.X[j[sel]]
+                Nm = self.normals[j[sel]] if self.normals is not None else None
+            else:
+                Sm = None
+            def fun(x):
+                Rd = Rotation.from_rotvec(x[:3]).as_matrix(); R = Rd @ R0c; t = Rd @ t0c + x[3:]
+                r = []
+                for c in (0, 1):
+                    m = ci == c
+                    if m.any():
+                        uv, _ = self.project(c, R, t, k[m]); dd = uv - u[m]
+                        if Lw is not None: dd = np.einsum("nij,nj->ni", Lw[m], dd)
+                        r.append(dd.ravel())
+                if Sm is not None and len(Sm):
+                    Y = (Sm - t) @ R - Mm                                   # stereo points in the model frame minus their model match
+                    r.append((np.einsum("ni,ni->n", Y, Nm) if Nm is not None else Y.ravel()) * 1000.0 * w3)
+                if prior is not None:
+                    Rp, tp, sd, sm = prior
+                    r.append(np.degrees(Rotation.from_matrix(R @ Rp.T).as_rotvec()) / sd * a.huber_px)
+                    r.append(((R @ cen + t) - (Rp @ cen + tp)) * 1000 / sm * a.huber_px)
+                return np.concatenate(r) if r else np.zeros(1)
+            if (not len(k)) and (Sm is None or not len(Sm)): break
+            res = least_squares(fun, np.zeros(6), method="trf", loss="huber", f_scale=a.huber_px, x_scale=1.0, max_nfev=50)
+            Rd = Rotation.from_rotvec(res.x[:3]).as_matrix(); R0c, t0c = ortho(Rd @ R0c), Rd @ t0c + res.x[3:]
+        return R0c, t0c
+
+    def stereo_stats(self, R, t, S, amax):
+        """(n_assoc, rms_mm, median_mm) of the stereo points within amax of the model under (R,t); point-to-plane if normals."""
+        if S is None or not len(S): return 0, np.nan, np.nan
+        j, d, Y = self.assoc(R, t, S, amax); sel = j >= 0
+        if not sel.any(): return 0, np.nan, np.nan
+        e = np.abs(np.einsum("ni,ni->n", Y[sel] - self.X[j[sel]], self.normals[j[sel]])) if self.normals is not None else d[sel]
+        return int(sel.sum()), float(np.sqrt(np.mean(e ** 2)) * 1000), float(np.median(e) * 1000)
 
     def spread(self, idx):
         if len(idx) < 3: return 0.0
@@ -273,7 +396,7 @@ def run(a):
     cams, K, E, P, ksrc = rte.calib(ep, rte.POSITIONS)
     meta = json.load(open(f"{rt.RAW_ROOT}/{ep}/metadata_{ep}.json"))
     store = f"{rt.STORE_ROOT}/{ep}/dense/cam"; n_store = rt.count_files(store, ".npz")
-    T = min(e, n_store)
+    T = n_store if a.window == "full" else min(e, n_store)
     sf = f"{a.seeds}/{ep}/matches.npz"
     if not os.path.isfile(sf): raise rt.Failure("no birth seeds (fewer than 3 gated matches)")
     zs = np.load(sf); x = {"ext1": zs["x1"].astype(np.float64), "ext2": zs["x2"].astype(np.float64)}
@@ -293,6 +416,86 @@ def run(a):
     if t_end - b < 2: raise rt.Failure(f"window too short (b={b}, T={T})")
     # birth model (world = robot base frame at b)
     Xh = cv2.triangulatePoints(P["ext1"], P["ext2"], x["ext1"].T, x["ext2"].T); X_B = (Xh[:3] / Xh[3]).T
+    clouds = None; rec_stereo = None; clouds_src = None
+    if a.stereo:
+        cf = f"{a.stereo}/{ep}.npz"
+        if not os.path.isfile(cf): raise rt.Failure("no stereo cloud file")
+        zc = np.load(cf); okc = (zc["sim"] >= a.stereo_sim) & (zc["epi"] <= a.stereo_epi)
+        if a.f1_m3d > 0 and "m3d" in zc.files:
+            metac = json.loads(str(zc["meta"])); sc_ = {p_["t"]: p_.get("scale", float("nan")) for p_ in metac["per_frame"]}
+            scale_pt = np.array([sc_.get(int(t_), np.nan) for t_ in zc["frame"]])
+            okc &= (zc["m3d"] * scale_pt <= a.f1_m3d) & (zc["pconf"].min(1) >= a.f1_pconf)
+        fr_ = zc["frame"][okc]; Xc = zc["X"][okc].astype(np.float64); x1c = zc["x1"][okc].astype(np.float64); x2c = zc["x2"][okc].astype(np.float64)
+        order = np.argsort(fr_, kind="stable"); fr_, Xc, x1c, x2c = fr_[order], Xc[order], x1c[order], x2c[order]
+        srcc = zc["src"][okc][order] if "src" in zc.files else np.ones(len(fr_), np.int8)
+        starts = np.searchsorted(fr_, np.arange(0, T + 1)); clouds = {t_: (Xc[starts[t_]:starts[t_ + 1]], x1c[starts[t_]:starts[t_ + 1]], x2c[starts[t_]:starts[t_ + 1]]) for t_ in range(T) if starts[t_ + 1] > starts[t_]}
+        clouds_src = {t_: srcc[starts[t_]:starts[t_ + 1]] for t_ in range(T) if starts[t_ + 1] > starts[t_]}
+        rec_stereo = dict(frames_with_cloud=len(clouds), pts_median=float(np.median([len(v[0]) for v in clouds.values()])) if clouds else 0)
+        if a.model in ("stereo", "both") and b in clouds and len(clouds[b][0]) >= a.min_seeds:
+            Sb, s1, s2 = clouds[b]
+            if a.model == "both": Sb, s1, s2 = np.vstack([X_B, Sb]), np.vstack([x["ext1"], s1]), np.vstack([x["ext2"], s2])
+            keep = voxel_keep(Sb, a.model_vox * 1e-3, a.model_max)
+            X_B = Sb[keep]; x = {"ext1": s1[keep], "ext2": s2[keep]}; N = len(X_B)
+            rec_stereo["model_birth"] = int(N)
+    cand_src = np.zeros(N, np.int8)      # 0 = DISK seed, 1/2/3 = stereo cloud source, 4 = extended-region DISK (in-process)
+    if a.cands_ext > 0:
+        import pandas as _pd, rig_match_track as _rmt
+        it0 = _pd.read_csv(f"{MASKS}/items_v2.csv"); it0 = it0[(it0.episode == ep) & (it0.frame == b)]
+        reg_ext = {}
+        for c in ("ext1", "ext2"):
+            r_ = it0[it0.cam == c]; mm = cv2.imread(f"{MASKS}/{r_.mask_relpath.iloc[0]}", 0) if len(r_) else None
+            if mm is None: reg_ext = None; break
+            if mm.shape != (H, W): mm = cv2.resize(mm, (W, H), interpolation=cv2.INTER_NEAREST)
+            reg_ext[c] = cv2.dilate((mm > 0).astype(np.uint8) * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * a.cands_ext + 1,) * 2))
+        if reg_ext is not None:
+            R1_, t1_, R2_, t2_ = E["ext1"][:3, :3], E["ext1"][:3, 3], E["ext2"][:3, :3], E["ext2"][:3, 3]; Rr_ = R2_ @ R1_.T; trel_ = t2_ - Rr_ @ t1_
+            F_ = np.linalg.inv(K["ext2"]).T @ rt.skew(trel_) @ Rr_ @ np.linalg.inv(K["ext1"])
+            g1_ = rt.read_frames(f"{rt.RAW_ROOT}/{ep}/recordings/MP4/{meta['ext1_cam_serial']}.mp4", b + 1)[b]; g2_ = rt.read_frames(f"{rt.RAW_ROOT}/{ep}/recordings/MP4/{meta['ext2_cam_serial']}.mp4", b + 1)[b]
+            xa, xb, cf_ = _rmt.match_disk_epi(g1_, g2_, reg_ext["ext1"], reg_ext["ext2"], F_, a.cands_ext_side, 2.5)
+            sel_, _ = _rmt.gate(xa, xb, cf_, reg_ext["ext1"], reg_ext["ext2"], F_, P, E, 2.5, 0.3)
+            if len(sel_):
+                xa, xb = xa[sel_], xb[sel_]
+                # drop candidates duplicating the existing seeds (within 2 px in view 1)
+                if N: keep_ = np.array([np.min(np.linalg.norm(x["ext1"] - p_, axis=1)) > 2.0 for p_ in xa])
+                else: keep_ = np.ones(len(xa), bool)
+                xa, xb = xa[keep_], xb[keep_]
+                Xh_ = cv2.triangulatePoints(P["ext1"], P["ext2"], xa.T, xb.T); Xe = (Xh_[:3] / Xh_[3]).T
+                if a.cands == "ext_only" or N == 0:
+                    X_B, x, N = Xe, {"ext1": xa, "ext2": xb}, len(Xe); cand_src = np.full(N, 4, np.int8)
+                else:
+                    X_B = np.vstack([X_B, Xe]); x = {"ext1": np.vstack([x["ext1"], xa]), "ext2": np.vstack([x["ext2"], xb])}
+                    cand_src = np.concatenate([cand_src, np.full(len(Xe), 4, np.int8)]); N = len(X_B)
+    if a.cands != "seeds" and a.stereo:
+        cf = f"{a.stereo}/{ep}/{ep}.npz" if os.path.isdir(f"{a.stereo}/{ep}") else f"{a.stereo}/{ep}.npz"
+        if os.path.isfile(cf):
+            zc = np.load(cf); atb = (zc["frame"] == b) & (zc["sim"] >= a.stereo_sim) & (zc["epi"] <= a.stereo_epi)
+            if a.f1_m3d > 0 and "m3d" in zc.files:
+                metac = json.loads(str(zc["meta"])); sb_ = next((p_.get("scale", float("nan")) for p_ in metac["per_frame"] if p_["t"] == b), float("nan"))
+                atb &= (zc["m3d"] * sb_ <= a.f1_m3d) & (zc["pconf"].min(1) >= a.f1_pconf)
+            if a.cands == "recip": atb &= np.isin(zc["src"], [1, 3])
+            if atb.any():
+                order = np.argsort(-zc["sim"][atb])[: a.cands_max]; idx = np.where(atb)[0][order]
+                Xn = zc["X"][idx].astype(np.float64); x1n = zc["x1"][idx].astype(np.float64); x2n = zc["x2"][idx].astype(np.float64)
+                if a.cands in ("recip", "guided_only"):
+                    X_B, x, N = Xn, {"ext1": x1n, "ext2": x2n}, len(Xn); cand_src = zc["src"][idx].astype(np.int8)
+                else:
+                    X_B = np.vstack([X_B, Xn]); x = {"ext1": np.vstack([x["ext1"], x1n]), "ext2": np.vstack([x["ext2"], x2n])}
+                    cand_src = np.concatenate([cand_src, zc["src"][idx].astype(np.int8)]); N = len(X_B)
+    if a.model_labels:   # GT DIAGNOSTIC ONLY: perfect model = FK label points (world frame at b); isolates tracker/solver from model errors
+        zl = np.load(f"{rte.POSITIONS}/{ep}_gripper.npz"); s0 = str(zl["serials"][0])
+        uvl = zl[f"{s0}_uv"][b].astype(np.float64); dl = zl[f"{s0}_z"][b].astype(np.float64); Kl = zl[f"{s0}_K"]; W2C = zl[f"{s0}_W2C"]; okl = zl[f"{s0}_front"][b] & zl[f"{s0}_in_frame"][b]
+        if a.model_labels == "base": okl &= zl["link"] == "robotiq_85_base_link"
+        Xcam = np.c_[(uvl[:, 0] - Kl[0, 2]) / Kl[0, 0] * dl, (uvl[:, 1] - Kl[1, 2]) / Kl[1, 1] * dl, dl]
+        X_B = ((Xcam - W2C[:3, 3]) @ W2C[:3, :3])[okl]; N = len(X_B)
+        x = {}
+        for c in ("ext1", "ext2"):
+            Z_ = X_B @ E[c][:3, :3].T + E[c][:3, 3]; x[c] = Z_[:, :2] / Z_[:, 2:3] * [K[c][0, 0], K[c][1, 1]] + [K[c][0, 2], K[c][1, 2]]
+        cand_src = np.full(N, 9, np.int8)
+        if a.labels_vis:   # GT DIAGNOSTIC: per-frame visibility of the label points (front & in_frame) per view
+            lab_vis = {}
+            for ci_, c in enumerate(("ext1", "ext2")):
+                sc = str(meta[f"{c}_cam_serial"]); lab_vis[ci_] = (zl[f"{sc}_front"] & zl[f"{sc}_in_frame"])[:, okl] if f"{sc}_front" in zl.files else None
+    # (b) GT-free F1 phantom filter on cloud candidates: MASt3R two-view consistency (scaled) and pointmap confidence
     bmask = {}
     if a.seed_mask or a.extend or a.mwt:
         import pandas as _pd
@@ -323,6 +526,24 @@ def run(a):
     # Track-On v2 (image-based region, used for the birth crop = the seeds' own crop, and for global re-localisation)
     qz = {c: np.load(f"{a.tracks_v2}/{ep}/{c}_f{b:05d}.npz") for c in ("ext1", "ext2")}
     q = {c: qz[c]["queries"][:, 1:] for c in qz}; qtr = {c: qz[c]["tracks"] for c in qz}; qvis = {c: qz[c]["visibility"] for c in qz}
+
+    def hull3d(t):
+        """coarse 3D position of the gripper region at t: closest point between the two views' rays through the median of the
+        visible Track-On v2 points (None if a view has < 3 visible points). Image-based, causal."""
+        cs = []
+        for c in ("ext1", "ext2"):
+            if t >= len(qtr[c]): return None
+            p = qtr[c][t]; ok = qvis[c][t] & ~np.isnan(p[:, 0]) & (p[:, 0] >= 0) & (p[:, 0] < W) & (p[:, 1] >= 0) & (p[:, 1] < H)
+            if ok.sum() < 3: return None
+            cs.append(np.median(p[ok], 0))
+        o, d = [], []
+        for c, u in zip(("ext1", "ext2"), cs):
+            Rc_, tc_ = E[c][:3, :3], E[c][:3, 3]; r_ = Rc_.T @ (np.linalg.inv(K[c]) @ np.r_[u, 1.0]); o.append(-Rc_.T @ tc_); d.append(r_ / np.linalg.norm(r_))
+        o1, o2, d1, d2 = o[0], o[1], d[0], d[1]; A = np.array([[d1 @ d1, -d1 @ d2], [d1 @ d2, -d2 @ d2]]); rhs = np.array([(o2 - o1) @ d1, (o2 - o1) @ d2])
+        try: s1, s2 = np.linalg.solve(A, rhs)
+        except np.linalg.LinAlgError: return None
+        if s1 <= 0.1 or s2 <= 0.1: return None
+        return 0.5 * ((o1 + s1 * d1) + (o2 + s2 * d2))
 
     def v2_box(c, t, margin=20):
         if t < len(qtr[c]):
@@ -371,16 +592,54 @@ def run(a):
                 tr_[ii[ok_], j] = p1_.reshape(-1, 2)[ok_]; alive[ii[~ok_]] = False
             ext_tracks[c] = tr_
     n_extended = 0
+    v2m = None
+    if a.v2_model > 0:   # per view: (M,) object-frame 3D (nan until triangulated), the raw v2 tracks, visibility
+        v2m = {ci: dict(X=np.full((len(q[c]), 3), np.nan), tr=qtr[c], vis=qvis[c], done=False) for ci, c in enumerate(("ext1", "ext2"))}
+    f2 = None
+    if 'lab_vis' not in dir(): lab_vis = None
+    if a.f2_frames > 0:
+        f2 = dict(tracks={0: np.full((N, T, 2), np.nan, np.float32), 1: np.full((N, T, 2), np.nan, np.float32)}, alive=np.ones(N, bool), checks=[], n_in=[], done=False)
+        f2["tracks"][0][:, b] = x["ext1"]; f2["tracks"][1][:, b] = x["ext2"]
+        f2_cp = sorted({b + k for k in (a.f2_frames // 3, 2 * a.f2_frames // 3, a.f2_frames) if k >= 3})
+        Kc_ = np.array([K[c] for c in ("ext1", "ext2")]); Ec_ = np.array([E[c] for c in ("ext1", "ext2")]); Rc_, tc_ = Ec_[:, :3, :3], Ec_[:, :3, 3]
+        X_all = an.X.copy()                                # all candidates (the model may shrink to the consensus set)
+        model_idx = np.arange(N)                           # which candidates form the current model
     Rft = None
     if a.rot_ft:
         ftp = rt.load_poses(f"{rt.CUT3R_ROOT}/{ep}/camera", t_end + 1, "CUT3R")
         Rgb = rt.load_poses(f"{rt.STORE_ROOT}/{ep}/dense/cam", b + 1, "store GT")[b][:3, :3]   # birth frame only
         Rft = {t_: ortho(Rgb @ ftp[b][:3, :3].T @ ftp[t_][:3, :3] @ Rgb.T) for t_ in ftp if t_ >= b}
     Gb = {c: gray[c][b].astype(np.float32) for c in ("ext1", "ext2")}; Mb = {c: bmask[c].astype(np.float32) for c in bmask}
+    if a.lk_clip > 0:   # saturate highlights: LK then follows edges and matte structure, not the specular blobs
+        gray_lk = {c: [np.minimum(g, a.lk_clip).astype(np.uint8) for g in gray[c]] for c in gray}
+    else:
+        gray_lk = gray
+    c_hull_b = hull3d(b) if a.hull_reloc else None
     R_s, t_s, solved = {b: np.eye(3)}, {b: np.zeros(3)}, {b: True}
-    last = b; rows = []; kf = b; kf_inl = None; n_kf = 0; kfs = [b]; vel = None
+    last = b; rows = []; kf = b; kf_inl = None; n_kf = 0; kfs = [b]; vel = None; n_acc = 0; w_hat = None; Rfu = {}; bad_cnt = None; n_retired = 0; n_coast = 0; blind = 0; n_v2 = 0
+    pend = dict(X=np.zeros((0, 3)), t0=np.zeros(0, int), tr={0: np.zeros((0, T, 2), np.float32), 1: np.zeros((0, T, 2), np.float32)}, alive=np.zeros(0, bool))
+    n_grow_cand = n_grow_ok = 0
     for t in range(b + 1, t_end + 1):
         fs = t - last
+        if f2 is not None and not f2["done"] and t <= b + a.f2_frames:
+            for ci, c in enumerate(("ext1", "ext2")):
+                idx = np.where(f2["alive"])[0]
+                if not len(idx): break
+                p0 = f2["tracks"][ci][idx, t - 1].reshape(-1, 1, 2)
+                lk_ = dict(winSize=(lkw[c],) * 2, maxLevel=a.lk_levels, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 0.01))
+                pn, st, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t - 1], gray_lk[c][t], p0, None, **lk_)
+                pb, st2, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t], gray_lk[c][t - 1], pn, None, **lk_)
+                fb = np.linalg.norm(pb - p0, axis=2).ravel(); pn = pn.reshape(-1, 2)
+                good = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < a.lk_fb) & (pn[:, 0] >= 0) & (pn[:, 0] < W) & (pn[:, 1] >= 0) & (pn[:, 1] < H)
+                f2["tracks"][ci][idx[good], t] = pn[good]; f2["alive"][idx[~good]] = False
+            if t in f2_cp:
+                frames_ = list(range(b, t + 1))
+                ok_, poses_ = f2_ransac(X_all, f2["tracks"], frames_, Kc_, Rc_, tc_, n_samples=a.f2_samples, k_sample=a.f2_k, tau=a.f2_px, min_frac=a.f2_frac, seed=t)
+                f2["checks"].append(int(t)); f2["n_in"].append(int(ok_.sum()))
+                if ok_.sum() >= a.min_seeds:
+                    model_idx = np.where(ok_)[0]; an.set_model(X_all[model_idx])
+                    f2["kept_x1"] = x["ext1"][model_idx].round(1).tolist(); f2["kept_src"] = cand_src[model_idx].tolist()
+                    if t == f2_cp[-1]: f2["done"] = True
         if fs == 1 and (t - 2) in solved and solved.get(t - 2) and (t - 2) >= b:
             if a.vel_beta < 1.0 and vel is not None:     # smoothed velocity (rotvec, centroid displacement per frame)
                 dR = Rotation.from_rotvec(vel[0]).as_matrix(); cen0 = an.X.mean(0)
@@ -392,7 +651,16 @@ def run(a):
         if Rft is not None and t in Rft:
             cen0 = an.X.mean(0); c_last = R_s[last] @ cen0 + t_s[last]
             v_c = (c_last - (R_s[last - 1] @ cen0 + t_s[last - 1])) if (fs == 1 and solved.get(last - 1) and last - 1 >= b) else np.zeros(3)
-            Rp = Rft[t]; tp = c_last + v_c - Rp @ cen0
+            if a.rot_ft_beta < 1.0 and (t - 1) in Rft:
+                w_meas = Rotation.from_matrix(Rft[t] @ Rft[t - 1].T).as_rotvec()
+                w_hat = w_meas if w_hat is None else (1 - a.rot_ft_beta) * w_hat + a.rot_ft_beta * w_meas
+                Rfu[t] = ortho(Rotation.from_rotvec(w_hat).as_matrix() @ Rfu.get(t - 1, Rft[t - 1]))
+                if a.rot_ft_pull > 0:   # slow pull toward the absolute CUT3R rotation (removes the smoothing lag bias, keeps it causal)
+                    dv = Rotation.from_matrix(Rft[t] @ Rfu[t].T).as_rotvec(); Rfu[t] = ortho(Rotation.from_rotvec(a.rot_ft_pull * dv).as_matrix() @ Rfu[t])
+                Rp = Rfu[t]
+            else:
+                Rp = Rft[t]
+            tp = c_last + v_c - Rp @ cen0
         glob = fs > a.lost_global and dn is not None
         radius = min(a.radius * (1 + a.radius_grow * (fs - 1)), a.radius_max)
         obs_k, obs_c, obs_u, obs_pk, obs_sec = [], [], [], [], []; maps = {}; obs_W = []; n_mwt = [0, 0]
@@ -428,12 +696,18 @@ def run(a):
                 for src in srcs:
                   uvp, zp = an.project(ci, R_s[src], t_s[src])
                   okp = (zp > 0.05) & (zn > 0.05) & (uvp[:, 0] >= 2) & (uvp[:, 0] < W - 2) & (uvp[:, 1] >= 2) & (uvp[:, 1] < H - 2)
+                  if lab_vis is not None and lab_vis.get(ci) is not None and t < len(lab_vis[ci]) and len(an.X) == lab_vis[ci].shape[1]:
+                      okp &= lab_vis[ci][t] & lab_vis[ci][src]
                   idx = np.where(okp)[0]
                   if len(idx):
                       p0 = uvp[idx].astype(np.float32).reshape(-1, 1, 2); p1 = uvn[idx].astype(np.float32).reshape(-1, 1, 2)
-                      lk = dict(winSize=(lkw[c],) * 2, maxLevel=a.lk_levels, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 0.01))
-                      pn, st, err = cv2.calcOpticalFlowPyrLK(gray[c][src], gray[c][t], p0, p1.copy(), flags=cv2.OPTFLOW_USE_INITIAL_FLOW, **lk)
-                      pb, st2, _ = cv2.calcOpticalFlowPyrLK(gray[c][t], gray[c][src], pn, p0.copy(), flags=cv2.OPTFLOW_USE_INITIAL_FLOW, **lk)
+                      lk = dict(winSize=(lkw[c],) * 2, maxLevel=a.lk_levels, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 0.01), minEigThreshold=a.lk_mineig)
+                      if a.lk_noinit:
+                          pn, st, err = cv2.calcOpticalFlowPyrLK(gray_lk[c][src], gray_lk[c][t], p0, None, **lk)
+                          pb, st2, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t], gray_lk[c][src], pn, None, **lk)
+                      else:
+                          pn, st, err = cv2.calcOpticalFlowPyrLK(gray_lk[c][src], gray_lk[c][t], p0, p1.copy(), flags=cv2.OPTFLOW_USE_INITIAL_FLOW, **lk)
+                          pb, st2, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t], gray_lk[c][src], pn, p0.copy(), flags=cv2.OPTFLOW_USE_INITIAL_FLOW, **lk)
                       fb = np.linalg.norm(pb - p0, axis=2).ravel(); pn = pn.reshape(-1, 2)
                       good = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < a.lk_fb) & (pn[:, 0] >= 0) & (pn[:, 0] < W) & (pn[:, 1] >= 0) & (pn[:, 1] < H)
                       if a.aperture:
@@ -514,32 +788,132 @@ def run(a):
             for j in np.where(ok)[0]:
                 obs_k.append(idx[j]); obs_c.append(ci); obs_u.append(pos[j]); obs_pk.append(pk[j]); obs_sec.append(sec[j]); obs_W.append(None)
             maps[ci] = (D, geo)
+        v2_obs = ([], [], [])
+        if v2m is not None and t > b + a.v2_model:
+            for ci in (0, 1):
+                d_ = v2m[ci]
+                if t >= len(d_["tr"]): continue
+                okv = ~np.isnan(d_["X"][:, 0]) & d_["vis"][t] & ~np.isnan(d_["tr"][t][:, 0])
+                for k_ in np.where(okv)[0]:
+                    u_ = d_["tr"][t, k_]
+                    if 0 <= u_[0] < W and 0 <= u_[1] < H: v2_obs[0].append((ci, k_)); v2_obs[1].append(ci); v2_obs[2].append(u_)
+        if v2_obs[0]:
+            # temporary model: LK model points + the v2 points observed now (indices continue after len(an.X))
+            Xv = np.array([v2m[ci_]["X"][k_] for ci_, k_ in v2_obs[0]]); base_X = an.X.copy()
+            an.X = np.vstack([base_X, Xv]); kv = np.arange(len(base_X), len(an.X))
+            obs_k = list(obs_k) + kv.tolist(); obs_c = list(obs_c) + v2_obs[1]; obs_u = list(obs_u) + v2_obs[2]; obs_W = list(obs_W) + [np.sqrt(a.v2_w) * np.eye(2)] * len(kv); obs_pk = list(obs_pk) + [0.0] * len(kv); obs_sec = list(obs_sec) + [0.0] * len(kv)
+        else:
+            base_X = None
         obs = (np.array(obs_k, int), np.array(obs_c, int), np.array(obs_u, np.float64).reshape(-1, 2))
         if len(obs_W) == len(obs[0]) and any(w_ is not None for w_ in obs_W):
             obs = obs + (np.array([np.eye(2) if w_ is None else w_ for w_ in obs_W]),)
-        row = dict(frame=t, fs=fs, kf=kf, n_mwt1=n_mwt[0], n_mwt2=n_mwt[1], mode="global" if glob else "guided", radius=radius, n_obs=len(obs[0]),
+        if a.grow_frames > 0 and len(pend["X"]):
+            for ci, c in enumerate(("ext1", "ext2")):
+                idx = np.where(pend["alive"])[0]
+                if not len(idx): break
+                p0 = pend["tr"][ci][idx, t - 1].reshape(-1, 1, 2)
+                lk_ = dict(winSize=(lkw[c],) * 2, maxLevel=a.lk_levels, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 0.01))
+                pn, st, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t - 1], gray_lk[c][t], p0, None, **lk_)
+                pb, st2, _ = cv2.calcOpticalFlowPyrLK(gray_lk[c][t], gray_lk[c][t - 1], pn, None, **lk_)
+                fb = np.linalg.norm(pb - p0, axis=2).ravel(); pn = pn.reshape(-1, 2)
+                good = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < a.lk_fb) & (pn[:, 0] >= 0) & (pn[:, 0] < W) & (pn[:, 1] >= 0) & (pn[:, 1] < H)
+                pend["tr"][ci][idx[good], t] = pn[good]; pend["alive"][idx[~good]] = False
+        if v2m is not None and t == b + a.v2_model:
+            for ci, c in enumerate(("ext1", "ext2")):
+                Kinv = np.linalg.inv(an.Kc[ci]); Cw = -an.Rc[ci].T @ an.tc[ci]; d_ = v2m[ci]; n_ok = 0
+                for k_ in range(len(d_["X"])):
+                    fr_ = [f_ for f_ in range(b, t + 1) if solved.get(f_) and f_ < len(d_["tr"]) and d_["vis"][f_, k_] and not np.isnan(d_["tr"][f_, k_, 0])]
+                    if len(fr_) < a.v2_min_obs: continue
+                    P_, D_ = [], []
+                    for f_ in fr_:
+                        Rm, tm = R_s[f_], t_s[f_]; dw = an.Rc[ci].T @ (Kinv @ np.r_[d_["tr"][f_, k_], 1.0]); dw /= np.linalg.norm(dw)
+                        P_.append(Rm.T @ (Cw - tm)); D_.append(Rm.T @ dw)
+                    P_, D_ = np.array(P_), np.array(D_)
+                    ang = np.degrees(np.arccos(np.clip(np.min(D_ @ D_.T), -1, 1)))
+                    if ang < a.v2_min_parallax: continue
+                    A_ = np.zeros((3, 3)); bb = np.zeros(3)
+                    for pp, dd in zip(P_, D_): Pm = np.eye(3) - np.outer(dd, dd); A_ += Pm; bb += Pm @ pp
+                    if np.linalg.eigvalsh(A_)[0] < 1e-6: continue
+                    Xo = np.linalg.solve(A_, bb)
+                    if np.linalg.norm(Xo - an.X.mean(0)) > a.v2_max_dist: continue
+                    rp = []
+                    for f_ in fr_:
+                        Zc = an.Rc[ci] @ (R_s[f_] @ Xo + t_s[f_]) + an.tc[ci]
+                        if Zc[2] <= 0.05: rp.append(1e9); continue
+                        rp.append(np.linalg.norm((an.Kc[ci] @ (Zc / Zc[2]))[:2] - d_["tr"][f_, k_]))
+                    if np.median(rp) < a.v2_px and np.percentile(rp, 90) < 2.5 * a.v2_px: d_["X"][k_] = Xo; n_ok += 1
+                d_["done"] = True; n_v2 += n_ok
+        S_t = clouds[t][0] if (clouds is not None and t in clouds) else None
+        st_arg = (S_t, a.stereo_w, a.stereo_assoc * 1e-3, a.stereo_iters) if (S_t is not None and len(S_t) >= a.stereo_min and a.stereo_w > 0) else None
+        row = dict(frame=t, fs=fs, kf=kf, n_st=0 if S_t is None else len(S_t), n_st_in=0, st_rms_mm=np.nan, n_model=len(an.X), n_mwt1=n_mwt[0], n_mwt2=n_mwt[1], mode="global" if glob else "guided", radius=radius, n_obs=len(obs[0]),
                    n_obs1=int((obs[1] == 0).sum()), n_obs2=int((obs[1] == 1).sum()), hyp="", n_inl=0, n_inl1=0, n_inl2=0,
                    reproj_px=np.nan, spread_cm=np.nan, solved=False, dev_pred_deg=np.nan)
-        if len(obs[0]) >= a.min_inl:
-            cands = [("pred_ft", Rp, tp)] if (Rft is not None and t in Rft) else (([] if glob else [("pred", Rp, tp), ("hold", R_s[last], t_s[last])]) + an.hypotheses(obs))
+        cv_pred = (fs == 1 and (t - 2) >= b and solved.get(t - 2, False)) and not (Rft is not None and t in Rft)
+        if len(obs[0]) >= a.min_inl or st_arg is not None:
+            if Rft is not None and t in Rft:
+                cen_ = an.X.mean(0); cands = [("pred_ft", Rp, tp), ("hold_ft", Rp, (R_s[last] @ cen_ + t_s[last]) - Rp @ cen_)]
+                for nm_, Rh_, th_ in (an.hypotheses(obs) if len(obs[0]) >= 6 else []):
+                    cands.append((nm_ + "_ft", Rp, (Rh_ @ cen_ + th_) - Rp @ cen_))
+                if c_hull_b is not None:
+                    ch_ = hull3d(t)
+                    if ch_ is not None: cands.append(("hull_ft", Rp, ch_ - Rp @ c_hull_b))
+                if len(obs[0]) >= 3:   # translation-only robust fit from the prediction with a wide gate (fast gripper, zero initial velocity)
+                    Rw_, tw_ = an.refine_t(Rp, tp, tuple(o[an.resid(Rp, tp, obs) < 4 * a.tau_out] for o in obs)) if (an.resid(Rp, tp, obs) < 4 * a.tau_out).sum() >= 3 else (Rp, tp)
+                    cands.append(("wide_ft", Rw_, tw_))
+            else:
+                cands = ([] if glob else [("pred", Rp, tp), ("hold", R_s[last], t_s[last])]) + (an.hypotheses(obs) if len(obs[0]) >= 6 else [])
             best = None
             for name, Rh, th in cands:
-                n_in = int((an.resid(Rh, th, obs) < a.tau_in).sum())
+                n_in = int((an.resid(Rh, th, obs) < a.tau_in).sum()) if len(obs[0]) else 0
+                if st_arg is not None: n_in += an.stereo_stats(Rh, th, S_t, a.stereo_assoc * 1e-3)[0] * a.stereo_vote
                 if best is None or n_in > best[0]: best = (n_in, name, Rh, th)
-            if best is not None and best[0] >= 3:
+            if best is not None and (best[0] >= 3 or st_arg is not None):
                 _, name, Rh, th = best
-                e0 = an.resid(Rh, th, obs); gate = e0 < a.tau_out
+                e0 = an.resid(Rh, th, obs) if len(obs[0]) else np.zeros(0); gate = e0 < a.tau_out
                 sub = tuple(o[gate] for o in obs)
-                prior = (Rp, tp, a.prior_deg, a.prior_mm) if (a.prior_deg > 0 and not glob and fs == 1) else None
-                Rr, tr_ = an.refine_t(Rh, th, sub) if (Rft is not None and t in Rft) else an.refine(Rh, th, sub, prior)
-                e1 = an.resid(Rr, tr_, obs); inl = e1 < a.tau_in
-                kin = np.unique(obs[0][inl]); sp = an.spread(kin)
-                ok = inl.sum() >= a.min_inl and sp >= a.min_spread and ((inl & (obs[1] == 0)).sum() >= a.min_view and (inl & (obs[1] == 1)).sum() >= a.min_view)
+                prior = (Rp, tp, a.prior_deg, a.prior_mm) if (a.prior_deg > 0 and not glob and cv_pred) else None
+                Rr, tr_ = an.refine_t(Rh, th, sub) if (Rft is not None and t in Rft) else an.refine(Rh, th, sub, prior, st_arg)
+                e1 = an.resid(Rr, tr_, obs) if len(obs[0]) else np.zeros(0); inl = e1 < a.tau_in
+                kin = np.unique(obs[0][inl]) if len(obs[0]) else np.zeros(0, int); sp = an.spread(kin)
+                n_st_in, st_rms, st_med = an.stereo_stats(Rr, tr_, S_t, a.stereo_assoc * 1e-3) if st_arg is not None else (0, np.nan, np.nan)
+                ok_lk = inl.sum() >= a.min_inl and sp >= a.min_spread and ((inl & (obs[1] == 0)).sum() >= a.min_view and (inl & (obs[1] == 1)).sum() >= a.min_view)
+                ok_st = st_arg is not None and n_st_in >= a.stereo_min and (np.isnan(st_rms) or st_rms <= a.stereo_ok_mm)
+                ok = ok_lk or ok_st
+                if not ok and a.rot_ft_fallback and Rft is not None and t in Rft and len(obs[0]) >= 3:
+                    # translation-only solve did not pass: hold the fused rotation, re-solve translation from the last pose with a
+                    # looser gate; if that fails too, hold the whole pose (coverage over precision for the consumer)
+                    Rh2, th2 = Rp, t_s[last] + (Rp - R_s[last]) @ (-an.X.mean(0)) + (R_s[last] @ an.X.mean(0) + t_s[last]) - (R_s[last] @ an.X.mean(0) + t_s[last])
+                    e2 = an.resid(Rh2, th2, obs); g2 = e2 < 2 * a.tau_out
+                    if g2.sum() >= 3:
+                        Rr, tr_ = an.refine_t(Rh2, th2, tuple(o[g2] for o in obs)); e1 = an.resid(Rr, tr_, obs); inl = e1 < 2 * a.tau_in
+                        ok = inl.sum() >= 3; name = name + "+fb"
+                    if not ok:
+                        Rr, tr_ = Rp, tp; ok = True; name = name + "+hold"; inl = np.zeros(len(obs[0]), bool)
                 dev = float(rt.rot_angle_deg(Rr @ Rp.T))
-                if ok and not glob and fs == 1 and a.jump_deg > 0 and dev > a.jump_deg: ok = False
+                if ok and not glob and cv_pred and a.jump_deg > 0 and dev > a.jump_deg: ok = False
+                row.update(n_st_in=n_st_in, st_rms_mm=st_rms)
                 row.update(hyp=name, n_inl=int(inl.sum()), n_inl1=int((inl & (obs[1] == 0)).sum()), n_inl2=int((inl & (obs[1] == 1)).sum()),
                            reproj_px=float(np.median(e1[inl])) if inl.any() else np.nan, spread_cm=sp * 100, solved=bool(ok), dev_pred_deg=dev)
-                if ok and fs == 1 and not glob and (a.fuse_rot < 1.0 or a.fuse_pos < 1.0):
+                if ok and Rft is not None and t in Rft and base_X is not None and len(kv) >= a.v2_min_pull:
+                    # absolute translation from the Track-On v2 observations alone (their 3D was motion-triangulated early)
+                    mv = np.isin(obs[0], kv); subv = tuple(o[mv] for o in obs)
+                    _, tv2 = an.refine_t(Rr, tr_, subv); ev2 = an.resid(Rr, tv2, obs)[mv]
+                    if (ev2 < 2 * a.tau_in).sum() >= a.v2_min_pull:
+                        cen0 = an.X[:len(base_X)].mean(0); c_lk = Rr @ cen0 + tr_; c_v2 = Rr @ cen0 + tv2
+                        row.update(c_v2_x=c_v2[0], c_v2_y=c_v2[1], c_v2_z=c_v2[2], n_v2_in=int((ev2 < 2 * a.tau_in).sum()))
+                        if a.v2_pull > 0 and np.linalg.norm(c_v2 - c_lk) < a.pull_gate * 1e-2: tr_ = (c_lk + a.v2_pull * (c_v2 - c_lk)) - Rr @ cen0
+                if ok and c_hull_b is not None:
+                    ch_ = hull3d(t)
+                    if ch_ is not None:
+                        cen0 = an.X[:len(base_X)].mean(0) if base_X is not None else an.X.mean(0); c_h = ch_ + Rr @ (cen0 - c_hull_b)
+                        row.update(c_hull_x=c_h[0], c_hull_y=c_h[1], c_hull_z=c_h[2])
+                        if a.hull_pull > 0:
+                            c_lk = Rr @ cen0 + tr_
+                            if np.linalg.norm(c_h - c_lk) < a.pull_gate * 1e-2: tr_ = (c_lk + a.hull_pull * (c_h - c_lk)) - Rr @ cen0
+                if ok and Rft is not None and t in Rft and a.rot_ft_tbeta < 1.0 and fs == 1 and "+hold" not in name:
+                    cen0 = an.X.mean(0); cm_ = Rr @ cen0 + tr_; cp_ = tp + Rp @ cen0        # tp was built as c_last + v_c - Rp cen0
+                    cf_ = cp_ + a.rot_ft_tbeta * (cm_ - cp_); tr_ = cf_ - Rr @ cen0
+                if ok and cv_pred and not glob and (a.fuse_rot < 1.0 or a.fuse_pos < 1.0):
                     # causal alpha-beta filter: blend the measured pose with the constant-velocity prediction
                     cen0 = an.X.mean(0)
                     dw = Rotation.from_matrix(Rr @ Rp.T).as_rotvec()
@@ -547,7 +921,16 @@ def run(a):
                     cm, cp = Rr @ cen0 + tr_, Rp @ cen0 + tp
                     cf = cp + a.fuse_pos * (cm - cp)
                     Rr, tr_ = Rf, cf - Rf @ cen0
+                if ok and a.retire > 0 and len(obs[0]):
+                    bad_now = np.zeros(len(an.X), bool); seen = np.zeros(len(an.X), bool)
+                    seen[obs[0]] = True; bad_now[obs[0][e1 > a.tau_out]] = True
+                    if bad_cnt is None or len(bad_cnt) != len(an.X): bad_cnt = np.zeros(len(an.X), int)
+                    bad_cnt = np.where(bad_now, bad_cnt + 1, np.where(seen, 0, bad_cnt))
+                    drop = bad_cnt >= a.retire
+                    if drop.any() and (len(an.X) - drop.sum()) >= a.min_seeds:
+                        an.set_model(an.X[~drop]); bad_cnt = bad_cnt[~drop]; n_retired += int(drop.sum())
                 if ok:
+                    blind = 0
                     if fs == 1:                                   # velocity update from the accepted increment
                         cen0 = an.X.mean(0); w_ = Rotation.from_matrix(Rr @ R_s[t - 1].T).as_rotvec()
                         d_ = (Rr @ cen0 + tr_) - (R_s[t - 1] @ cen0 + t_s[t - 1])
@@ -555,6 +938,12 @@ def run(a):
                     else:
                         vel = None
                     R_s[t], t_s[t], solved[t] = Rr, tr_, True; last = t
+                    if S_t is not None and len(S_t) and a.acc_frames > 0 and ((t - b) <= a.acc_frames or (a.acc_rms > 0 and not np.isnan(st_rms) and st_rms <= a.acc_rms)) and len(an.X) < a.model_max:
+                        j, d, Y = an.assoc(Rr, tr_, S_t, a.acc_near * 1e-3)
+                        new_pts = Y[(j >= 0) & (d > a.acc_dup * 1e-3)]
+                        if len(new_pts):
+                            keep = voxel_keep(new_pts, a.model_vox * 1e-3, a.model_max - len(an.X))
+                            an.set_model(np.vstack([an.X, new_pts[keep]])); n_acc += len(keep)
                     if a.kf or a.kf_multi:
                         n_u = len({(int(k_), int(c_)) for k_, c_ in zip(obs[0][inl], obs[1][inl])})
                         if kf_inl is None: kf_inl = n_u
@@ -571,8 +960,56 @@ def run(a):
                                 if float((r @ dd[j]).max()) < a.mem_novel:
                                     keep = r if len(r) - n_birth_refs < a.mem else torch.cat([r[:n_birth_refs], r[n_birth_refs + 1:]])
                                     refs[kk] = torch.cat([keep, dd[j][None]])
+        if base_X is not None: an.X = base_X   # drop the temporary v2 rows (model tree/normals unchanged)
+        if not solved.get(t) and a.coast >= 0 and Rft is not None and t in Rft:
+            cen_ = an.X.mean(0); c_last_ = R_s[last] @ cen_ + t_s[last]
+            steps = t - last
+            v_ = (c_last_ - (R_s[last - 1] @ cen_ + t_s[last - 1])) if (solved.get(last - 1) and last - 1 >= b and (last - 1) in R_s) else np.zeros(3)
+            ch_ = hull3d(t) if (c_hull_b is not None and a.hull_coast) else None
+            if ch_ is not None:
+                t_new = ch_ - Rp @ c_hull_b; tag_ = "+coast_hull"; blind = 0
+            else:
+                c_new = c_last_ + v_ * min(steps, a.coast); t_new = c_new - Rp @ cen_; tag_ = "+coast_hold"; blind = blind + 1
+            if blind <= a.coast_emit:
+                R_s[t], t_s[t], solved[t] = Rp, t_new, True; row.update(hyp=row.get("hyp", "") + tag_, solved=True); n_coast += 1
+            # the tracker keeps anchoring on the last REAL solve: do not move `last`
         if not solved.get(t):
             solved[t] = False
+        if a.grow_frames > 0 and solved.get(t):
+            # (1) candidates whose chains are due: consistency with the SOLVED poses over their window, both views
+            due = np.where(t - pend["t0"] >= a.grow_frames)[0]
+            if len(due):
+                keep_rows = np.ones(len(pend["X"]), bool); add = []
+                for i in due:
+                    keep_rows[i] = False; okc = True
+                    for ci in (0, 1):
+                        fs_ = [f for f in range(pend["t0"][i] + 1, t + 1) if solved.get(f) and not np.isnan(pend["tr"][ci][i, f, 0])]
+                        if len(fs_) < a.grow_frac * a.grow_frames: okc = False; break
+                        Y = np.array([R_s[f] @ pend["X"][i] + t_s[f] for f in fs_]); Z = Y @ an.Rc[ci].T + an.tc[ci]; z = np.maximum(Z[:, 2], 1e-4)
+                        uv = Z[:, :2] / z[:, None] * [an.Kc[ci][0, 0], an.Kc[ci][1, 1]] + [an.Kc[ci][0, 2], an.Kc[ci][1, 2]]
+                        e_ = np.linalg.norm(uv - pend["tr"][ci][i, fs_], axis=1)
+                        if np.median(e_) > a.grow_px or np.percentile(e_, 90) > 2.5 * a.grow_px: okc = False; break
+                    if okc: add.append(pend["X"][i])
+                if add:
+                    add = np.array(add); j_, d_, _ = an.assoc(np.eye(3), np.zeros(3), add, a.acc_dup * 1e-3) if len(an.X) else (np.full(len(add), -1), None, None)
+                    add = add[j_ < 0]
+                    if len(add) and len(an.X) + len(add) <= a.model_max: an.set_model(np.vstack([an.X, add])); n_grow_ok += len(add)
+                pend = dict(X=pend["X"][keep_rows], t0=pend["t0"][keep_rows], tr={ci: pend["tr"][ci][keep_rows] for ci in (0, 1)}, alive=pend["alive"][keep_rows])
+            # (2) fresh candidates from this frame's cloud (reciprocal matches), expressed in the model frame with the solved pose
+            if clouds is not None and t in clouds and (t - b) % a.grow_every == 0 and len(pend["X"]) < a.grow_pending_max:
+                Sw, s1, s2 = clouds[t]; srcs = clouds_src[t] if clouds_src is not None else np.ones(len(Sw), np.int8)
+                selc = np.isin(srcs, [1, 3]) if a.grow_src == "recip" else np.ones(len(Sw), bool)
+                if selc.any():
+                    Xm = (Sw[selc] - t_s[t]) @ R_s[t]
+                    near_model = an.assoc(np.eye(3), np.zeros(3), Xm, a.acc_dup * 1e-3)[0] >= 0 if len(an.X) else np.zeros(len(Xm), bool)
+                    far = np.linalg.norm(Xm - an.X.mean(0), axis=1) > a.acc_near * 1e-3 * 10 if len(an.X) else np.zeros(len(Xm), bool)
+                    pick = np.where(~near_model & ~far)[0][: a.grow_max]
+                    if len(pick):
+                        n_grow_cand += len(pick); m_ = len(pick)
+                        trn = {ci: np.full((m_, T, 2), np.nan, np.float32) for ci in (0, 1)}
+                        trn[0][:, t] = s1[selc][pick]; trn[1][:, t] = s2[selc][pick]
+                        pend = dict(X=np.vstack([pend["X"], Xm[pick]]), t0=np.concatenate([pend["t0"], np.full(m_, t, int)]),
+                                    tr={ci: np.concatenate([pend["tr"][ci], trn[ci]]) for ci in (0, 1)}, alive=np.concatenate([pend["alive"], np.ones(m_, bool)]))
         if ext_tracks and t == b + a.extend:
             newX = []
             for ci_, c in enumerate(("ext1", "ext2")):
@@ -602,9 +1039,24 @@ def run(a):
                         uvp_ = (an.Kc[ci_] @ (Zc / Zc[2]))[:2]; rp.append(np.linalg.norm(uvp_ - tr1[j]))
                     if np.median(rp) < a.extend_px and np.max(rp) < 2.5 * a.extend_px: newX.append(Xo)
             if newX:
-                an.X = np.vstack([an.X, np.array(newX)]); n_extended = len(newX)
+                an.set_model(np.vstack([an.X, np.array(newX)])); n_extended = len(newX)
+        if solved.get(t):
+            cen_e = an.X.mean(0); c_e = R_s[t] @ cen_e + t_s[t]; row.update(c_x=c_e[0], c_y=c_e[1], c_z=c_e[2])
         rows.append(row)
-    rec.update(K_src=ksrc, T=T, birth=b, exit=e, window_end=t_end, n_seeds=N, n_keyframes=n_kf, n_extended=n_extended, seed_mask=rec_seed_mask, elapsed_s=time.time() - t_start,
+    if a.out_tbeta < 1.0 or a.out_rbeta < 1.0:   # causal output smoothing: state = previous OUTPUTS, prediction = constant velocity
+        cen0 = an.X[:N].mean(0) if len(an.X) >= N else an.X.mean(0); Ro, to = {}, {}; w_f = None; v_f = None; prev = None
+        for t_ in sorted(k_ for k_ in R_s if solved.get(k_)):
+            Rm_, tm_ = R_s[t_], t_s[t_]; cm_ = Rm_ @ cen0 + tm_
+            if prev is None or t_ - prev != 1:
+                Ro[t_], to[t_] = Rm_, tm_; w_f = None; v_f = None; prev = t_; continue
+            w_meas = Rotation.from_matrix(Rm_ @ Ro[prev].T).as_rotvec(); w_f = w_meas if w_f is None else (1 - a.out_rbeta) * w_f + a.out_rbeta * w_meas
+            R_new = ortho(Rotation.from_rotvec(w_f).as_matrix() @ Ro[prev])
+            if a.out_rpull > 0: R_new = ortho(Rotation.from_rotvec(a.out_rpull * Rotation.from_matrix(Rm_ @ R_new.T).as_rotvec()).as_matrix() @ R_new)
+            c_prev = Ro[prev] @ cen0 + to[prev]; c_pred = c_prev + (v_f if v_f is not None else np.zeros(3))
+            c_new = c_pred + a.out_tbeta * (cm_ - c_pred); v_f = c_new - c_prev
+            Ro[t_], to[t_] = R_new, c_new - R_new @ cen0; prev = t_
+        R_s.update(Ro); t_s.update(to)
+    rec.update(K_src=ksrc, T=T, birth=b, exit=e, window_end=t_end, n_seeds=N, n_keyframes=n_kf, n_extended=n_extended, seed_mask=rec_seed_mask, stereo=rec_stereo, n_accumulated=n_acc, n_model_final=len(an.X), n_grow_cand=n_grow_cand, n_grow_ok=n_grow_ok, n_retired=n_retired, n_coast=n_coast, n_v2=n_v2, cand_src=np.bincount(cand_src, minlength=4).tolist(), f2=({k_: f2[k_] for k_ in ('checks', 'n_in', 'done', 'kept_x1', 'kept_src') if k_ in f2} if f2 is not None else None), elapsed_s=time.time() - t_start,
                refs_final_median=float(np.median([len(r) for r in refs])) if refs and len(refs[0]) else 0.0)
     return rec, rows, (R_s, t_s, solved, an.X[:N].mean(0)), b, t_end, store
 
@@ -617,6 +1069,15 @@ def evaluate(rec, rows, sol, b, t_end, store):
     P0 = gt[b]; frames = [t for t in range(b, t_end + 1) if solved.get(t) and t in gt]
     pred = {t: se3(R_s[t], t_s[t]) @ P0 for t in frames}
     byf = {r["frame"]: r for r in rows}
+    cen0 = sol[3] if len(sol) > 3 else None
+    if cen0 is not None:
+        for r in rows:
+            t = r["frame"]
+            if t not in gt: continue
+            Mg = gt[t] @ np.linalg.inv(gt[b]); c_true = Mg[:3, :3] @ cen0 + Mg[:3, 3]
+            for key in ("c", "c_v2", "c_hull"):
+                if f"{key}_x" in r and r[f"{key}_x"] == r[f"{key}_x"]:
+                    r[f"{key}_err_cm"] = float(np.linalg.norm(np.array([r[f"{key}_x"], r[f"{key}_y"], r[f"{key}_z"]]) - c_true) * 100)
     for t in range(b + 1, t_end + 1):
         r = byf.get(t)
         if r is None: continue
@@ -655,6 +1116,31 @@ ARGS = [
     ("--seeds", dict(default=SEEDS)), ("--tracks_v2", dict(default=V2)), ("--events", dict(default=EVENTS)),
     ("--obs", dict(default="dense", choices=["dense", "tracks", "both", "mklt", "mklt+dense", "mflow"], help="observation source: DISK dense search, external tracks of the seeds, both, model-based LK (templates re-centred on the model projection every frame), or model-based LK + dense anchors")),
     ("--obs_tracks", dict(default=None, help="--obs tracks|both: <ep>/{ext1,ext2}_f<b>.npz seeded on --seeds (first N columns)")),
+    ("--window", dict(default="full", choices=["full", "fk"], help="full = birth frame to the episode end (store frames); fk = to the FK exit")),
+    ("--stereo", dict(default=None, help="DIR of stereo_clouds.py outputs (<ep>.npz): per-frame cross-view 3D points")),
+    ("--model", dict(default="seeds", choices=["seeds", "stereo", "both"], help="birth model source: guided DISK seeds, the stereo birth cloud, or both")),
+    ("--model_vox", dict(type=float, default=2.0, help="model voxel size (mm) for de-duplication")), ("--model_max", dict(type=int, default=3000)),
+    ("--stereo_sim", dict(type=float, default=0.5)), ("--stereo_epi", dict(type=float, default=2.5)),
+    ("--stereo_w", dict(type=float, default=1.0, help="weight of the stereo point-to-plane residual (px per mm); 0 = stereo not used in the solve")),
+    ("--stereo_assoc", dict(type=float, default=12.0, help="association radius (mm) stereo point -> model")), ("--stereo_iters", dict(type=int, default=2)),
+    ("--stereo_min", dict(type=int, default=20, help="min associated stereo points for a stereo-only solve / ok")), ("--stereo_ok_mm", dict(type=float, default=6.0)),
+    ("--stereo_vote", dict(type=float, default=0.2, help="hypothesis score: each associated stereo point counts this much (LK inlier = 1)")),
+    ("--acc_frames", dict(type=int, default=20, help="accumulate stereo points into the model during the first K frames (0 = never)")),
+    ("--acc_rms", dict(type=float, default=0.0, help="also accumulate whenever the stereo rms (mm) is below this (0 = off)")),
+    ("--acc_near", dict(type=float, default=15.0, help="new points must lie within this (mm) of the current model")), ("--acc_dup", dict(type=float, default=2.0)),
+    ("--cands", dict(default="seeds", choices=["seeds", "recip", "both", "guided_only", "ext_only"], help="birth candidates: guided DISK seeds, MASt3R reciprocal matches of the v2 cloud file (--stereo DIR), both, or every cloud match")),
+    ("--cands_max", dict(type=int, default=120)),
+    ("--cands_ext", dict(type=int, default=0, help="in-process DISK-guided matching at birth inside the RobotSeg mask dilated by this many px (0 = off); adds candidates on the mount/housing/clips outside the black body")),
+    ("--cands_ext_side", dict(type=int, default=640)),
+    ("--retire", dict(type=int, default=0, help="retire a model point after this many consecutive solved frames with residual > tau_out in a view where it was observed (0 = never)")),
+    ("--f2_frames", dict(type=int, default=0, help="GT-free phantom filter: causal RANSAC over the plain two-view LK chains of all candidates, checked at K/3, 2K/3 and K frames after birth (0 = off)")),
+    ("--f2_samples", dict(type=int, default=300)), ("--f2_k", dict(type=int, default=5)), ("--f2_px", dict(type=float, default=1.0)), ("--f2_frac", dict(type=float, default=0.8)),
+    ("--grow_frames", dict(type=int, default=0, help="model growth: fresh cloud matches become candidates, LK-chained for K frames and admitted when consistent with the solved poses (0 = off)")),
+    ("--grow_every", dict(type=int, default=4)), ("--grow_max", dict(type=int, default=30)), ("--grow_pending_max", dict(type=int, default=300)),
+    ("--grow_px", dict(type=float, default=1.0)), ("--grow_frac", dict(type=float, default=0.7)), ("--grow_src", dict(default="recip", choices=["recip", "all"])),
+    ("--model_labels", dict(default=None, choices=[None, "all", "base"], help="GT DIAGNOSTIC: the model = FK label points at b (positions_v1)")),
+    ("--labels_vis", dict(action="store_true", help="GT DIAGNOSTIC with --model_labels: only label points visible (front, in frame) in that view at both frames are tracked")),
+    ("--f1_m3d", dict(type=float, default=0.0, help="GT-free phantom filter on cloud matches: keep s*m3d <= this (m); 0 = off")), ("--f1_pconf", dict(type=float, default=2.0)),
     ("--min_seeds", dict(type=int, default=4)),
     ("--flow_model", dict(default="large", choices=["large", "small"])), ("--flow_iters", dict(type=int, default=12)),
     ("--flow_margin", dict(type=int, default=48)), ("--flow_fb", dict(type=float, default=1.0, help="mflow forward-backward consistency threshold (px)")),
@@ -667,6 +1153,9 @@ ARGS = [
     ("--extend_max_dist", dict(type=float, default=0.15)), ("--extend_px", dict(type=float, default=1.0)),
     ("--lk_win", dict(type=int, default=31, help="model-LK window (px) at the RAIL apparent size, scaled down for smaller grippers")), ("--lk_levels", dict(type=int, default=3)),
     ("--lk_fb", dict(type=float, default=1.0, help="model-LK forward-backward threshold (px)")),
+    ("--lk_mineig", dict(type=float, default=1e-4, help="OpenCV minEigThreshold: drop LK features whose spatial-gradient matrix is too weak (texture-less)")),
+    ("--lk_noinit", dict(action="store_true", help="model-LK starts at the previous position instead of the constant-velocity prediction")),
+    ("--lk_clip", dict(type=int, default=0, help="saturate gray levels above this before model-LK (0 = off)")),
     ("--aperture", dict(action="store_true", help="whiten model-LK residuals by the template structure tensor (edge points constrain only their normal)")), ("--aperture_eps", dict(type=float, default=0.05)),
     ("--kf", dict(action="store_true", help="model-LK from the current KEYFRAME image (templates at the model projection under the keyframe pose) instead of the previous frame")),
     ("--kf_gap", dict(type=int, default=1000, help="new keyframe at most every N frames")), ("--kf_multi", dict(action="store_true", help="model-LK from the latest keyframe + birth + the keyframe closest in pose to the prediction, pooled")),
@@ -685,6 +1174,22 @@ ARGS = [
     ("--fuse_rot", dict(type=float, default=1.0, help="filter gain on the measured rotation vs the constant-velocity prediction (1 = no filtering)")),
     ("--fuse_pos", dict(type=float, default=1.0, help="filter gain on the measured model-centroid position")),
     ("--rot_ft", dict(action="store_true", help="HYBRID: rotation per frame from CUT3R finetuned (augfull_lr1e5 online preds, relative to b, via GT(b)); the rig solves translation only")),
+    ("--rot_ft_beta", dict(type=float, default=1.0, help="causal smoothing of the CUT3R rotation increments (1 = raw)")),
+    ("--rot_ft_tbeta", dict(type=float, default=1.0, help="with --rot_ft: gain on the measured centroid vs the constant-velocity prediction (1 = raw)")),
+    ("--out_tbeta", dict(type=float, default=1.0, help="causal OUTPUT smoothing of the centroid (gain on the measurement vs constant velocity; the tracker state is untouched)")),
+    ("--out_rbeta", dict(type=float, default=1.0, help="causal OUTPUT smoothing of the rotation increments")), ("--out_rpull", dict(type=float, default=0.0)),
+    ("--rot_ft_pull", dict(type=float, default=0.0, help="per-frame pull of the smoothed rotation toward the absolute CUT3R rotation")),
+    ("--rot_ft_fallback", dict(action="store_true", help="with --rot_ft: never leave a frame unsolved (loose re-solve, then hold)")),
+    ("--coast", dict(type=int, default=-1, help="with --rot_ft: emit the fused rotation on unsolved frames with constant-velocity translation for this many frames, then hold the position (-1 = off)")),
+    ("--hull_reloc", dict(action="store_true", help="with --rot_ft: Track-On v2 hull position (closest point of the two median rays) as a translation hypothesis every frame and as the coast position when LK is lost")),
+    ("--v2_model", dict(type=int, default=0, help="Track-On v2 points as model points: each single-view track over the first K solved frames is triangulated in the object frame (motion parallax); afterwards their Track-On positions are observations (0 = off)")),
+    ("--v2_min_obs", dict(type=int, default=8)), ("--v2_min_parallax", dict(type=float, default=1.5)), ("--v2_max_dist", dict(type=float, default=0.2)), ("--v2_px", dict(type=float, default=1.0)),
+    ("--v2_w", dict(type=float, default=0.5, help="weight of a Track-On observation relative to a model-LK observation (variance ratio)")),
+    ("--v2_pull", dict(type=float, default=0.0, help="per-frame pull of the LK centroid toward the Track-On-only translation (0 = log only)")), ("--v2_min_pull", dict(type=int, default=6)),
+    ("--pull_gate", dict(type=float, default=10.0, help="apply a pull only when the cue is within this many cm of the LK centroid")),
+    ("--hull_pull", dict(type=float, default=0.0, help="per-frame pull of the LK centroid toward the Track-On hull position (0 = log only)")),
+    ("--hull_coast", dict(action="store_true", help="also use the hull position as the coast position (unconfirmed; off = hull only as a re-acquisition hypothesis)")),
+    ("--coast_emit", dict(type=int, default=1000000, help="emit at most this many consecutive BLIND coast frames (no hull position); later blind frames are left unsolved for the consumer to mask")),
     ("--vel_beta", dict(type=float, default=1.0, help="velocity smoothing for the prediction: v <- (1-beta) v + beta * last increment (1 = last increment only)")),
     ("--jump_deg", dict(type=float, default=0.0, help="reject a solve deviating more than this from the prediction; 0 = off")),
     ("--mem", dict(type=int, default=6, help="appearance memory size per point (0 = birth descriptors only)")),
