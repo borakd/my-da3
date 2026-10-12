@@ -398,10 +398,13 @@ def run(a):
     store = f"{rt.STORE_ROOT}/{ep}/dense/cam"; n_store = rt.count_files(store, ".npz")
     T = n_store if a.window == "full" else min(e, n_store)
     sf = f"{a.seeds}/{ep}/matches.npz"
-    if not os.path.isfile(sf): raise rt.Failure("no birth seeds (fewer than 3 gated matches)")
-    zs = np.load(sf); x = {"ext1": zs["x1"].astype(np.float64), "ext2": zs["x2"].astype(np.float64)}
-    N = len(x["ext1"])
-    if N < a.min_seeds: raise rt.Failure(f"fewer than {a.min_seeds} birth seeds ({N})")
+    if not os.path.isfile(sf):
+        if not (a.hull_only_fallback and a.rot_ft): raise rt.Failure("no birth seeds (fewer than 3 gated matches)")
+        x = {"ext1": np.zeros((0, 2)), "ext2": np.zeros((0, 2))}; N = 0
+    else:
+        zs = np.load(sf); x = {"ext1": zs["x1"].astype(np.float64), "ext2": zs["x2"].astype(np.float64)}; N = len(x["ext1"])
+    if N < a.min_seeds and not (a.hull_only_fallback and a.rot_ft): raise rt.Failure(f"fewer than {a.min_seeds} birth seeds ({N})")
+    hull_only = N < a.min_seeds
     ext = None
     if a.obs in ("tracks", "both"):
         ext = {}
@@ -415,7 +418,10 @@ def run(a):
     T = min(T, min(len(gray[c]) for c in gray)); t_end = T - 1
     if t_end - b < 2: raise rt.Failure(f"window too short (b={b}, T={T})")
     # birth model (world = robot base frame at b)
-    Xh = cv2.triangulatePoints(P["ext1"], P["ext2"], x["ext1"].T, x["ext2"].T); X_B = (Xh[:3] / Xh[3]).T
+    if N > 0:
+        Xh = cv2.triangulatePoints(P["ext1"], P["ext2"], x["ext1"].T, x["ext2"].T); X_B = (Xh[:3] / Xh[3]).T
+    else:
+        X_B = np.zeros((1, 3))          # placeholder model for the hull-only degraded mode
     clouds = None; rec_stereo = None; clouds_src = None
     if a.stereo:
         cf = f"{a.stereo}/{ep}.npz"
@@ -615,6 +621,29 @@ def run(a):
     else:
         gray_lk = gray
     c_hull_b = hull3d(b) if a.hull_reloc else None
+    if hull_only:
+        # DEGRADED MODE (no usable birth seeds): rotation = smoothed CUT3R-ft increments, translation = Track-On hull position
+        # (calibrated at birth: the hull point is the reference point), constant velocity then hold when the hull is missing.
+        if c_hull_b is None or Rft is None: raise rt.Failure(f"fewer than {a.min_seeds} birth seeds ({N}) and no hull position at birth")
+        R_s, t_s, solved = {b: np.eye(3)}, {b: np.zeros(3)}, {b: True}; rows = []; w_hat = None; Rfu = {}; last = b; v_ = np.zeros(3); n_coast = 0
+        for t in range(b + 1, t_end + 1):
+            if t not in Rft: break
+            if a.rot_ft_beta < 1.0 and (t - 1) in Rft:
+                w_meas = Rotation.from_matrix(Rft[t] @ Rft[t - 1].T).as_rotvec(); w_hat = w_meas if w_hat is None else (1 - a.rot_ft_beta) * w_hat + a.rot_ft_beta * w_meas
+                Rfu[t] = ortho(Rotation.from_rotvec(w_hat).as_matrix() @ Rfu.get(t - 1, Rft[t - 1]))
+                if a.rot_ft_pull > 0: dv = Rotation.from_matrix(Rft[t] @ Rfu[t].T).as_rotvec(); Rfu[t] = ortho(Rotation.from_rotvec(a.rot_ft_pull * dv).as_matrix() @ Rfu[t])
+                Rp = Rfu[t]
+            else:
+                Rp = Rft[t]
+            ch_ = hull3d(t); c_last = R_s[last] @ c_hull_b + t_s[last]
+            if ch_ is not None and np.linalg.norm(ch_ - c_last) < a.pull_gate * 1e-2 * 3:
+                c_new = ch_; v_ = c_new - c_last; hyp = "hull_only"
+            else:
+                c_new = c_last + v_ * (1 if t - last <= a.coast else 0); hyp = "hull_only+coast"; n_coast += 1
+            R_s[t], t_s[t], solved[t] = Rp, c_new - Rp @ c_hull_b, True; last = t
+            rows.append(dict(frame=t, fs=1, hyp=hyp, n_obs=0, n_inl=0, solved=True))
+        rec.update(K_src=ksrc, T=T, birth=b, exit=e, window_end=t_end, n_seeds=N, hull_only=True, n_coast=n_coast, elapsed_s=time.time() - t_start)
+        return rec, rows, (R_s, t_s, solved, c_hull_b), b, t_end, store
     R_s, t_s, solved = {b: np.eye(3)}, {b: np.zeros(3)}, {b: True}
     last = b; rows = []; kf = b; kf_inl = None; n_kf = 0; kfs = [b]; vel = None; n_acc = 0; w_hat = None; Rfu = {}; bad_cnt = None; n_retired = 0; n_coast = 0; blind = 0; n_v2 = 0
     pend = dict(X=np.zeros((0, 3)), t0=np.zeros(0, int), tr={0: np.zeros((0, T, 2), np.float32), 1: np.zeros((0, T, 2), np.float32)}, alive=np.zeros(0, bool))
@@ -1187,6 +1216,7 @@ ARGS = [
     ("--v2_w", dict(type=float, default=0.5, help="weight of a Track-On observation relative to a model-LK observation (variance ratio)")),
     ("--v2_pull", dict(type=float, default=0.0, help="per-frame pull of the LK centroid toward the Track-On-only translation (0 = log only)")), ("--v2_min_pull", dict(type=int, default=6)),
     ("--pull_gate", dict(type=float, default=10.0, help="apply a pull only when the cue is within this many cm of the LK centroid")),
+    ("--hull_only_fallback", dict(action="store_true", help="scenes without usable birth seeds: wrist-camera rotation + Track-On hull translation (degraded mode, every scene gets a pose)")),
     ("--hull_pull", dict(type=float, default=0.0, help="per-frame pull of the LK centroid toward the Track-On hull position (0 = log only)")),
     ("--hull_coast", dict(action="store_true", help="also use the hull position as the coast position (unconfirmed; off = hull only as a re-acquisition hypothesis)")),
     ("--coast_emit", dict(type=int, default=1000000, help="emit at most this many consecutive BLIND coast frames (no hull position); later blind frames are left unsolved for the consumer to mask")),
