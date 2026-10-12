@@ -613,7 +613,7 @@ def run(a):
     Rft = None
     if a.rot_ft:
         ftp = rt.load_poses(f"{rt.CUT3R_ROOT}/{ep}/camera", t_end + 1, "CUT3R")
-        Rgb = rt.load_poses(f"{rt.STORE_ROOT}/{ep}/dense/cam", b + 1, "store GT")[b][:3, :3]   # birth frame only
+        Tgb = rt.load_poses(f"{rt.STORE_ROOT}/{ep}/dense/cam", b + 1, "store GT")[b]; Rgb, p_lb = Tgb[:3, :3], Tgb[:3, 3]   # birth frame only
         Rft = {t_: ortho(Rgb @ ftp[b][:3, :3].T @ ftp[t_][:3, :3] @ Rgb.T) for t_ in ftp if t_ >= b}
     Gb = {c: gray[c][b].astype(np.float32) for c in ("ext1", "ext2")}; Mb = {c: bmask[c].astype(np.float32) for c in bmask}
     if a.lk_clip > 0:   # saturate highlights: LK then follows edges and matte structure, not the specular blobs
@@ -646,6 +646,7 @@ def run(a):
         return rec, rows, (R_s, t_s, solved, c_hull_b), b, t_end, store
     R_s, t_s, solved = {b: np.eye(3)}, {b: np.zeros(3)}, {b: True}
     last = b; rows = []; kf = b; kf_inl = None; n_kf = 0; kfs = [b]; vel = None; n_acc = 0; w_hat = None; Rfu = {}; bad_cnt = None; n_retired = 0; n_coast = 0; blind = 0; n_v2 = 0
+    ft_ratio = []; coasted = set()   # --coast_ft: rig-vs-CUT3R lens displacement ratios on consecutive real solves; frames emitted by coasting
     pend = dict(X=np.zeros((0, 3)), t0=np.zeros(0, int), tr={0: np.zeros((0, T, 2), np.float32), 1: np.zeros((0, T, 2), np.float32)}, alive=np.zeros(0, bool))
     n_grow_cand = n_grow_ok = 0
     for t in range(b + 1, t_end + 1):
@@ -997,13 +998,22 @@ def run(a):
             ch_ = hull3d(t) if (c_hull_b is not None and a.hull_coast) else None
             if ch_ is not None:
                 t_new = ch_ - Rp @ c_hull_b; tag_ = "+coast_hull"; blind = 0
+            elif a.coast_ft and (t - 1) in R_s and t in ftp and (t - 1) in ftp:
+                # WRIST DEAD RECKONING: the exterior rig is blind, so the lens position follows the wrist camera's own CUT3R-ft translation
+                # increment (camera frame at t-1, mapped to the world through the rig's rotation; CUT3R-ft is not metric: online scale)
+                s_ft = float(np.median(ft_ratio[-100:])) if len(ft_ratio) >= 10 else a.coast_ft_scale
+                dp = (R_s[t - 1] @ Rgb) @ (ftp[t - 1][:3, :3].T @ (ftp[t][:3, 3] - ftp[t - 1][:3, 3]))
+                t_new = (R_s[t - 1] @ p_lb + t_s[t - 1] + s_ft * dp) - Rp @ p_lb; tag_ = "+coast_ft"; blind = blind + 1
             else:
                 c_new = c_last_ + v_ * min(steps, a.coast); t_new = c_new - Rp @ cen_; tag_ = "+coast_hold"; blind = blind + 1
             if blind <= a.coast_emit:
-                R_s[t], t_s[t], solved[t] = Rp, t_new, True; row.update(hyp=row.get("hyp", "") + tag_, solved=True); n_coast += 1
+                R_s[t], t_s[t], solved[t] = Rp, t_new, True; row.update(hyp=row.get("hyp", "") + tag_, solved=True); n_coast += 1; coasted.add(t)
             # the tracker keeps anchoring on the last REAL solve: do not move `last`
         if not solved.get(t):
             solved[t] = False
+        if a.coast_ft and solved.get(t) and solved.get(t - 1) and t not in coasted and (t - 1) not in coasted and Rft is not None and t in ftp and (t - 1) in ftp:
+            d_rig = np.linalg.norm((R_s[t] @ p_lb + t_s[t]) - (R_s[t - 1] @ p_lb + t_s[t - 1])); d_ft = np.linalg.norm(ftp[t][:3, 3] - ftp[t - 1][:3, 3])
+            if d_rig > 0.005 and d_ft > 1e-6: ft_ratio.append(d_rig / d_ft)
         if a.grow_frames > 0 and solved.get(t):
             # (1) candidates whose chains are due: consistency with the SOLVED poses over their window, both views
             due = np.where(t - pend["t0"] >= a.grow_frames)[0]
@@ -1085,7 +1095,7 @@ def run(a):
             c_new = c_pred + a.out_tbeta * (cm_ - c_pred); v_f = c_new - c_prev
             Ro[t_], to[t_] = R_new, c_new - R_new @ cen0; prev = t_
         R_s.update(Ro); t_s.update(to)
-    rec.update(K_src=ksrc, T=T, birth=b, exit=e, window_end=t_end, n_seeds=N, n_keyframes=n_kf, n_extended=n_extended, seed_mask=rec_seed_mask, stereo=rec_stereo, n_accumulated=n_acc, n_model_final=len(an.X), n_grow_cand=n_grow_cand, n_grow_ok=n_grow_ok, n_retired=n_retired, n_coast=n_coast, n_v2=n_v2, cand_src=np.bincount(cand_src, minlength=4).tolist(), f2=({k_: f2[k_] for k_ in ('checks', 'n_in', 'done', 'kept_x1', 'kept_src') if k_ in f2} if f2 is not None else None), elapsed_s=time.time() - t_start,
+    rec.update(K_src=ksrc, T=T, birth=b, exit=e, window_end=t_end, n_seeds=N, n_keyframes=n_kf, n_extended=n_extended, seed_mask=rec_seed_mask, stereo=rec_stereo, n_accumulated=n_acc, n_model_final=len(an.X), n_grow_cand=n_grow_cand, n_grow_ok=n_grow_ok, n_retired=n_retired, n_coast=n_coast, ft_scale=(float(np.median(ft_ratio[-100:])) if len(ft_ratio) >= 10 else None), n_v2=n_v2, cand_src=np.bincount(cand_src, minlength=4).tolist(), f2=({k_: f2[k_] for k_ in ('checks', 'n_in', 'done', 'kept_x1', 'kept_src') if k_ in f2} if f2 is not None else None), elapsed_s=time.time() - t_start,
                refs_final_median=float(np.median([len(r) for r in refs])) if refs and len(refs[0]) else 0.0)
     return rec, rows, (R_s, t_s, solved, an.X[:N].mean(0)), b, t_end, store
 
@@ -1219,6 +1229,8 @@ ARGS = [
     ("--hull_only_fallback", dict(action="store_true", help="scenes without usable birth seeds: wrist-camera rotation + Track-On hull translation (degraded mode, every scene gets a pose)")),
     ("--hull_pull", dict(type=float, default=0.0, help="per-frame pull of the LK centroid toward the Track-On hull position (0 = log only)")),
     ("--hull_coast", dict(action="store_true", help="also use the hull position as the coast position (unconfirmed; off = hull only as a re-acquisition hypothesis)")),
+    ("--coast_ft", dict(action="store_true", help="with --coast: on blind frames (no hull) follow the wrist camera's own CUT3R-ft translation increments (dead reckoning, online scale from the solved frames) instead of constant velocity then hold")),
+    ("--coast_ft_scale", dict(type=float, default=0.16, help="prior metric scale of the CUT3R-ft translation until 10 solved increments are available (dev96 median 0.16)")),
     ("--coast_emit", dict(type=int, default=1000000, help="emit at most this many consecutive BLIND coast frames (no hull position); later blind frames are left unsolved for the consumer to mask")),
     ("--vel_beta", dict(type=float, default=1.0, help="velocity smoothing for the prediction: v <- (1-beta) v + beta * last increment (1 = last increment only)")),
     ("--jump_deg", dict(type=float, default=0.0, help="reject a solve deviating more than this from the prediction; 0 = off")),
